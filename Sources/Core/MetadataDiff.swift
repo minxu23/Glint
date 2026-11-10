@@ -157,7 +157,11 @@ let iimTimeKeys: Set<String> = Set([kCGImagePropertyIPTCTimeCreated,
 /// 别的一律原样返回、偏移为 nil——宽松的形状判断就是上面注释里说的那个口子。
 func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     let chars = Array(value)
-    if chars.count == 6, chars.allSatisfy(\.isNumber) { return (value, nil) }
+    // 不带偏移的裸 `HHMMSS` 不用单独处理：它的长度 6 本来就不在下面那组
+    // 合法总长里，会和其他不该拆的值落到同一个返回点。这里曾经有一条
+    // 「count == 6 且全是数字就原样返回」的快路径，实测去掉前后对任意
+    // 6 字符输入的结果完全一致——纯冗余，删了。
+    //
     // `HHMMSS` 后面紧跟一个合规偏移才拆。偏移的形状与范围交给 UTCOffset 判断，
     // 源侧与目标侧用同一把尺子——"一侧严一侧松"是上一轮漏掉的那条。
     //
