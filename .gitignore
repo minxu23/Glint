@@ -1,0 +1,15 @@
+# 构建产物（Makefile 的 clean 目标清的就是这些）
+/jpeg2heif
+/JPEG2HEIF.app/
+/Tests/fixture
+/Tests/probe
+/Tests/uisnapshot
+/Tests/unit-test
+/Tests/guimodel-test
+/Tests/mangle-tool
+/Tests/.work/
+
+# 真实参考照片的转换产物；.JPG 原件是不可再生的输入样本，要入库
+/test_pic/*.heic
+
+.DS_Store

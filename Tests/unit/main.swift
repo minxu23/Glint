@@ -1,0 +1,334 @@
+// 纯逻辑单元测试：校验器判定两个元数据值"是否算变化"的规则。
+// 这块规则很容易在两个方向上出错——太严就刷出一堆假差异，太松就把真的丢失藏起来，
+// 所以正反两类用例都要有。
+
+import Foundation
+import ImageIO
+
+// 下面这些 expectXxx 都是同一个形状：喂一组输入给某条判定规则，比对结果。
+// 打印与失败计数一律交给 harness 的 checkRule——以前每个都自己写一遍
+// print("  ✗ …") + failedChecks += 1，五份近乎相同的代码绕开了 pass/fail，
+// 改一处格式就得改五处，漏掉某个 failedChecks 还会让失败悄悄变成通过。
+func expect(_ a: String, _ b: String, same expected: Bool, _ why: String) {
+    checkRule("\(a) vs \(b)", valuesMatch(a, b), expected, why)
+}
+
+print("flatten：两种键类型都要能下钻")
+// flatten 只留了一条字典分支：String 键会桥接成 CFString，被同一个 as? 接走。
+// 这组用例守的正是这件事——桥接哪天不管用了，下面「String 键」那条会红。
+// 也守着 flatten 整个别哑掉：它一哑，元数据集合会整块变空，而「校验无差异」
+// 照样通过——比较的两边一起空了，差异自然是零。
+func flattened(_ value: Any) -> [String: String] {
+    var out: [String: String] = [:]
+    flatten(value, into: &out)
+    return out
+}
+let cfKeyed = flattened([kCGImagePropertyExifDictionary:
+                         [kCGImagePropertyExifUserComment: "备注\0\0"]] as [CFString: Any])
+check("CFString 键的字典下钻到叶子", cfKeyed["{Exif}/UserComment"], "备注")
+check("不多出别的键", cfKeyed.count, 1)
+let nsKeyed = flattened(NSDictionary(dictionary: ["XMP": ["dc:title": "标题"]]) as! [String: Any])
+check("String 键的字典下钻到叶子", nsKeyed["XMP/dc:title"], "标题")
+check("数组带上下标", flattened(["{GPS}": ["Latitude": [1, 2]]])["{GPS}/Latitude[1]"], "2")
+
+print("数值比较：应当忽略的重编码噪声")
+// 佳能 R5 Mark II 的真实数据：ImageIO 写入时把有理数逼近成了另一个分母。
+expect("8192000/1419", "3769821/653", same: true, "R5 II 的 FocalPlaneXResolution 重新逼近")
+expect("5464000/947", "1811717/314", same: true, "R5 II 的 FocalPlaneYResolution 重新逼近")
+expect("5773.079633544749", "5773.079632465544", same: true, "同一个值的浮点表示")
+expect("-15/10", "-3/2", same: true, "同值不同约分程度")
+expect("0", "0.0", same: true, "整数与小数写法")
+expect("1/25", "0.04", same: true, "分数与小数写法")
+
+print("数值比较：必须报出来的真实变化")
+expect("400", "401", same: false, "ISO 变了")
+expect("1/25", "1/26", same: false, "快门速度变了")
+expect("50.879288", "50.879289", same: false, "GPS 纬度差约 10 厘米也要报")
+expect("5773.08", "5774.08", same: false, "焦平面分辨率真的变了")
+
+print("非数值一律逐字符比较")
+expect("N", "N", same: true, "相同的方位标识")
+expect("N", "S", same: false, "方位标识变了")
+expect("2024:09:15 18:42:07", "2024:09:15 18:42:07", same: true, "相同的拍摄时间")
+expect("2024:09:15 18:42:07", "2024:09:15 18:42:08", same: false, "拍摄时间差一秒")
+expect("Canon EOS R5m2", "Canon EOS R5", same: false, "机型变了")
+
+print("尾部填充不算差异")
+expect(trimPadding("备注\0\0\0"), trimPadding("备注\0\0\0\0\0"), same: true, "NUL 填充长度不同")
+expect(trimPadding("备注   "), trimPadding("备注"), same: true, "尾部空格")
+
+print("等价字段必须真的带着同一个值")
+// 曾经只判断"等价键存在"：源里 {IPTC}/DateCreated 丢了，只要目标有个
+// DateTimeOriginal 就放过，哪怕它写着另一个年份。这组用例守的就是后半句。
+// 注：端到端样本造不出来——ImageIO 写 JPEG 时会强制把 IPTC 日期同步成 EXIF
+// 日期，不允许二者不一致；但相机/exiftool/Photoshop 写的文件可以，所以这条
+// 判断在真实文件上有意义。
+func expectCarried(_ source: String, _ equivalent: String, _ want: Bool, _ why: String) {
+    checkRule("\(source) vs \(equivalent)", carriesSameValue(source, equivalent), want, why)
+}
+expectCarried("20240915", "2024:09:15 18:42:07", true, "IIM 日期被 EXIF 时间戳承载")
+expectCarried("184207", "2024:09:15 18:42:07", true, "IIM 时间被 EXIF 时间戳承载")
+expectCarried("20240915", "2024-09-15T18:42:07.42", true, "跨到 XMP 的格式也认")
+expectCarried("20240915", "2020-01-01T00:00:00", false, "等价字段存在但是另一个年份——必须报")
+expectCarried("184207", "2024:09:15 09:00:00", false, "日期对但时间不对——必须报")
+expectCarried("", "2024:09:15 18:42:07", false, "源值没有数字")
+expectCarried("20240915", "", false, "等价字段是空的")
+expectCarried("20240915", "<无>", false, "等价字段没有数字")
+
+print("带时区的 IIM 时间：偏移本身也得在目标里找得到")
+// 这一组是审查抓出来的假阴性。IIM 的 TimeCreated 可以带 UTC 偏移
+// （HHMMSS±HHMM）。只把偏移剥掉再比时间，看着是消掉了一个误报，实际在
+// 「偏移只存在于 IIM 后缀、目标又没有 OffsetTime」时把真丢失吞了——
+// README 里「时区由 OffsetTime 单独承载」是对目标文件的断言，必须真查。
+let shotAt = "{Exif}/DateTimeOriginal"
+let offsetAt = "{Exif}/OffsetTimeOriginal"
+func expectEquivalent(_ key: String, _ value: String,
+                      _ after: [String: String], _ want: Bool, _ why: String) {
+    checkRule("\(key) = \(value)", equivalentCarries(key: key, value: value, in: after), want, why)
+}
+let timeKey = "{IPTC}/TimeCreated"
+let dateKey = "{IPTC}/DateCreated"
+let withOffset = [shotAt: "2024:09:15 18:42:07", offsetAt: "+08:00"]
+let noOffset = [shotAt: "2024:09:15 18:42:07"]
+
+expectEquivalent(timeKey, "184207+0800", withOffset, true, "时间与偏移目标都有，才算承载")
+expectEquivalent(timeKey, "184207+0800", noOffset, false,
+                 "目标没有 OffsetTime，偏移是真丢了——必须报")
+expectEquivalent(timeKey, "184207+0800", [shotAt: "2024:09:15 18:42:07", offsetAt: "+09:00"],
+                 false, "目标的偏移是另一个值——必须报")
+expectEquivalent(timeKey, "184207Z", [shotAt: "2024:09:15 18:42:07", offsetAt: "+00:00"],
+                 true, "Z 等于 +0000")
+expectEquivalent(timeKey, "184207", noOffset, true, "不带偏移的时间，目标有时间就够了")
+// XMP 这条承载腿有一半是端到端可达的，这里只是把两半都钉住。
+//   时间那一半：ImageIO 只要看见 IIM 日期，写 JPEG 时就会自己补一个
+//     {Exif}/DateTimeOriginal（实测过），于是 EXIF 腿永远在场，XMP 腿
+//     在"谁承载了时间"上确实抢不到决定权，只能在这里单独验。
+//   偏移那一半：ImageIO 同时还会合成
+//     XMP/photoshop:DateCreated = 2024-09-15T18:42:07.42+08:00（带偏移），
+//     而 OffsetTime* 它不会自己补。所以源里不写 EXIF OffsetTime* 时，
+//     XMP 就是目标里唯一的偏移承载——selftest.sh 的「偏移只靠 XMP 承载」
+//     一轮走的正是这条路（夹具的 --no-exif-offset）。
+// 这段注释原先写着"端到端做不出来，得用 exiftool 之类的外部写入器"，是错的：
+// 当时的测量用 Tests/probe 查 XMP 键，而那个工具根本不读 XMP，所有 XMP 查询
+// 都无条件返回「无」——结论是仪器的产物，不是 ImageIO 的行为。
+// 键的拼法已对着真实照片核过：IMG_1225.JPG / P1130939.JPG 的 ImageIO 输出里
+// 确实是 `XMP/photoshop:DateCreated` 与 `XMP/xmp:CreateDate`（形如
+// `2011-01-19T22:01:00.00`），转成 HEIC 后两者都还在。
+expectEquivalent(timeKey, "184207+0800", ["XMP/photoshop:DateCreated": "2024-09-15T18:42:07+08:00"],
+                 true, "偏移长在 XMP 时间戳里也算承载")
+expectEquivalent(dateKey, "20240915", ["XMP/photoshop:DateCreated": "2024-09-15T18:42:07.00"],
+                 true, "IIM 日期由 XMP 腿承载（真实照片里就是这个形状）")
+expectEquivalent("{IPTC}/DigitalCreationDate", "20240915", ["XMP/xmp:CreateDate": "2024-09-15T18:42:07"],
+                 true, "数字化日期走 xmp:CreateDate 这条腿")
+expectEquivalent(timeKey, "184207+0800", [shotAt: "2024:09:15 09:00:00"], false,
+                 "时间本身就不对，偏移再对也是丢失")
+expectEquivalent(timeKey, "184207-12345", withOffset, false,
+                 "尾巴不是合规偏移就不拆，整串拿去比，对不上就报")
+// 只在该带偏移的字段里找，不扫全表：扫全表撞上一个巧合的 +0800
+// （这里是镜头型号）就会把真丢失吞掉，方向错反。
+expectEquivalent(timeKey, "184207+0800",
+                 [shotAt: "2024:09:15 18:42:07", "{ExifAux}/LensModel": "RF24-70 +0800"],
+                 false, "无关字段里巧合出现的偏移不算承载")
+// Date 键根本不进拆分——按长相拆的老写法会把 2024-0915 砍成 2024，
+// 而 2024 几乎出现在任何日期里，于是「9 月 15 日丢了」会被静默放过。
+expectEquivalent(dateKey, "20240915", noOffset, true, "IIM 日期被 EXIF 时间戳承载")
+expectEquivalent(dateKey, "2024-0915", [shotAt: "2024:01:01 00:00:00"], false,
+                 "不合规范的日期不按长相去砍——这正是上一版的静默放过")
+expectEquivalent("{Exif}/DateTimeOriginal", "2024:09:15 18:42:07", noOffset, false,
+                 "不在等价表里的键一律不算承载")
+
+print("UTCOffset：形状锚定在末尾，再验范围")
+// 这一组后半截是审查抓出来的：上一版用"取最后一个加减号、把数字滤出来数够
+// 4 位"冒充形状判断，于是从日期里读出时区、尾巴带垃圾也收、越界也收、
+// 任何以 Z 结尾的文本都算 UTC。它是**目标侧**的读取器，松了就是静默放过。
+for (text, want) in [// 该认出来的
+                     ("+08:00", "+0800"), ("+0800", "+0800"), ("-05:00", "-0500"),
+                     ("2024-09-15T18:42:07+08:00", "+0800"),
+                     ("2024-09-15T18:42:07-0800", "-0800"),
+                     ("2024-09-15T18:42:07Z", "+0000"),
+                     // 边界本身合法
+                     ("+14:00", "+1400"), ("-12:00", "-1200"),
+                     // 真实存在的非零分钟，必须继续认
+                     ("+05:30", "+0530"), ("+0545", "+0545"),
+                     ("+09:30", "+0930"), ("+13:45", "+1345"),
+                     // 上下界不对称：负向最多 -12:00，正向最多 +14:00。
+                     // 第一版两侧都用 14，下面三条全被错误接受。
+                     ("-13:00", ""), ("-1400", ""), ("+1500", ""),
+                     // 第二版分了符号但按分量各自设上限（时 <= 14、分 <= 59），
+                     // 于是越过边界一点的偏移照收。约束的必须是总偏移量。
+                     ("+1430", ""), ("+14:59", ""), ("-1230", ""), ("-12:59", ""),
+                     // 分钟本身仍要 < 60：+00:70 折算后落在范围内，
+                     // 但它不是一个合规的偏移拼法。
+                     ("+0070", ""),
+                     // 本来就没有时区
+                     ("2024-09-15T18:42:07", ""), ("2024-09-15", ""),
+                     ("2024:09:15 18:42:07", ""),
+                     ("2024-09-15T18:42:07.4200", ""),
+                     // 以下四条上一版全部误读
+                     ("2024-09-15T18", ""),      // 读成 -1518
+                     ("184207 -0800mm", ""),     // 读成 -0800
+                     ("+9999", ""),              // 越界照收
+                     ("随便什么Z", ""),           // Z 分支零形状检查
+                     // 偏移前面既不是数字也不是开头
+                     ("abc+0800", ""),
+                     // 裸 Z 不再算（前面没有数字）
+                     ("Z", "")] {
+    checkRule(text, UTCOffset(parsing: text)?.text ?? "", want,
+              want.isEmpty ? "\(text) 里没有时区" : "\(text) → \(want)")
+}
+
+print("目标侧读松了就会静默放过：拿畸形值当承载")
+// 这两条直接对着上面那四种误读：源里偏移确实丢了，但目标某个字段里有一段
+// 能被旧读取器读成同一个偏移的垃圾，于是整条差异被吞掉。
+expectEquivalent(timeKey, "184207+0800",
+                 [shotAt: "2024:09:15 18:42:07", offsetAt: "+08:00 (approx)"],
+                 false, "目标的偏移字段带垃圾尾巴，不算承载")
+expectEquivalent(timeKey, "184207Z",
+                 [shotAt: "2024:09:15 18:42:07", offsetAt: "未知Z"],
+                 false, "目标写着「未知Z」不算 UTC")
+
+print("源侧与目标侧用同一把尺子")
+for (text, time, offset) in [("184207+0800", "184207", "+0800"),
+                             ("184207Z", "184207", "+0000"),
+                             ("184207+08:00", "184207", "+0800"),
+                             // 越界、垃圾尾巴一律不拆：整串拿去比，对不上就报
+                             ("184207+9999", "184207+9999", ""),
+                             ("184207-12345", "184207-12345", ""),
+                             // 拆不拆由三道守卫共同决定（总长、第 7 位、UTCOffset），
+                             // 下面四条各自只被其中一道拦住——少任何一道，
+                             // 多出来的字符就被悄悄丢掉，而时间部分照样"对得上"。
+                             //
+                             // 只被「总长」拦住：第 7 位是加号、前六位是数字，
+                             // 偏移也合规，唯一的毛病是中间多了一段 `+12`。
+                             ("184207+12+0800", "184207+12+0800", ""),
+                             // 只被「第 7 位」拦住：12 位，和合规的 HHMMSS±HH:MM
+                             // 一样长，总长查不出来。
+                             ("1842071+0800", "1842071+0800", ""),
+                             // 只被「UTCOffset」拦住：12 位、第 7 位是加号，
+                             // 但 `+1+080` 不是任何一种偏移形状。
+                             ("184207+1+080", "184207+1+080", ""),
+                             // 被多道同时拦住的，留着当回归样本就好。
+                             ("184207123+0800", "184207123+0800", ""),
+                             ("1842071Z", "1842071Z", ""),
+                             ("184207", "184207", "")] {
+    let parts = splitIIMTime(text)
+    checkRule(text, "\(parts.time)|\(parts.offset?.text ?? "")", "\(time)|\(offset)",
+              "splitIIMTime(\(text))")
+}
+
+print("isVolatile：只跳过描述文件自身的键")
+// 这里曾经用子串匹配，"Depth"/"Compression"/"ProfileName" 这类片段太短，
+// 任何名字里含这几个字的真实字段都会被整条跳过且悄无声息。下面后半组用例
+// 正是守这件事——它们必须**不**被跳过。
+func expectVolatile(_ key: String, _ want: Bool, _ why: String) {
+    checkRule(key, isVolatile(key), want, why)
+}
+// 该跳过的：文件自身的物理描述
+for k in ["Depth", "ProfileName", "PrimaryImage", "ColorModel",
+          "FileSize", "PixelWidth", "PixelHeight", "HasAlpha", "IsFloat", "IsIndexed"] {
+    expectVolatile(k, true, "顶层 \(k)")
+}
+expectVolatile("{JFIF}/XDensity", true, "JFIF 段整类（HEIF 没有这个段）")
+expectVolatile("XMP/iio:hasIIM", true, "ImageIO 内部标记")
+expectVolatile("{Exif}/ComponentsConfiguration", true, "EXIF 的分量配置")
+expectVolatile("XMP/exif:ComponentsConfiguration[2]", true, "带下标的同一字段")
+expectVolatile("{TIFF}/Compression", true, "TIFF 压缩方式")
+
+// 绝不能跳过的：名字里恰好含上述片段的真实字段
+expectVolatile("{MakerCanon}/FocusDepth", false, "厂商的 FocusDepth 不是文件描述")
+expectVolatile("{Exif}/SubjectDepth", false, "EXIF 的 SubjectDepth 是照片内容")
+expectVolatile("XMP/crs:DepthMapInfo", false, "XMP 的 DepthMapInfo 是照片内容")
+expectVolatile("{ExifAux}/LensProfileName", false, "镜头配置文件名不是色彩描述文件名")
+expectVolatile("{TIFF}/CompressionScheme", false, "名字含 Compression 但不是它")
+expectVolatile("{Exif}/DateTimeOriginal", false, "拍摄时间")
+expectVolatile("{GPS}/Latitude", false, "拍摄位置")
+// 老片段表里把它写成小写 hasAlpha，和拼错的 EncodingProcess 一样从来没匹配过。
+// 改用 ImageIO 常量后两处笔误都自动消失了——这正是不写死字符串的好处。
+expectVolatile("hasAlpha", false, "小写 hasAlpha 不是真实键名")
+
+print("MakerNote 派生字典的归类")
+// {ExifAux} 是混的：ImageIO 声明过的键走 XMP aux: 能完好转换，实测全部存活，
+// 它们真丢了必须逐条报出来；未声明的键才是 MakerNote 派生，可以归并。
+// 按整个 {ExifAux}/ 前缀归并会把标准键的真丢失藏进计数里——这组用例守住这一点。
+for (key, want) in [// 未声明 → 归并
+                    ("{ExifAux}/AFInfo[0]", "{ExifAux}"),
+                    ("{ExifAux}/FocusMode", "{ExifAux}"),
+                    ("{ExifAux}/ImageStabilization", "{ExifAux}"),
+                    // 已声明 → 绝不归并，丢了要单独报
+                    ("{ExifAux}/LensModel", ""),
+                    ("{ExifAux}/SerialNumber", ""),
+                    ("{ExifAux}/LensInfo", ""),
+                    ("{ExifAux}/Firmware", ""),
+                    ("{ExifAux}/LensID", ""),
+                    ("{ExifAux}/FlashCompensation", ""),
+                    ("{ExifAux}/OwnerName", ""),
+                    ("{ExifAux}/LensSerialNumber", ""),
+                    ("{ExifAux}/ImageNumber", ""),
+                    // 带下标的已声明键同样不归并
+                    ("{ExifAux}/LensInfo[2]", ""),
+                    // SDK 对 {PictureStyle} 零声明，整类归并
+                    ("{PictureStyle}/Monochrome[1]", "{PictureStyle}"),
+                    ("{MakerCanon}/LensModel", "{MakerCanon}"),
+                    ("{MakerNikon}/ColorMode", "{MakerNikon}"),
+                    ("{Exif}/DateTimeOriginal", ""),
+                    ("{GPS}/Latitude", "")] {
+    checkRule(key, makerNoteGroup(of: key) ?? "", want,
+              "\(key) → \(want.isEmpty ? "不归类" : want)")
+}
+
+print("命令行参数解析")
+func parsed(_ args: [String]) -> ConversionOptions? {
+    guard case .run(let o)? = try? parseArguments(args) else { return nil }
+    return o
+}
+func expectRejected(_ args: [String], _ why: String) {
+    do {
+        _ = try parseArguments(args)
+        fail("\(why)：本该报错却接受了")
+    } catch {
+        pass("\(why)：\(error.localizedDescription)")
+    }
+}
+check("收下一个输入文件", parsed(["a.jpg"])?.inputs, ["a.jpg"])
+check("-r 打开递归", parsed(["-r", "目录"])?.recursive, true)
+check("-q 读出质量", parsed(["-q", "0.95", "a.jpg"])?.quality, 0.95)
+check("-j 读出并发数", parsed(["-j", "4", "a.jpg"])?.jobs, 4)
+check("-- 之后的横杠开头当文件名",
+      parsed(["--", "-奇怪的文件名.jpg"])?.inputs, ["-奇怪的文件名.jpg"])
+check("-o 展开 ~", parsed(["-o", "~/out", "a.jpg"])?.output?.path.hasPrefix("/"), true)
+check("--help 退出码 0", try? parseArguments(["--help"]), .showUsage(exitCode: 0))
+check("没给输入时退出码 1", try? parseArguments([]), .showUsage(exitCode: 1))
+expectRejected(["-q", "1.5", "a.jpg"], "质量超出 0–1")
+expectRejected(["-q", "abc", "a.jpg"], "质量不是数字")
+expectRejected(["-j", "0", "a.jpg"], "并发数为零")
+expectRejected(["--bogus", "a.jpg"], "未知选项")
+expectRejected(["-q"], "选项缺少参数")
+
+print("命令行与界面的默认值")
+// recursive 曾经一端 false 一端 true，同一句「指定文件夹下」在两边含义不同。
+// 现在两端都取自 ConversionOptions.default，这组断言守住它们不再各自漂移。
+func expectSame<T: Equatable>(_ gui: T, _ cli: T, _ why: String) {
+    gui == cli ? pass("\(why) 两端一致（\(gui)）")
+               : fail("\(why) 不一致：界面 \(gui)，命令行 \(cli)")
+}
+// 命令行这一侧必须真的解析一遍参数再读默认值。以前两边都取自同一个库，
+// 断言打印着"两端一致"却从未碰过命令行——把 CLI 改回 ConversionOptions()
+// 整套测试照样全绿。现在 parseArguments 是可链接的纯函数，这组才算数。
+guard case .run(let cli) = (try? parseArguments(["照片.jpg"])) else {
+    fail("命令行解析不出最简单的一条命令"); finish("单元测试")
+}
+let gui = ConversionModel()
+expectSame(gui.options.recursive, cli.recursive, "递归子文件夹")
+expectSame(gui.options.quality, cli.quality, "质量")
+expectSame(gui.options.overwrite, cli.overwrite, "覆盖同名文件")
+expectSame(gui.options.deleteOriginal, cli.deleteOriginal, "删除源文件")
+
+// verify 是有意分叉：界面结果直接给人看，默认校验；命令行按需开关。
+// 若哪天两端被"统一"成一样，这条会失败，提醒连同 Model.swift 的注释一起改。
+if gui.options.verify && !cli.verify {
+    pass("校验开关：界面默认开、命令行默认关（有意分叉）")
+} else {
+    fail("校验开关的分叉变了，Model.swift 里的说明需要同步更新")
+}
+
+finish("单元测试")
