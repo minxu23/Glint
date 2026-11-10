@@ -1,0 +1,15 @@
+# UTCOffset 的文档注释被挂到了 DigitShape 上
+
+Status: resolved
+Round: 9
+Source: Standards 2 + Spec (c) 1（第 9 轮报告，2026-11-10T06:35Z）
+Fixed by: eac5f46
+Review: ../reviews/round-09.md
+
+## 意见原文
+
+> One contiguous `///` block opening `/// UTC 偏移…` is attached to `struct DigitShape`
+
+## 结论
+
+既有的孤儿注释（cb4b42e 时悬在 numericFields 头上），但上一轮我把它搬到了一个新引入的类型头上，从悬空变成错配。
