@@ -248,9 +248,9 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
 ///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
 ///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
 /// 2. CopyImageSource 把第一遍的结果写到 `url`，同时把源的 XMP 合并进去。
-///    这一步只改元数据，不重新编码像素。第二遍只传 XMP，不传 EXIF 等属性字典：
-///    CopyImageSource 会把传进来的 EXIF 重新序列化，非 ASCII 的 UserComment
-///    会被截断。
+///    这一步只改元数据，不重新编码像素。它的选项里只有 XMP 和合并开关起作用：
+///    属性字典传进来会被忽略（实测带不带它，产物逐字节相同），所以 EXIF 等字典
+///    只能靠第一遍写进去。
 func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
                 xmp: CGImageMetadata?, to url: URL) -> Bool {
     let heic = UTType.heic.identifier as CFString
