@@ -199,9 +199,12 @@ func die(_ message: String) -> Never {
 }
 
 // 先按属性字典编码到内存，再只替换 XMP 那一个 APP1 段：把上面的标签并进 ImageIO
-// 写出的 XMP 包。不走 CopyImageSource——它会把 EXIF 重新序列化一遍，而 ImageIO
-// 写 UserComment 时按字符数当字节数算，非 ASCII 的备注会被截掉一半（README
-// 「已知限制」），夹具就不再是"元数据齐全"的了。
+// 写出的 XMP 包，其余字节保持这一次编码的原样。CopyImageSource 也能并 XMP，但它会
+// 把 EXIF 重新序列化一遍。
+//
+// 上面属性字典里的备注在这一次编码时就已经存不全：ImageIO 写 UserComment 时按字符数
+// 当字节数算，非 ASCII 的备注只存下前一半左右（README「已知限制」）。所以断言要拿
+// 源文件里实际存下的值来比（用 probe 读），不要拿属性字典里的全文。
 let encoded = NSMutableData()
 guard let first = CGImageDestinationCreateWithData(encoded, UTType.jpeg.identifier as CFString, 1, nil) else {
     die("无法创建 JPEG 编码器")
