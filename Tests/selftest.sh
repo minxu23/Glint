@@ -13,15 +13,20 @@ ROUNDS=0
 # 结尾照样宣布通过）。那三条已经删了，下面三道守卫是防它从别的地方回来。
 #   整轮消失      -> ROUNDS 对不上（轮次标题一律走 round()）
 #   轮还在、正文被跳过 -> PASSED 对不上（这是最阴的一种：轮次照打印）
-#   提前 exit 吞掉后半 -> trap 兜底（结尾的检查本身都执行不到）
+#   脚本中途死掉     -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改 EXPECTED_PASSES。用精确值而不是下限：下限挡不住
 # 「加了 5 条、同时静默少了 3 条」。
 EXPECTED_ROUNDS=12
-EXPECTED_PASSES=58
+EXPECTED_PASSES=60
+# 两个子套件自己的断言条数。它们各自只在本脚本里产出 1 个 pass，
+# EXPECTED_PASSES 看不见它们缩水，所以单列。
+EXPECTED_UNIT=202
+EXPECTED_GUI=37
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
-# 下面的前置检查是**有意**的早退（环境没准备好，还没开始测），它们走 bail()，
-# 自己已经说清了原因，不需要 trap 再补一句。
+# 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
+# 收到信号、以及将来有人加一条不走 bail() 的 exit。前置检查是**有意**的早退
+# （环境没准备好，还没开始测），走 bail() 自己说清原因，不需要 trap 再补一句。
 REACHED_END=0
 on_exit() {
     [ "$REACHED_END" -eq 1 ] && return 0
@@ -57,8 +62,10 @@ done
 #     自己那一个文件，Tests/probe 还依赖整个 Sources/Core），自己比 mtime 等于
 #     重写一份依赖表。`make -q` 是只读的问询模式，不执行任何规则，所以从
 #     make test 里反过来调它不会递归。
-artifacts=$(make --no-print-directory print-artifacts 2>/dev/null)
-[ -n "$artifacts" ] || bail "问不到产物清单（make print-artifacts 没出声）"
+# 不吞 stderr：Makefile 真出语法错时，错误本身比「问不到清单」有用得多。
+artifacts=$(make --no-print-directory print-artifacts) \
+    || bail "问不到产物清单（make print-artifacts 失败，原因见上）"
+[ -n "$artifacts" ] || bail "产物清单是空的（print-artifacts 没出声）"
 for art in $artifacts; do
     # 缺产物在这里就停，不再 `continue`：那等于「缺了就算通过」，
     # 而这个守卫存在的全部意义就是不要静默通过。
@@ -70,11 +77,25 @@ done
 xattr -w com.apple.metadata:kMDItemFinderComment "访达备注" "$WORK/照片.jpg"
 
 round "0. 校验规则单元测试"
-if Tests/unit-test >/dev/null 2>&1; then
+# 把子套件自己的断言条数也钉住。原先这一整轮只产出 1 个 pass，于是
+# EXPECTED_PASSES 完全感知不到单测缩水：实测删掉 20 条用例（175→155），
+# 套件照样打印「全部通过（12 轮，58 项断言）」。这是「少跑了却宣布通过」的
+# 第四种走法——被压成一个 pass 的子套件自己缩水——上一轮三道守卫都没看见。
+unit_out=$(Tests/unit-test 2>&1); unit_ok=$?
+# 数「执行了多少条」而不是「通过了多少条」：一条用例失败就少一个 ✓，
+# 于是这条守卫会跟着报「跑少了」——那是误诊，和 EXPECTED_PASSES 原先
+# 那个毛病一模一样（实测：改坏一处核心逻辑，2 条真失败被放大成 3 条）。
+unit_n=$(printf '%s\n' "$unit_out" | grep -cE '✓|✗')
+if [ "$unit_ok" -eq 0 ]; then
     pass "值比较与 MakerNote 归类规则"
 else
-    fail "值比较规则有用例不通过"; Tests/unit-test | grep '✗' | sed 's/^/     /'
+    fail "值比较规则有用例不通过"; printf '%s\n' "$unit_out" | grep '✗' | sed 's/^/     /'
 fi
+# 成功也出声：这条守卫自己得落在 EXPECTED_PASSES 的覆盖范围里，
+# 否则它被静默删掉时没人发现。
+[ "$unit_n" -eq "$EXPECTED_UNIT" ] \
+    && pass "单测跑满 $unit_n 条，没有静默缩水" \
+    || fail "单测跑了 $unit_n 条，预期 $EXPECTED_UNIT 条（改动用例后请同步 EXPECTED_UNIT）"
 
 round "1. 单文件转换 + 元数据校验"
 OUT=$("$BIN" --verify -v "$WORK/照片.jpg" 2>&1)
@@ -321,11 +342,16 @@ for i in $(seq 1 40); do
     cp "$WORK/界面模型/源/一.jpg" "$WORK/界面模型/取消/c$i.jpg"
     cp "$WORK/界面模型/源/一.jpg" "$WORK/界面模型/中途取消/d$i.jpg"
 done
+# 同上：这一轮的 ✓ 数原先只进文案不进断言，打印 0 条也算「全过」。
 if out=$(./Tests/guimodel-test "$WORK/界面模型" 2>&1); then
-    pass "模型层集成测试 $(echo "$out" | grep -c '✓') 项全过"
+    pass "模型层集成测试通过"
 else
     fail "界面模型测试未通过"; echo "$out" | grep '✗' | sed 's/^/     /'
 fi
+gui_n=$(printf '%s\n' "$out" | grep -cE '✓|✗')   # 同上：数执行数，不数通过数
+[ "$gui_n" -eq "$EXPECTED_GUI" ] \
+    && pass "模型层跑满 $gui_n 条，没有静默缩水" \
+    || fail "模型层跑了 $gui_n 条，预期 $EXPECTED_GUI 条（改动用例后请同步 EXPECTED_GUI）"
 
 round "9. 图形界面端到端"
 mkdir -p "$WORK/界面"
@@ -342,8 +368,12 @@ echo
 # 数目不对就是有东西没跑，必须计为失败而不是默默通过。
 [ "$ROUNDS" -eq "$EXPECTED_ROUNDS" ] \
     || fail "只跑了 $ROUNDS 轮，预期 $EXPECTED_ROUNDS 轮——有整轮没有执行"
-[ "$PASSED" -eq "$EXPECTED_PASSES" ] \
-    || fail "通过 $PASSED 项，预期 $EXPECTED_PASSES 项——有断言没有执行（改动断言后请同步 EXPECTED_PASSES）"
+# 查的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」。
+# 原先比 PASSED：真失败时 PASSED 必然偏小，于是额外报一句「有断言没有执行」
+# ——那是误诊，断言执行了，只是失败了（实测把 2 条真失败放大成 3 条）。
+executed=$((PASSED + FAILED))
+[ "$executed" -eq "$EXPECTED_PASSES" ] \
+    || fail "执行了 $executed 项断言，预期 $EXPECTED_PASSES 项（改动断言后请同步 EXPECTED_PASSES）"
 if [ "$FAILED" -eq 0 ]; then
     echo "全部通过（$ROUNDS 轮，$PASSED 项断言）"
 else

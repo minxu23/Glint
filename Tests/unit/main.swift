@@ -207,8 +207,26 @@ for (text, want) in [// 该认出来的
                      ("99:99:99Z", ""),
                      ("拍摄于 18:42:07Z", ""),     // 空格前面不是日期，是散文
                      ("9999-99-99T18:42:07Z", ""),// 时刻合法但日期不是日期
-                     // 偏移前面既不是数字也不是开头
-                     ("abc+0800", ""),
+                     // 偏移的前文必须是空或一个完整时刻——和 Z 侧同一把尺子。
+                     // `±` 侧曾只查"符号前一位是数字"，于是 Z 侧明确拒掉的东西
+                     // 它全收（第四轮才补上的对称性）。下面每一条都和 Z 侧的
+                     // 孪生反例一一对应。
+                     ("abc+0800", ""),            // 前一位非数字，旧版也拒
+                     ("abc1+0800", ""),           // 前一位是数字，旧版就收了
+                     ("镜头型号RF50mm1+0800", ""),
+                     ("ISO100+0800", ""),
+                     ("+08:00 (approx)5+0800", ""),
+                     ("9999-99-99T18:42:07+08:00", ""),   // 时刻合法、日期不是日期
+                     ("20240915+0800", ""),       // 日期不是时刻
+                     ("2024-0915+0800", ""),
+                     ("拍摄于 18:42:07+08:00", ""), // 空格前面是散文不是日期
+                     ("995999+0800", ""),         // 前文的"时刻"越界
+                     ("2024+0800", ""),           // 4 位无分隔不单独成时刻
+                     // 真实写法必须继续认：
+                     ("184207+08:00", "+0800"),
+                     ("2024-09-15T18:42:07.42+08:00", "+0800"),   // ImageIO 实际写的
+                     ("2024-09-15T18:42+08:00", "+0800"),         // 分钟精度
+                     ("20240915T184207+0800", "+0800"),           // 基本格式
                      // 裸 Z 不再算（前面没有数字）
                      ("Z", "")] {
     checkRule(text, UTCOffset(parsing: text)?.text ?? "", want,
@@ -227,6 +245,31 @@ expectEquivalent(timeKey, "184207Z",
 expectEquivalent(timeKey, "184207Z",
                  [shotAt: "2024:09:15 18:42:07", offsetAt: "未知9Z"],
                  false, "结尾是「数字+Z」也不算 UTC——Z 必须终结一个时刻")
+
+print("numericFields：四处形状解析共用的那把尺子")
+// 时刻、日期、偏移、IIM 时间四处本来各写了一遍同样的 switch count，现在共用
+// 这一个。它是单点故障，所以直接钉住，而不只是透过上面那些间接验。
+func expectFields(_ value: String, _ template: String, _ want: [Int]?, _ why: String) {
+    let got = numericFields(Array(value), template)
+    checkRule("\(value) / \(template)", got?.description ?? "nil",
+              want?.description ?? "nil", why)
+}
+expectFields("18:42:07", "dd:dd:dd", [18, 42, 7], "带冒号的时刻")
+expectFields("184207", "dd|dd|dd", [18, 42, 7], "无分隔的时刻")
+expectFields("2024-09-15", "dddd-dd-dd", [2024, 9, 15], "带连字符的日期")
+expectFields("20240915", "dddd|dd|dd", [2024, 9, 15], "无分隔的日期")
+expectFields("0800", "dd|dd", [8, 0], "偏移的四位")
+expectFields("184207", "dddddd", [184207], "IIM 时间整段当一个字段")
+expectFields("42", "d*", [42], "不限长度的小数秒")
+// 必须拒的：
+expectFields("18:42:0", "dd:dd:dd", nil, "短一位")
+expectFields("18:42:077", "dd:dd:dd", nil, "长一位——末尾多出的字符不能被忽略")
+expectFields("18-42-07", "dd:dd:dd", nil, "分隔符不对")
+// 这一条守的是"全角数字不算数字"，不是守 isASCII 那个条件本身：
+// 实测 Int(String) 自己就拒掉非 ASCII 数字，去掉 isASCII 这条用例照样过。
+expectFields("1８4207", "dd|dd|dd", nil, "全角数字不算数字")
+expectFields("", "d*", nil, "d* 要求至少一位")
+expectFields("abc", "d*", nil, "不是数字")
 
 print("源侧与目标侧用同一把尺子")
 for (text, time, offset) in [("184207+0800", "184207", "+0800"),

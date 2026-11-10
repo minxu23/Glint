@@ -179,7 +179,7 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     // 所以这里每一个漏洞都朝着静默放过的方向。上一轮改成按键拆，解决的是
     // `2024-0915` 被砍成 `2024` 那一半；这是同一个失效族的另一半。
     guard chars.count == 7 || chars.count == 11 || chars.count == 12,
-          chars[0..<6].allSatisfy(\.isNumber),
+          numericFields(Array(chars[0..<6]), "dddddd") != nil,
           chars[6] == "+" || chars[6] == "-" || chars[6] == "Z",
           let offset = UTCOffset(parsing: value) else { return (value, nil) }
     return (String(chars[0..<6]), offset)
@@ -192,6 +192,62 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
 /// `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00` 都是合法 String，只有一种
 /// 能直接拿去比较。包成类型之后，比较只可能发生在解析之后。
 ///
+/// 按模板从 `value` 里切出各字段的数值。模板里连续的 `d` 是一个字段（每个 `d`
+/// 一位数字），`d*` 是「一位以上数字，长度不限」，`|` 表示两个字段紧挨着、
+/// 中间没有分隔符，其余字符必须在同一位置原样出现。长度不符、分隔符不对、
+/// 出现非 ASCII 数字（全角数字、其他数系），一律 nil。
+///
+/// 那个 `isASCII` 是冗余的，留着是为了读代码时意图自明：实测 `Int(String)`
+/// 本身就拒掉 `１２`、`٣٤`、`३४` 等所有非 ASCII 数字写法，所以去掉它不改变
+/// 任何输入的结果——也就不可能有用例钉住它。不想依赖 `Int.init?` 的这个性质，
+/// 才把条件写在取字符的地方。
+///
+/// 抽出来是因为时刻、日期、偏移、IIM 时间四处形状解析本来各写了一遍
+/// 「switch count → 查分隔符位 → 攒 digits → Int(String(...)) 验范围」，
+/// 连「宽度前提在本函数内成立」那句注释都重复了三遍。现在只有这里需要那句话：
+/// 下面所有下标都由 template 与 value 的长度在本函数内对齐。
+func numericFields(_ value: [Character], _ template: String) -> [Int]? {
+    let symbols = Array(template)
+    var fields: [Int] = []
+    var digits = ""
+    var i = 0, k = 0
+
+    // 把攒着的数字收成一个字段；没攒到就什么也不做。
+    func close() -> Bool {
+        if digits.isEmpty { return true }
+        guard let n = Int(digits) else { return false }
+        fields.append(n)
+        digits = ""
+        return true
+    }
+
+    while k < symbols.count {
+        let symbol = symbols[k]
+        k += 1
+        switch symbol {
+        case "d" where k < symbols.count && symbols[k] == "*":
+            k += 1
+            while i < value.count, value[i].isASCII, value[i].isNumber {
+                digits.append(value[i])
+                i += 1
+            }
+            guard !digits.isEmpty, close() else { return nil }
+        case "d":
+            guard i < value.count, value[i].isASCII, value[i].isNumber else { return nil }
+            digits.append(value[i])
+            i += 1
+        case "|":
+            guard !digits.isEmpty, close() else { return nil }
+        default:
+            guard i < value.count, value[i] == symbol, close() else { return nil }
+            i += 1
+        }
+    }
+    // 整个 value 必须被模板用尽：末尾多一个字符也不算匹配。
+    guard i == value.count, close() else { return nil }
+    return fields
+}
+
 /// 刻意不把 `+0000` 与 `-0000` 当同一个值：RFC 3339 里后者是"本地偏移未知"。
 /// 真撞上这种差异就报出来——多报一条符合本项目的方向。
 struct UTCOffset: Equatable {
@@ -215,54 +271,57 @@ struct UTCOffset: Equatable {
         self.text = text
     }
 
-    /// 在 `value` 的末尾找一个偏移并归一化。三种形状各自锚定在末尾，
-    /// 候选 token 交给 normalizedOffset(token:precededBy:) 逐字符核对。
+    /// 在 `value` 的末尾找一个偏移并归一化。
+    ///
+    /// 三种形状共用**同一把尺子**：`Z` 和 `±` 的"前文"都必须是空（整个值就是
+    /// 一个偏移字段，如 `+08:00`）或一个完整时刻（isTimestamp）。
+    /// 这一条是第四轮才对称的——前三轮每次都只收紧一侧：
+    ///   `±` 侧曾只查"符号前一位是数字"，于是 Z 侧明确拒掉的东西它全收（实测）：
+    ///     `镜头型号RF50mm1+0800`、`ISO100+0800`、`abc1+0800`、
+    ///     `+08:00 (approx)5+0800`、`9999-99-99T18:42:07+08:00`、`20240915+0800`
+    ///   这是**目标侧**读取器，一松 offsetSurvives 就把"偏移其实已经丢了"
+    ///   读成"还在"——读出一个合法值比读不出更坏，因为连差异都不剩。
     private static func normalizedOffset(atEndOf value: String) -> String? {
         let chars = Array(value)
-        // `…Z` 就是 UTC——但 Z 必须真的终结一个时刻，不能只查"前一位是数字"。
-        // 只查前一位时，目标侧会把垃圾当 UTC 承载收下（实测）：
-        //   `abc0Z`、`0Z`、`镜头型号RF50mm1Z`、`+08:00 (approx)5Z` 一律读成 +0000
-        //   `184207+0800Z` 更糟：splitIIMTime 三道守卫全过，中间的 `+0800` 被丢掉，
-        //   偏移还被**改读**成 +0000——丢还有机会被报出来，改读成一个合法值
-        //   连差异都不剩。这是 Z 门上的同一个失效族，`±` 两种形状上一轮已堵。
         if chars.last == "Z" {
-            return terminatesTime(Array(chars.dropLast())) ? "+0000" : nil
+            // Z 本身不带数值，所以它要求前文必须是时刻（空值 `Z` 不算 UTC）。
+            return isTimestamp(Array(chars.dropLast())) ? "+0000" : nil
         }
         // `±HHMM`（宽 5）或 `±HH:MM`（宽 6）。
         for width in [5, 6] where chars.count >= width {
-            let token = Array(chars[(chars.count - width)...])
-            let previous = chars.count > width ? chars[chars.count - width - 1] : nil
-            if let text = normalizedOffset(token: token, precededBy: previous) { return text }
+            let head = Array(chars[..<(chars.count - width)])
+            guard head.isEmpty || isTimestamp(head) else { continue }
+            if let text = normalizedOffset(Array(chars[(chars.count - width)...])) { return text }
         }
         return nil
     }
 
-    /// `head` 后面紧跟的那个 `Z` 是不是时区标记（而不是碰巧落在文本末尾的字母 Z）。
-    ///
-    /// 整个值必须是下面两种形状之一——**两头都锚定**，不是"末尾像就算"：
-    ///   `<时刻>Z`                 如 `184207Z`、`18:42Z`、`10:42:07Z`
-    ///   `<日期><分隔><时刻>Z`      如 `2024-09-15T18:42:07Z`、`20240915T184207Z`
+    /// 整个 `value` 是不是一个完整的时刻。两头都锚定，不是"末尾像就算"：
+    ///   `<时刻>`                 如 `184207`、`18:42`、`10:42:07`
+    ///   `<日期><分隔><时刻>`      如 `2024-09-15T18:42:07`、`20240915T184207`
     /// 日期是 `YYYY-MM-DD` 或 `YYYYMMDD`，分隔是 `T` 或空格，时刻见 isTimeOfDay。
     ///
-    /// 上一版只凑了两条形状、不验数值、前导只拒数字，于是**两个方向同时错**（实测）：
-    ///   松：`995999Z`（59 分 99 秒）、`99:99:99Z`、`拍摄于 18:42:07Z` → 读成 `+0000`
-    ///   严：`2024-09-15T18:42Z`（分钟精度）、`20240915T184207Z`（基本格式）、
-    ///       `2024-09-15T18:42:07,42Z`（逗号小数秒）→ 全被误拒
-    /// 松的那一半是静默放过，所以现在照 ISO 8601 对"时刻"的定义写，不再凑形状。
+    /// 只凑形状、不验数值、前导只拒数字的那一版**两个方向同时错**（实测）：
+    ///   松：`995999`（59 分 99 秒）、`99:99:99`、`拍摄于 18:42:07` 都算时刻
+    ///   严：`2024-09-15T18:42`（分钟精度）、`20240915T184207`（基本格式）、
+    ///       `2024-09-15T18:42:07,42`（逗号小数秒）全被误拒
+    /// 松的那一半是静默放过，所以现在照 ISO 8601 对"时刻"的定义写。
     ///
-    /// 一个不可消除的歧义：`202409Z` 既像年月、也像 20:24:09，按形状分不开，
+    /// 一个不可消除的歧义：`202409` 既像年月、也像 20:24:09，按形状分不开，
     /// 只能当时刻收下。前提是它必须是**整个值**——没有哪个元数据字段会把年月
-    /// 单独写成 6 位再缀一个 Z。同理 4 位无分隔的 `hhmm` 不接受单独成值
-    /// （`2024Z` 会被读成 20:24），只在日期后面出现时才算（`…T1842Z`）。
-    private static func terminatesTime(_ value: [Character]) -> Bool {
+    /// 单独写成 6 位。同理 4 位无分隔的 `hhmm` 不接受单独成值（`2024` 会被
+    /// 读成 20:24），只在日期后面出现时才算（`…T1842`）。
+    private static func isTimestamp(_ value: [Character]) -> Bool {
         var head = value
         // 可选小数秒：ISO 8601 的小数点可以是 `.` 也可以是 `,`。
         if let point = head.lastIndex(where: { $0 == "." || $0 == "," }),
-           point < head.count - 1, head[(point + 1)...].allSatisfy(\.isNumber) {
+           point < head.count - 1,
+           numericFields(Array(head[(point + 1)...]), "d*") != nil {
             head = Array(head[..<point])
         }
-        for width in [8, 6, 5, 4] where head.count >= width {
-            guard isTimeOfDay(Array(head[(head.count - width)...])) else { continue }
+        for (width, template) in [(8, "dd:dd:dd"), (6, "dd|dd|dd"), (5, "dd:dd"), (4, "dd|dd")]
+        where head.count >= width {
+            guard isTimeOfDay(Array(head[(head.count - width)...]), template) else { continue }
             // 整个值就是时刻。4 位无分隔的与年份无法区分，不收。
             if head.count == width { return width != 4 }
             let before = Array(head[..<(head.count - width)])
@@ -272,74 +331,33 @@ struct UTCOffset: Equatable {
         return false
     }
 
-    /// `hh:mm:ss`（宽 8）/ `hhmmss`（6）/ `hh:mm`（5）/ `hhmm`（4），并验数值范围。
-    /// 宽度前提在本函数内成立：下面的下标都按 `t.count` 分支写死，
-    /// 不依赖调用方那个 `for width in [8, 6, 5, 4]`。秒允许 60，那是闰秒。
-    private static func isTimeOfDay(_ t: [Character]) -> Bool {
-        let digits: [Character]
-        switch t.count {
-        case 8:
-            guard t[2] == ":", t[5] == ":" else { return false }
-            digits = [t[0], t[1], t[3], t[4], t[6], t[7]]
-        case 6:
-            digits = t
-        case 5:
-            guard t[2] == ":" else { return false }
-            digits = [t[0], t[1], t[3], t[4]]
-        case 4:
-            digits = t
-        default:
-            return false
-        }
-        guard digits.allSatisfy(\.isNumber),
-              let hours = Int(String(digits[0...1])), hours <= 23,
-              let minutes = Int(String(digits[2...3])), minutes <= 59 else { return false }
-        if digits.count == 4 { return true }
-        guard let seconds = Int(String(digits[4...5])), seconds <= 60 else { return false }
-        return true
+    /// 按模板核对一个时刻并验范围。秒允许 60，那是闰秒。
+    private static func isTimeOfDay(_ value: [Character], _ template: String) -> Bool {
+        guard let parts = numericFields(value, template), parts.count >= 2,
+              parts[0] <= 23, parts[1] <= 59 else { return false }
+        return parts.count == 2 || parts[2] <= 60
     }
 
-    /// `YYYY-MM-DD`（宽 10）或 `YYYYMMDD`（8），并验月日范围。
-    /// 宽度前提同样在本函数内成立。不查某月到底有几天：这里只是在判断
-    /// 「Z 前面那段是不是一个日期」，不是在校验日历。
-    private static func isDate(_ d: [Character]) -> Bool {
-        let digits: [Character]
-        switch d.count {
-        case 10:
-            guard d[4] == "-", d[7] == "-" else { return false }
-            digits = [d[0], d[1], d[2], d[3], d[5], d[6], d[8], d[9]]
-        case 8:
-            digits = d
-        default:
-            return false
+    /// `YYYY-MM-DD` 或 `YYYYMMDD`，并验月日范围。不查某月到底有几天：
+    /// 这里只是在判断「这段是不是一个日期」，不是在校验日历。
+    private static func isDate(_ value: [Character]) -> Bool {
+        for template in ["dddd-dd-dd", "dddd|dd|dd"] {
+            guard let parts = numericFields(value, template), parts.count == 3 else { continue }
+            if (1...12).contains(parts[1]), (1...31).contains(parts[2]) { return true }
         }
-        guard digits.allSatisfy(\.isNumber),
-              let month = Int(String(digits[4...5])), (1...12).contains(month),
-              let day = Int(String(digits[6...7])), (1...31).contains(day) else { return false }
-        return true
+        return false
     }
 
     /// 核对一个候选 token（`±HHMM` 或 `±HH:MM`）并归一化成 `±HHMM`。
-    ///
-    /// `previous` 是它前面那个字符：要么是时间戳的秒（数字），要么不存在
-    /// （整个值就是一个偏移字段）。不查这一条，`abc+0800` 也会算数。
-    private static func normalizedOffset(token: [Character],
-                                         precededBy previous: Character?) -> String? {
-        // 形状只有 `±HHMM`（宽 5）和 `±HH:MM`（宽 6）两种。下面的下标是照着
-        // 宽度写死的（else 分支直接取 token[3...5]），所以这一条必须在本函数
-        // 里成立，不能寄托在唯一调用方的 `for width in [5, 6]` 上——同一轮里
-        // splitIIMTime 恰恰为这个失效形状补了长度检查，这里却留成了隐含前提。
-        guard token.count == 5 || token.count == 6 else { return nil }
-        guard token[0] == "+" || token[0] == "-" else { return nil }
-        if let previous, !previous.isNumber { return nil }
-        let digits: [Character]
-        if token.count == 5 {
-            guard token[1...].allSatisfy(\.isNumber) else { return nil }
-            digits = Array(token[1...])
-        } else {
-            guard token[3] == ":", token[1].isNumber, token[2].isNumber,
-                  token[4].isNumber, token[5].isNumber else { return nil }
-            digits = [token[1], token[2], token[4], token[5]]
+    private static func normalizedOffset(_ token: [Character]) -> String? {
+        guard let sign = token.first, sign == "+" || sign == "-" else { return nil }
+        let body = Array(token.dropFirst())
+        // 宽度前提在本函数内成立，不寄托于调用方的 `for width in [5, 6]`。
+        let template: String
+        switch body.count {
+        case 4: template = "dd|dd"
+        case 5: template = "dd:dd"
+        default: return nil
         }
         // ISO 8601 的偏移范围是 -12:00…+14:00（README「--verify」一节同此），
         // 分钟 < 60。约束的是**总偏移量**，不是时和分各自的上限：
@@ -348,12 +366,14 @@ struct UTCOffset: Equatable {
         //     +14:59、-12:30、-12:59 这些不存在的偏移。
         // 前两版分别踩了"不分符号"和"分符号但按分量"，都是后一种失效：
         // 目标侧读取器一宽松，offsetSurvives 就把真丢失误判成"还在"。
-        guard let hours = Int(String(digits[0...1])),
-              let minutes = Int(String(digits[2...3])), minutes <= 59 else { return nil }
-        let total = (token[0] == "-" ? -1 : 1) * (hours * 60 + minutes)
+        guard let parts = numericFields(body, template), parts.count == 2,
+              parts[1] <= 59 else { return nil }
+        let total = (sign == "-" ? -1 : 1) * (parts[0] * 60 + parts[1])
         guard total >= -12 * 60, total <= 14 * 60 else { return nil }
-        return "\(token[0])\(String(digits))"
+        return "\(sign)\(twoDigits(parts[0]))\(twoDigits(parts[1]))"
     }
+
+    private static func twoDigits(_ n: Int) -> String { n < 10 ? "0\(n)" : "\(n)" }
 }
 
 /// 目标文件里该带 UTC 偏移的那些字段。HEIF 没有 IIM 容器，源里 IIM 时间后缀的

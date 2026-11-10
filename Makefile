@@ -83,13 +83,16 @@ Tests/fixture: Tests/fixture.swift
 snapshot: Tests/uisnapshot
 	./Tests/uisnapshot $(or $(OUT),/tmp/jpeg2heif-ui.png) $(ARGS)
 
-# selftest.sh 的新鲜度守卫用它来问「该检查哪些产物」。清单只在这里定义一份：
-# 脚本里抄一份就会在往 TEST_TOOLS 加工具时静默落后（上一版正是如此）。
-.PHONY: print-artifacts
-print-artifacts:
-	@echo $(BIN) Tests/fixture $(TEST_TOOLS)
+# 「跑一遍自检需要哪些产物」只定义一处：test 的前置和 selftest.sh 的新鲜度
+# 守卫都从这里取。上一版把它写了两遍（print-artifacts 的 echo 与 test 的前置），
+# 注释却说"清单只在这里定义一份"——两行各自被改成不一致就没人发现了。
+ARTIFACTS := $(BIN) Tests/fixture $(TEST_TOOLS)
 
-test: $(BIN) Tests/fixture $(TEST_TOOLS)
+# selftest.sh 用它来问「该检查哪些产物」，免得在脚本里抄一份。
+print-artifacts:
+	@echo $(ARTIFACTS)
+
+test: $(ARTIFACTS)
 	@Tests/selftest.sh
 
 clean:
