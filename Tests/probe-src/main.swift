@@ -38,4 +38,15 @@ guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
     exit(1)
 }
 
-print(metadataKeySpace(of: src, url: url, repairing: !noRepair)[wanted] ?? "<无>")
+// 「整个文件读不出来」和「这个键不存在」必须分开报。CGImageSourceCreateWithURL
+// 对垃圾文件也会成功，真正的失败点在 CopyPropertiesAtIndex 返回 nil，而
+// imageProperties 把它吞成了 `[:]`（Converter.swift:49 的 `?? [:]`）。两者都打印
+// 「无」时，第 6 轮那条前提断言（seen = <无> 即算「确认 ImageIO 读不出这种写法」）
+// 在文件整体读不出来时也会通过——正是本项目反复在堵的静默通道。
+// 任何能读的图都至少有 PixelWidth 这类键，所以空键空间只会是读取失败。
+let space = metadataKeySpace(of: src, url: url, repairing: !noRepair)
+guard !space.isEmpty else {
+    print("<无法读取>")
+    exit(1)
+}
+print(space[wanted] ?? "<无>")

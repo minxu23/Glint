@@ -11,7 +11,8 @@ CLI  := $(wildcard Sources/CLI/*.swift)
 GUI_LIB := Sources/GUI/MainViewController.swift Sources/GUI/Views.swift Sources/GUI/Model.swift
 GUI     := Sources/GUI/main.swift $(GUI_LIB)
 
-.PHONY: all cli app install install-cli install-app uninstall test run snapshot clean
+.PHONY: all cli app install install-cli install-app uninstall test run snapshot clean \
+        print-artifacts
 
 all: cli app
 
@@ -81,6 +82,12 @@ Tests/fixture: Tests/fixture.swift
 
 snapshot: Tests/uisnapshot
 	./Tests/uisnapshot $(or $(OUT),/tmp/jpeg2heif-ui.png) $(ARGS)
+
+# selftest.sh 的新鲜度守卫用它来问「该检查哪些产物」。清单只在这里定义一份：
+# 脚本里抄一份就会在往 TEST_TOOLS 加工具时静默落后（上一版正是如此）。
+.PHONY: print-artifacts
+print-artifacts:
+	@echo $(BIN) Tests/fixture $(TEST_TOOLS)
 
 test: $(BIN) Tests/fixture $(TEST_TOOLS)
 	@Tests/selftest.sh

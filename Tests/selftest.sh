@@ -23,13 +23,21 @@ done
 # 一起跑，得出任何单一版本都不会给出的结论——实测踩过一次，而且事后复现不出来，
 # 这正是它危险的地方。
 #
-# 问 make 而不是自己比 mtime：每个产物依赖哪些源文件只有 Makefile 知道
-# （Tests/fixture 只依赖自己那一个文件，Tests/probe 还依赖整个 Sources/Core），
-# 在这里重写一份依赖表等于复制 Makefile，必然漂移。`make -q` 是只读的问询模式，
-# 不执行任何规则，所以从 make test 里反过来调它不会递归。
-for art in "$BIN" Tests/fixture Tests/probe Tests/unit-test \
-           Tests/guimodel-test Tests/mangle-tool Tests/uisnapshot; do
-    [ -e "$art" ] || continue
+# 两件事都交给 make，不在这里自己攒：
+#   清单——上一版硬编码了 7 个产物名，是 Makefile 那份清单的第二份拷贝。
+#     往 TEST_TOOLS 加工具时这里会静默落后；更阴的是 `make -q` 对「文件存在但
+#     不属于任何规则」也退出 0（实测 `make -q README.md` → 0），所以名字一旦
+#     对不上，守卫是静默退化成空跑而不是报错。现在清单只有 Makefile 一份。
+#   依赖——每个产物依赖哪些源文件只有 Makefile 知道（Tests/fixture 只依赖
+#     自己那一个文件，Tests/probe 还依赖整个 Sources/Core），自己比 mtime 等于
+#     重写一份依赖表。`make -q` 是只读的问询模式，不执行任何规则，所以从
+#     make test 里反过来调它不会递归。
+artifacts=$(make --no-print-directory print-artifacts 2>/dev/null)
+[ -n "$artifacts" ] || { echo "问不到产物清单（make print-artifacts 没出声）"; exit 1; }
+for art in $artifacts; do
+    # 缺产物在这里就停，不再 `continue`：那等于「缺了就算通过」，
+    # 而这个守卫存在的全部意义就是不要静默通过。
+    [ -e "$art" ] || { echo "缺 $art——先运行 make test"; exit 1; }
     make -q "$art" >/dev/null 2>&1 \
         || { echo "$art 不是当前源码建出来的——先运行 make test，别直接跑本脚本"; exit 1; }
 done
@@ -169,6 +177,16 @@ echo "5. 安全行为"
 "$BIN" -q 2 "$WORK/照片.jpg" >/dev/null 2>&1; [ $? -eq 2 ] && pass "拒绝非法质量值" || fail "应拒绝非法质量值"
 echo "not an image" > "$WORK/坏.jpg"
 "$BIN" "$WORK/坏.jpg" 2>&1 | grep -q "不是 JPEG" && pass "跳过非 JPEG 文件" || fail "应跳过非 JPEG"
+# 探针自己也得分清「整个文件读不出来」和「这个键不存在」。两者都报「无」时，
+# 下面第 6 轮那条前提断言（seen = <无> 即算「ImageIO 读不出这种写法」）
+# 在文件整体读不出来时也会通过。CGImageSourceCreateWithURL 对垃圾文件会成功，
+# 所以这条必须拿一个真的垃圾文件来验，不能拿不存在的路径。
+for mode in "" "--no-repair"; do
+    v=$(./Tests/probe $mode "$WORK/坏.jpg" '{Exif}/UserComment')
+    [ "$v" = "<无法读取>" ] \
+        && pass "探针对垃圾文件报「无法读取」而不是「无」${mode:+（$mode）}" \
+        || fail "探针把读取失败报成了 [$v]${mode:+（$mode）}"
+done
 
 echo "6. 不合规范的 UserComment（无字符集前缀的裸 UTF-8）"
 # 很多安卓机型这么写，ImageIO 认不出来会整条丢掉，工具需要自己解析补回。
@@ -179,9 +197,19 @@ if Tests/mangle-tool "$WORK/无前缀.jpg" "$NOTE" >/dev/null 2>&1; then
     # 必须加 --no-repair：默认模式走的是 --verify 那条路，里面已经含了本轮要测的
     # UserComment 修补，拿它问等于先把答案填进去再考。
     seen=$(./Tests/probe --no-repair "$WORK/无前缀.jpg" '{Exif}/UserComment')
-    [ "$seen" = "<无>" ] || [ "$seen" = "" ] \
+    # 只接受恰好的「无」。原先还接受空串，而空串可能是 probe 本身没出声——
+    # 那会让这条前提在工具坏掉时也通过。
+    [ "$seen" = "<无>" ] \
         && pass "确认 ImageIO 读不出这种写法" \
-        || fail "前提不成立：ImageIO 居然读出了 [$seen]"
+        || fail "前提不成立：ImageIO 读出了 [$seen]"
+    # 非空守卫：上面那条只有在文件**本身读得出来**时才说明问题。probe 现在把
+    # 「整个文件读不出来」报成 <无法读取>，但这条正面对照更直接：同一次调用、
+    # 同一个文件、换一个键必须读得到值。
+    alive=$(./Tests/probe --no-repair "$WORK/无前缀.jpg" '{Exif}/DateTimeOriginal')
+    case "$alive" in
+        2024*) pass "该文件本身读得出来（上一条前提非空）" ;;
+        *) fail "换个键也读不到值（[$alive]）——上一条前提失去意义" ;;
+    esac
     "$BIN" -f "$WORK/无前缀.jpg" >/dev/null 2>&1
     got=$(./Tests/probe "$WORK/无前缀.heic" '{Exif}/UserComment')
     check "备注被捞回并写入 HEIC" "$got" "$NOTE"
@@ -231,6 +259,9 @@ echo "7b. 偏移只靠 XMP 承载"
 # （XMP 那条腿）那一半怎么写都不影响结果：实测把它整条删掉，默认图照样"校验通过"。
 # 这一轮专门造一张只靠 XMP 承载的图，把那条腿接上。
 ./Tests/fixture --no-exif-offset "$WORK/仅XMP偏移.jpg" >/dev/null
+# 这里敢复用 out，只因为本轮排在第 7 轮那条「未加 --verify 也执行了校验」之后，
+# 而那条读的是第 7 轮自己赋的值。把本轮往上挪就会把它冲掉，那条断言随之变成
+# 假阴性（实测过）。要挪就先给这里换个名字。
 out=$("$BIN" --verify "$WORK/仅XMP偏移.jpg" 2>&1)
 echo "$out" | grep -q "元数据校验通过" \
     && pass "偏移只靠 XMP 承载时校验也通过" \

@@ -164,7 +164,10 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     // 三个条件缺一不可：
     //   总长 ∈ {7, 11, 12}  —— 否则 `184207+12+0800` 也能过：第 6 位是加号、
     //                           尾巴那段偏移也合规，中间的 `+12` 被悄悄丢掉
-    //   第 6 位就是偏移的开头 —— 否则 `1842071+0800`（12 位，与 HHMMSS±HH:MM 同长）
+    //   第 6 位是 `+`/`-`/`Z` 之一（偏移能有的三种起头，就地写出来：曾经抽成
+    //                           UTCOffset.canBegin，但解析路径本身并不走它，
+    //                           抽出去并没有换来单一事实来源，只多一跳）
+    //                        —— 否则 `1842071+0800`（12 位，与 HHMMSS±HH:MM 同长）
     //                           也能过，中间多出来的 `1` 被悄悄丢掉
     //   UTCOffset 认这个偏移   —— 否则 `184207+1+080` 也能过
     // 三个证人各自只被其中一道拦住，缺一道就有一条能溜过去。
@@ -173,7 +176,7 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     // `2024-0915` 被砍成 `2024` 那一半；这是同一个失效族的另一半。
     guard chars.count == 7 || chars.count == 11 || chars.count == 12,
           chars[0..<6].allSatisfy(\.isNumber),
-          UTCOffset.canBegin(with: chars[6]),
+          chars[6] == "+" || chars[6] == "-" || chars[6] == "Z",
           let offset = UTCOffset(parsing: value) else { return (value, nil) }
     return (String(chars[0..<6]), offset)
 }
@@ -190,16 +193,6 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
 struct UTCOffset: Equatable {
     /// 规范写法，形如 `+0800`。
     let text: String
-
-    /// 一个偏移后缀可以由哪些字符起头：`+`/`-`（`±HHMM`、`±HH:MM`）或 `Z`（UTC）。
-    ///
-    /// 供 splitIIMTime 在 IIM 时间的第 7 个字符上做粗筛用。放在本类型里是为了
-    /// 和 init?(parsing:) 认的那三种形状**同处一处便于对照**——仅此而已：
-    /// 下面的解析路径并不经过本方法（Z 分支查的是末尾，± 分支查的是 token[0]），
-    /// 所以真要新增一种形状，这里和那里都得手改。它不是单一事实来源。
-    static func canBegin(with character: Character) -> Bool {
-        character == "+" || character == "-" || character == "Z"
-    }
 
     /// 从 `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00`、`…Z` 里解析出偏移；
     /// 解析不出就是 nil。
@@ -240,28 +233,86 @@ struct UTCOffset: Equatable {
         return nil
     }
 
-    /// `head` 是否以一个完整的时刻收尾——即它后面紧跟的那个 `Z` 是时区标记，
-    /// 而不是碰巧出现在某段文本末尾的字母 Z。
+    /// `head` 后面紧跟的那个 `Z` 是不是时区标记（而不是碰巧落在文本末尾的字母 Z）。
     ///
-    /// 和 `±` 两种形状同样锚定在末尾：允许可选的小数秒，再要求紧前面是
-    /// `HHMMSS`（整个值就是 IIM 的 TimeCreated，如 `184207Z`）或
-    /// `HH:MM:SS`（如 `2024-09-15T18:42:07Z`；它前面那位不能是数字，
-    /// 否则 `1234518:42:07Z` 这种拼接也会算数）。
+    /// 整个值必须是下面两种形状之一——**两头都锚定**，不是"末尾像就算"：
+    ///   `<时刻>Z`                 如 `184207Z`、`18:42Z`、`10:42:07Z`
+    ///   `<日期><分隔><时刻>Z`      如 `2024-09-15T18:42:07Z`、`20240915T184207Z`
+    /// 日期是 `YYYY-MM-DD` 或 `YYYYMMDD`，分隔是 `T` 或空格，时刻见 isTimeOfDay。
+    ///
+    /// 上一版只凑了两条形状、不验数值、前导只拒数字，于是**两个方向同时错**（实测）：
+    ///   松：`995999Z`（59 分 99 秒）、`99:99:99Z`、`拍摄于 18:42:07Z` → 读成 `+0000`
+    ///   严：`2024-09-15T18:42Z`（分钟精度）、`20240915T184207Z`（基本格式）、
+    ///       `2024-09-15T18:42:07,42Z`（逗号小数秒）→ 全被误拒
+    /// 松的那一半是静默放过，所以现在照 ISO 8601 对"时刻"的定义写，不再凑形状。
+    ///
+    /// 一个不可消除的歧义：`202409Z` 既像年月、也像 20:24:09，按形状分不开，
+    /// 只能当时刻收下。前提是它必须是**整个值**——没有哪个元数据字段会把年月
+    /// 单独写成 6 位再缀一个 Z。同理 4 位无分隔的 `hhmm` 不接受单独成值
+    /// （`2024Z` 会被读成 20:24），只在日期后面出现时才算（`…T1842Z`）。
     private static func terminatesTime(_ value: [Character]) -> Bool {
         var head = value
-        // 可选的小数秒，如 `…18:42:07.42Z`——ImageIO 合成的 XMP 时间戳就是这个形状。
-        if let dot = head.lastIndex(of: "."), dot < head.count - 1,
-           head[(dot + 1)...].allSatisfy(\.isNumber) {
-            head = Array(head[..<dot])
+        // 可选小数秒：ISO 8601 的小数点可以是 `.` 也可以是 `,`。
+        if let point = head.lastIndex(where: { $0 == "." || $0 == "," }),
+           point < head.count - 1, head[(point + 1)...].allSatisfy(\.isNumber) {
+            head = Array(head[..<point])
         }
-        // `HHMMSS`，且整个值就是它：IIM 时间字段之外没有别的东西长这样。
-        if head.count == 6, head.allSatisfy(\.isNumber) { return true }
-        // `HH:MM:SS`
-        guard head.count >= 8 else { return false }
-        let t = Array(head[(head.count - 8)...])
-        guard t[2] == ":", t[5] == ":",
-              [0, 1, 3, 4, 6, 7].allSatisfy({ t[$0].isNumber }) else { return false }
-        return head.count == 8 || !head[head.count - 9].isNumber
+        for width in [8, 6, 5, 4] where head.count >= width {
+            guard isTimeOfDay(Array(head[(head.count - width)...])) else { continue }
+            // 整个值就是时刻。4 位无分隔的与年份无法区分，不收。
+            if head.count == width { return width != 4 }
+            let before = Array(head[..<(head.count - width)])
+            guard let separator = before.last, separator == "T" || separator == " " else { continue }
+            if isDate(Array(before.dropLast())) { return true }
+        }
+        return false
+    }
+
+    /// `hh:mm:ss`（宽 8）/ `hhmmss`（6）/ `hh:mm`（5）/ `hhmm`（4），并验数值范围。
+    /// 宽度前提在本函数内成立：下面的下标都按 `t.count` 分支写死，
+    /// 不依赖调用方那个 `for width in [8, 6, 5, 4]`。秒允许 60，那是闰秒。
+    private static func isTimeOfDay(_ t: [Character]) -> Bool {
+        let digits: [Character]
+        switch t.count {
+        case 8:
+            guard t[2] == ":", t[5] == ":" else { return false }
+            digits = [t[0], t[1], t[3], t[4], t[6], t[7]]
+        case 6:
+            digits = t
+        case 5:
+            guard t[2] == ":" else { return false }
+            digits = [t[0], t[1], t[3], t[4]]
+        case 4:
+            digits = t
+        default:
+            return false
+        }
+        guard digits.allSatisfy(\.isNumber),
+              let hours = Int(String(digits[0...1])), hours <= 23,
+              let minutes = Int(String(digits[2...3])), minutes <= 59 else { return false }
+        if digits.count == 4 { return true }
+        guard let seconds = Int(String(digits[4...5])), seconds <= 60 else { return false }
+        return true
+    }
+
+    /// `YYYY-MM-DD`（宽 10）或 `YYYYMMDD`（8），并验月日范围。
+    /// 宽度前提同样在本函数内成立。不查某月到底有几天：这里只是在判断
+    /// 「Z 前面那段是不是一个日期」，不是在校验日历。
+    private static func isDate(_ d: [Character]) -> Bool {
+        let digits: [Character]
+        switch d.count {
+        case 10:
+            guard d[4] == "-", d[7] == "-" else { return false }
+            digits = [d[0], d[1], d[2], d[3], d[5], d[6], d[8], d[9]]
+        case 8:
+            digits = d
+        default:
+            return false
+        }
+        guard digits.allSatisfy(\.isNumber),
+              let month = Int(String(digits[4...5])), (1...12).contains(month),
+              let day = Int(String(digits[6...7])), (1...31).contains(day) else { return false }
+        return true
     }
 
     /// 核对一个候选 token（`±HHMM` 或 `±HH:MM`）并归一化成 `±HHMM`。
