@@ -500,7 +500,10 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
         }()
         let item = model.rows[row]
         cell.configure(with: item)
-        cell.onShowIssues = { [weak self] anchor in self?.showIssues(item.issues, from: anchor) }
+        cell.onShowIssues = { [weak self] anchor in
+            guard case .differences(let issues) = item.verification else { return }
+            self?.showIssues(issues, from: anchor)
+        }
         return cell
     }
 }

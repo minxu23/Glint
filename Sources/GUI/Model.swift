@@ -36,7 +36,7 @@ struct FileRow {
     var inBytes = 0
     var outBytes = 0
     var dest: URL?
-    var issues: [String] = []
+    var verification: Verification = .notVerified
     /// 转换成功、但有一句与元数据差异无关的说明（目前只有"校验未通过所以
     /// 没删源文件"）。跳过/失败的原因不在这里，在 status 里。
     var note = ""
@@ -70,7 +70,7 @@ struct FileRow {
         case .done:
             if tagCount > 0 { parts.append("元数据 \(tagCount) 项") }
             if xattrCount > 0 { parts.append("扩展属性 \(xattrCount) 项") }
-            if issues.isEmpty && tagCount > 0 { parts.append("校验无差异") }
+            if verification == .passed && tagCount > 0 { parts.append("校验无差异") }
             if !note.isEmpty { parts.append(note) }
         case .skipped(let why), .failed(let why):
             parts.append(why)
@@ -226,7 +226,7 @@ final class ConversionModel {
             switch row.status {
             case .done:
                 tally.recordConverted(inBytes: row.inBytes, outBytes: row.outBytes,
-                                      hasIssues: !row.issues.isEmpty)
+                                      hasIssues: row.verification.hasDifferences)
             case .skipped: tally.skipped += 1
             case .failed: tally.failed += 1
             case .pending, .running: break
@@ -307,7 +307,7 @@ final class ConversionModel {
             rows[i].dest = r.dest
             rows[i].tagCount = r.tagCount
             rows[i].xattrCount = r.xattrCount
-            rows[i].issues = r.issues
+            rows[i].verification = r.verification
         case .skipped(let why):
             rows[i].status = .skipped(why)
         case .failed(let why):

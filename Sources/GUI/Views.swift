@@ -185,8 +185,9 @@ final class FileRowView: NSTableCellView {
             statusImage.isHidden = true
             spinner.startAnimation(nil)
         case .done:
-            setStatus(row.issues.isEmpty ? "checkmark.circle.fill" : "checkmark.circle",
-                      row.issues.isEmpty ? .systemGreen : .systemOrange)
+            let flagged = row.verification.hasDifferences
+            setStatus(flagged ? "checkmark.circle" : "checkmark.circle.fill",
+                      flagged ? .systemOrange : .systemGreen)
         case .skipped:
             setStatus("minus.circle", .secondaryLabelColor)
         case .failed:
@@ -203,15 +204,15 @@ final class FileRowView: NSTableCellView {
             badge.isHidden = true
         }
 
-        if row.issues.isEmpty {
-            issuesButton.isHidden = true
-        } else {
+        if case .differences(let issues) = row.verification {
             issuesButton.isHidden = false
             // 纯文本标题不受 contentTintColor 影响，得用富文本才能上色。
             issuesButton.attributedTitle = NSAttributedString(
-                string: "\(row.issues.count) 处差异",
+                string: "\(issues.count) 处差异",
                 attributes: [.foregroundColor: NSColor.systemOrange,
                              .font: NSFont.systemFont(ofSize: 11, weight: .medium)])
+        } else {
+            issuesButton.isHidden = true
         }
     }
 

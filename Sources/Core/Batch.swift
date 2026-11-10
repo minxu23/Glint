@@ -330,7 +330,8 @@ struct BatchTally {
     mutating func record(_ result: ConvertResult) {
         switch result {
         case .converted(let r):
-            recordConverted(inBytes: r.inBytes, outBytes: r.outBytes, hasIssues: !r.issues.isEmpty)
+            recordConverted(inBytes: r.inBytes, outBytes: r.outBytes,
+                            hasIssues: r.verification.hasDifferences)
         case .skipped:
             skipped += 1
         case .failed:

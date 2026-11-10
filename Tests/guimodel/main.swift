@@ -232,4 +232,26 @@ check("output 改不动", m6.options.output, nil)
 check("inputs 改不动", m6.options.inputs, [])
 check("改不动的字段不算变化，所以也不通知", notices, 2)
 
+// MARK: - 7. 没校验不等于校验通过
+
+// 关掉"转换后校验元数据"时，一张必然丢数据的图（--lossy 夹具）也不能显示
+// 「校验无差异」。第一条是对照：开着校验、无损的图确实会显示这几个字，
+// 否则后一条"不含"在文案改掉时也成立。
+print("界面模型：没校验就不说「校验无差异」")
+check(m1.rows.first?.detailText.contains("校验无差异") == true,
+      "开着校验、无损的图显示「校验无差异」（对照）")
+let unverified = files(in: work.appendingPathComponent("未校验"), ext: "jpg")
+if unverified.count == 1 {
+    let m7 = ConversionModel()
+    m7.updateOptions { $0.verify = false }
+    m7.add(urls: unverified)
+    m7.start()
+    check(wait(until: { !m7.isRunning }), "关掉校验的那一批走完了流程")
+    check("关掉校验时结果是「未校验」", m7.rows.first?.verification, .notVerified)
+    check(m7.rows.first?.detailText.contains("校验无差异") == false,
+          "关掉校验时副标题不说「校验无差异」")
+} else {
+    fail("「未校验」目录里应当恰好有一张 --lossy 夹具（实际 \(unverified.count) 张）")
+}
+
 finish("界面模型测试")

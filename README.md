@@ -91,7 +91,8 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
    （访达备注 `kMDItemFinderComment`、访达标签 `kMDItemUserTags` 等）。
    相册类 App 在 EXIF 缺失时会回退到文件时间，所以这一层同样影响"拍摄时间"。
 
-ICC 色彩描述文件和图像方向也一并保留。
+ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：产物会变成 RGB、
+描述文件变成 sRGB，`--verify` 会把这两项报出来。
 
 转换走 `CGImageDestinationAddImageFromSource`，直接从源转码而不是先解码成位图
 再编码，中间环节更少。写入采用「先写临时文件、成功后再原子替换」，中断不会留下
@@ -100,12 +101,35 @@ ICC 色彩描述文件和图像方向也一并保留。
 ## `--verify` 到底比什么
 
 把源文件和产物的元数据各自递归展开成「路径 = 值」的集合，逐条比对，报告
-丢失和变化。有三类差异会被有意忽略，因为它们描述的是文件本身而非照片内容：
+丢失和变化。
+
+**源侧的时间字段以原始字节为准。** ImageIO 读 JPEG 时会把 EXIF、IPTC-IIM、XMP
+三处的时间互相调和：只改过 EXIF 时间的照片，它的属性视图里 IIM 的 `184207+0800`
+会变成 `184208`、XMP 里的 `+08:00` 随之消失；只改过 IIM 时，视图里的 EXIF 拍摄
+时间又会跟着 IIM 变。所以源侧这些字段不取视图，而是直接从 JPEG 字节里读，覆盖
+视图里的同名键：EXIF 的 `DateTime`、`DateTimeOriginal`、`DateTimeDigitized`、
+`OffsetTime*`，IIM 的 `DateCreated`、`TimeCreated`、`DigitalCreationDate`、
+`DigitalCreationTime`，以及 XMP 包里所有值形如时间戳的标签。然后照下面的规则
+比对。XMP 的时间戳按时刻比：日期相同，时刻在源值给出的精度上相同，源值带小数秒
+或偏移则必须一样；产物多带小数秒或偏移不算差异——ImageIO 写产物时会从 EXIF 补上
+`.42` 这样的小数秒。
+
+**ImageIO 看不见的段逐段报出。** 属性视图里没有、转换后必然消失的东西，比对键
+空间是发现不了的，所以另外扫一遍源 JPEG 的段结构，每段报一条：
+
+- `COM` 注释段；
+- ImageIO 不认识的 `APPn` 段（如 C2PA 用的 APP11）。认识的是 JFIF/JFXX、EXIF、
+  XMP 主包、ICC、MPF、Photoshop（IPTC）和 Adobe 这几种；
+- `EOI` 之后的数据（安卓动态照片的视频、MPF 多图格式的附加图像等）。全是
+  `0x00`/`0xFF` 填充的不算。
+
+有几类差异会被有意忽略，因为它们描述的是文件本身而非照片内容：
 
 - 编码相关的键：文件体积、像素尺寸、色深、压缩方式、JFIF 段、ImageIO 内部标记。
   按**完整键路径**精确匹配，不用子串——`Depth`、`Compression` 这类片段太短，
   子串匹配会让 `{MakerCanon}/FocusDepth`、`XMP/crs:DepthMapInfo` 这类真实字段
-  被整条跳过且悄无声息。
+  被整条跳过且悄无声息。色彩描述文件名（`ProfileName`）和色彩模型
+  （`ColorModel`）**不**在其中：它们决定像素怎么解读，CMYK 被转成 sRGB 会报出来。
 - EXIF 定长字符串的尾部 NUL 填充——JPEG 和 HEIC 的填充长度天然不同，
   只比对有效内容。
 - **有理数的重新编码噪声**。EXIF 的数值以「分子/分母」存放，写入方常常换成另一个
@@ -117,8 +141,9 @@ ICC 色彩描述文件和图像方向也一并保留。
 - JPEG 的 IPTC-IIM 日期字段（`DateCreated` / `TimeCreated` 等）。HEIF 没有 IIM
   容器，同样的信息由 `XMP/photoshop:DateCreated` 和 `{Exif}/DateTimeOriginal`
   承载。判据是等价字段**确实带着同一个值**，不是"等价字段存在"——这几种格式
-  各不相同（IIM 写 `20240915`，EXIF 写 `2024:09:15 18:42:07`），所以两边都只留
-  数字再比对。等价字段在、值却是另一个时间，照样算丢失。
+  各不相同（IIM 写 `20240915`，EXIF 写 `2024:09:15 18:42:07`），所以按位置比：
+  等价值拆成日期、时刻、小数秒、偏移，IIM 的日期只和日期位比，IIM 的时间只和
+  时、分、秒比，只认 ASCII 数字。等价字段在、值却是另一个时间，照样算丢失。
   IIM 的时间可以带时区（`184207+0800`）。EXIF 那边的时区由 `OffsetTime` 单独
   承载，所以比对时把偏移拆开：时间部分跨格式比对，**偏移本身必须在目标文件里
   也找得到**，否则照样算丢失。只拆时间部分不管偏移去哪了，就会在"偏移只存在于
@@ -183,6 +208,14 @@ ICC 色彩描述文件和图像方向也一并保留。
   只有 ImageIO 顺手塞进同一个字典的未声明键（`AFInfo`、`FocusMode`、
   `ImageStabilization`）才算 MakerNote 派生。要的是不刷噪声，不是掩盖真丢失。
   在意 MakerNote 的话就别用 `--delete-original`：校验不通过时工具本来也会拒绝删除。
+- **ImageIO 不认识的 JPEG 段不会保留**：`COM` 注释段、C2PA 的 APP11 等未知 `APPn`
+  段、`EOI` 之后的数据（动态照片的视频、MPF 附加图像）。`--verify` 会逐段报出，
+  所以 `--delete-original` 不会删这样的源文件。
+- **Windows 资源管理器写的 EXIF 备注与评级不会保留，`--verify` 也发现不了**：
+  IFD0 里的 `XPTitle`、`XPComment`、`XPAuthor`、`XPKeywords`（`0x9C9B`–`0x9C9E`）
+  和 `Rating`（`0x4746`）。ImageIO 不读这几个标签，它们既不在属性视图里，也不会
+  写进产物，所以校验通过、`--delete-original` 照样会删源。在意它们就别用
+  `--delete-original`。
 - **界面用 AppKit 而非 SwiftUI**。SwiftUI 的 `@State` 等属性包装器现在是宏，
   宏插件只随完整版 Xcode 分发；用 AppKit 才能只靠命令行工具构建。
 - **应用是本地临时签名的**，没有开发者证书。自己构建自己用没问题，拷给别人
@@ -233,7 +266,9 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/Converter.swift` | 单张图的转换：读元数据、编码 HEIF、搬运文件层属性 |
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
-| `Sources/Core/ExifReader.swift` | 手写 EXIF 解析，捞回 ImageIO 读不出的 `UserComment` |
+| `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：捞回 ImageIO 读不出的 `UserComment`，按标签读原始值 |
+| `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后） |
+| `Sources/Core/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
 | `Sources/CLI/Arguments.swift` | 命令行参数解析（纯函数，可被测试直接调用） |
 | `Sources/CLI/main.swift` | 命令行入口：串起解析、转换与输出 |
 | `Sources/GUI/` | AppKit 界面：窗口、列表行、拖放区、界面状态 |

@@ -98,10 +98,12 @@ func xmpKey(_ path: String) -> String { "XMP/\(path)" }
 /// 真丢失也一并藏了。
 ///
 /// 有常量的直接引用常量，Apple 改了值也跟得上；XMP 侧没有常量，只能写路径。
+///
+/// 色彩描述文件名（ProfileName）和色彩模型（ColorModel）不在这里：它们描述
+/// 像素该怎么解读，ICC 被换掉（如 CMYK 的描述文件变成 sRGB）就是丢失。
 let volatileKeys: Set<String> = {
     let topLevel: [CFString] = [
-        kCGImagePropertyDepth, kCGImagePropertyProfileName, kCGImagePropertyPrimaryImage,
-        kCGImagePropertyColorModel, kCGImagePropertyHasAlpha,
+        kCGImagePropertyDepth, kCGImagePropertyPrimaryImage, kCGImagePropertyHasAlpha,
         kCGImagePropertyIsFloat, kCGImagePropertyIsIndexed,
         kCGImagePropertyFileSize, kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight,
     ]
@@ -249,13 +251,7 @@ func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
         // isAllDigits 在这里是承重的，不只是 Int(String) 的前置装饰：`Int` 认
         // 前导符号，`Int("+999")` 是 999。少了这一句，`+999-09-15` 会被当成一个
         // 日期，于是 `+999-09-15T18:42:07+08:00` 能读出 `+0800`——目标侧读取器
-        // 一松就是静默放过。「ASCII 数字」这个判定只由 isAllDigits 定义；
-        // carriesSameValue 另有一处 `filter(\.isNumber)`，不是同一个判定。
-        // 它更松，而且**松的方向不是安全那一侧**：isNumber 留下非 ASCII 数字，
-        // 于是 carriesSameValue("٢٣", "x٢٣") 是 true，而 ASCII-only 过滤会让
-        // 源侧过滤成空串、返回 false。也就是说它偏向"算承载"，正是本项目叫
-        // 静默放过的那个方向。实测不可达（ImageIO 写的是 ASCII），所以这里只
-        // 记事实，不写"只会多报"那种它给不出的保证。
+        // 一松就是静默放过。「ASCII 数字」这个判定只由 isAllDigits 定义。
         guard isAllDigits(digits), let n = Int(String(digits)) else { return nil }
         i += width
         fields.append(n)
@@ -425,6 +421,66 @@ struct UTCOffset: Equatable {
     private static func twoDigits(_ n: Int) -> String { n < 10 ? "0\(n)" : "\(n)" }
 }
 
+/// 一个按位置拆开的时间戳：`<日期>[<T 或空格><时刻>[<小数秒>]][<偏移>]`。
+///
+/// 日期是 DigitShape.dateShapes 之一并验月日范围；时刻是 timeOfDayShapes 之一
+/// 并验时分秒范围（`hhmm` 只在日期之后出现时才认）；小数点可以是 `.` 或 `,`；
+/// 偏移是 `Z` 或 UTCOffset 认的 `±HHMM`/`±HH:MM`。字段一律只认 ASCII 数字。
+/// 只有日期没有时刻也算（XMP 允许 `2024-09-15`）。别的形状一律 nil。
+struct Timestamp: Equatable {
+    let date: [Int]
+    /// 空、`[时, 分]` 或 `[时, 分, 秒]`。
+    let time: [Int]
+    /// 小数秒的数字，去掉了末尾的 0；没有就是空串。
+    let fraction: String
+    let offset: UTCOffset?
+
+    init?(parsing value: String) {
+        let chars = Array(value)
+        let split = chars.firstIndex { $0 == "T" || $0 == " " }
+        let datePart = Array(chars[..<(split ?? chars.count)])
+        guard let date = DigitShape.dateShapes.lazy.compactMap({ numericFields(datePart, $0) }).first,
+              (1...12).contains(date[1]), (1...31).contains(date[2]) else { return nil }
+        self.date = date
+        guard let split else {
+            time = []; fraction = ""; offset = nil
+            return
+        }
+        var rest = Array(chars[(split + 1)...])
+        var offset: UTCOffset?
+        if let sign = rest.firstIndex(where: { $0 == "+" || $0 == "-" || $0 == "Z" }) {
+            let token = String(rest[sign...])
+            offset = token == "Z" ? UTCOffset(parsing: "+00:00") : UTCOffset(parsing: token)
+            guard offset != nil else { return nil }
+            rest = Array(rest[..<sign])
+        }
+        self.offset = offset
+        var fraction = ""
+        if let point = rest.firstIndex(where: { $0 == "." || $0 == "," }) {
+            let digits = Array(rest[(point + 1)...])
+            guard isAllDigits(digits) else { return nil }
+            fraction = String(String(digits).reversed().drop { $0 == "0" }.reversed())
+            rest = Array(rest[..<point])
+        }
+        self.fraction = fraction
+        guard let time = DigitShape.timeOfDayShapes.lazy.compactMap({ numericFields(rest, $0) }).first,
+              time[0] <= 23, time[1] <= 59, time.count == 2 || time[2] <= 60 else { return nil }
+        self.time = time
+    }
+
+    /// 本时间戳的全部信息在 `other` 里都还在：日期相同；时刻在自己给出的精度
+    /// 上相同；自己有小数秒则小数秒相同；自己有偏移则偏移相同。`other` 多带
+    /// 小数秒或偏移不算丢失——ImageIO 合成 XMP 时会从 EXIF 补上这两样。
+    func isCarried(by other: Timestamp) -> Bool {
+        guard date == other.date,
+              other.time.count >= time.count, Array(other.time.prefix(time.count)) == time
+        else { return false }
+        if !fraction.isEmpty, fraction != other.fraction { return false }
+        if let offset, other.offset != offset { return false }
+        return true
+    }
+}
+
 /// 目标文件里该带 UTC 偏移的那些字段。HEIF 没有 IIM 容器，源里 IIM 时间后缀的
 /// 偏移只能落到这些地方；都找不到，那偏移就是真丢了。
 let utcOffsetKeys: [String] = {
@@ -469,20 +525,17 @@ func equivalentCarries(key: String, value: String, in after: [String: String]) -
 ///
 /// 这四组都是日期/时间，只是格式不同：IIM 写 `20240915` 和 `184207`，
 /// EXIF 写 `2024:09:15 18:42:07`，XMP 写 `2024-09-15T18:42:07.42`。
-/// 两边都只留数字再看包含关系，就能跨格式比较。
-///
-/// 这不是严格的语义比较——纯数字的巧合匹配理论上存在。但它能拦住
-/// "等价字段在、值却是另一个时间" 这种真丢失，而只判断键存在完全拦不住。
-/// 宁可偶尔多报一条，也不要静默放过。
-///
-/// 比较方向是单向的（源值出现在等价值里），因为等价字段总比 IIM 更长：
-/// IIM 只写日期或只写时间，EXIF/XMP 两样都写。反过来包含没有意义。
+/// 按位置比：等价值拆成 Timestamp，源值是 8 位的 IIM 日期就和日期位比，
+/// 是 6 位的 IIM 时间就和时刻位（时、分、秒）比。两边都只认 ASCII 数字；
+/// 源值不是这两种形状、或等价值拆不开，一律不算承载。
 func carriesSameValue(_ sourceValue: String, _ equivalentValue: String) -> Bool {
-    let source = sourceValue.filter(\.isNumber)
-    let equivalent = equivalentValue.filter(\.isNumber)
-    guard !source.isEmpty, !equivalent.isEmpty else { return false }
-    return equivalent.contains(source)
+    guard let stamp = Timestamp(parsing: equivalentValue) else { return false }
+    let source = Array(sourceValue)
+    if let date = numericFields(source, .ymdPlain) { return date == stamp.date }
+    if let time = numericFields(source, .hhmmss) { return time == stamp.time }
+    return false
 }
+
 
 /// {ExifAux} 里 ImageIO 正式声明过的键。它们有 XMP `aux:` 命名空间可以承载，
 /// 实测全部能完好转换到 HEIF，因此**不是** MakerNote 派生数据——真丢了就是真问题，
@@ -567,9 +620,24 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
           let destImage = CGImageSourceCreateWithURL(dest as CFURL, nil) else {
         return ["无法重新打开文件进行校验"]
     }
+    guard let data = try? Data(contentsOf: source, options: .mappedIfSafe) else {
+        return ["无法重新读取源文件进行校验"]
+    }
+    let bytes = [UInt8](data)
+    // 源侧的时间字段以原始字节为准，覆盖属性视图里被调和过的值（见 RawTimes.swift）。
+    let before = metadataKeySpace(of: sourceImage, url: source)
+        .merging(rawTimeFields(of: bytes)) { _, raw in raw }
+    return keySpaceDiff(before: before, after: metadataKeySpace(of: destImage, url: dest))
+        + unportableSegments(in: bytes)
+}
 
-    return keySpaceDiff(before: metadataKeySpace(of: sourceImage, url: source),
-                        after: metadataKeySpace(of: destImage, url: dest))
+/// XMP 的时间戳按时刻比（Timestamp.isCarried）：目标可以多带小数秒或偏移，
+/// 不能少、不能变。源侧取的是原始 XMP 包，而目标的 XMP 是 ImageIO 合成的，
+/// 一致的照片上它也会从 EXIF 补上 `.42` 这样的小数秒。
+func xmpTimeCarried(key: String, _ source: String, _ target: String) -> Bool {
+    guard key.hasPrefix(xmpKey("")),
+          let s = Timestamp(parsing: source), let t = Timestamp(parsing: target) else { return false }
+    return s.isCarried(by: t)
 }
 
 /// 两个键空间 → 差异列表。纯函数，不碰文件：单测直接喂手搭的字典，
@@ -586,7 +654,7 @@ func keySpaceDiff(before: [String: String], after: [String: String]) -> [String]
                 continue
             }
             issues.append("丢失 \(k) = \(truncate(v))")
-        } else if !valuesMatch(v, after[k]!) {
+        } else if !valuesMatch(v, after[k]!) && !xmpTimeCarried(key: k, v, after[k]!) {
             issues.append("变化 \(k): \(truncate(v)) → \(truncate(after[k]!))")
         }
     }

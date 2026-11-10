@@ -74,6 +74,11 @@ expectCarried("184207", "2024:09:15 09:00:00", false, "日期对但时间不对�
 expectCarried("", "2024:09:15 18:42:07", false, "源值没有数字")
 expectCarried("20240915", "", false, "等价字段是空的")
 expectCarried("20240915", "<无>", false, "等价字段没有数字")
+// 按位置比：日期只和日期位比、时间只和时刻位比，只认 ASCII 数字。
+expectCarried("091518", "2024:09:15 18:42:07", false, "跨日期和时间凑出来的数字串不算")
+expectCarried("074208", "2024-09-15T18:42:07.42+08:00", false, "靠小数秒和偏移的数字凑出来的不算")
+expectCarried("٢٣", "x٢٣", false, "非 ASCII 数字不算数字")
+expectCarried("184207", "2024-09-15T18:42:07+08:00", true, "带偏移的 XMP 时间戳，时刻位照样比得上")
 
 print("带时区的 IIM 时间：偏移本身也得在目标里找得到")
 // 这一组是审查抓出来的假阴性。IIM 的 TimeCreated 可以带 UTC 偏移
@@ -349,10 +354,13 @@ func expectVolatile(_ key: String, _ want: Bool, _ why: String) {
     checkRule(key, isVolatile(key), want, why)
 }
 // 该跳过的：文件自身的物理描述
-for k in ["Depth", "ProfileName", "PrimaryImage", "ColorModel",
+for k in ["Depth", "PrimaryImage",
           "FileSize", "PixelWidth", "PixelHeight", "HasAlpha", "IsFloat", "IsIndexed"] {
     expectVolatile(k, true, "顶层 \(k)")
 }
+// 色彩描述文件与色彩模型描述的是像素怎么解读：CMYK 转成 sRGB 必须报出来。
+expectVolatile("ProfileName", false, "ICC 描述文件名不是编码噪声")
+expectVolatile("ColorModel", false, "色彩模型不是编码噪声")
 expectVolatile("{JFIF}/XDensity", true, "JFIF 段整类（HEIF 没有这个段）")
 expectVolatile("XMP/iio:hasIIM", true, "ImageIO 内部标记")
 expectVolatile("{Exif}/ComponentsConfiguration", true, "EXIF 的分量配置")
@@ -422,6 +430,22 @@ check("MakerNote 派生键丢失合并成一条汇总",
       keySpaceDiff(before: ["{MakerCanon}/x": "1"], after: [:]),
       ["丢失 厂商私有数据 MakerNote（1 项：{MakerCanon} 1 项）"
        + "——ImageIO 读不出原始 MakerNote，也无法把它写入 HEIF"])
+// XMP 时间戳按时刻比：源侧取原始 XMP 包，目标的 XMP 是 ImageIO 合成的，会补小数秒。
+let xmpShot = "XMP/photoshop:DateCreated"
+check("XMP 时间目标多带小数秒不算变化",
+      keySpaceDiff(before: [xmpShot: "2024-09-15T18:42:07+08:00"],
+                   after: [xmpShot: "2024-09-15T18:42:07.42+08:00"]), [])
+check("XMP 时间的偏移丢了要报",
+      keySpaceDiff(before: [xmpShot: "2024-09-15T18:42:07+08:00"],
+                   after: [xmpShot: "2024-09-15T18:42:07.42"]),
+      ["变化 \(xmpShot): 2024-09-15T18:42:07+08:00 → 2024-09-15T18:42:07.42"])
+check("XMP 时间的秒变了要报",
+      keySpaceDiff(before: [xmpShot: "2024-09-15T18:42:07+08:00"],
+                   after: [xmpShot: "2024-09-15T18:42:08.42+08:00"]),
+      ["变化 \(xmpShot): 2024-09-15T18:42:07+08:00 → 2024-09-15T18:42:08.42+08:00"])
+check("非 XMP 键不放宽：EXIF 时间多出小数也算变化",
+      keySpaceDiff(before: [exifShot: "2024:09:15 18:42:07"], after: [exifShot: "2024:09:15 18:42:07.42"]),
+      ["变化 \(exifShot): 2024:09:15 18:42:07 → 2024:09:15 18:42:07.42"])
 check("易变键丢失或变化都跳过",
       keySpaceDiff(before: ["PixelWidth": "100", "{JFIF}/XDensity": "72"],
                    after: ["{JFIF}/XDensity": "96"]), [])

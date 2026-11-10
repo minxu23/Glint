@@ -131,17 +131,34 @@ struct ConversionReport {
     let tagCount: Int
     /// 搬运过去的扩展属性条数。
     let xattrCount: Int
-    /// --verify 比对出的元数据差异；空表示没有差异（或没开校验）。
-    /// 只装差异，别的什么都不要塞——下游（命令行的"发现 N 处差异"、界面的
-    /// 橙色徽章与弹窗标题）一律拿 issues.count 当差异条数，混进一句状态说明
-    /// 就会让差异数虚增，还会在差异列表里出现与元数据无关的句子。
-    let issues: [String]
+    /// 元数据校验的结果：没校验、通过、有差异，三者在类型上分开。
+    let verification: Verification
 
     /// 与元数据差异无关的一句状态说明，目前只有一种：请求了删除源文件但
     /// 因校验未通过而没删。没有要说的就是 nil。
     let note: String?
 
     var savingPercent: Int? { percentSaved(inBytes: inBytes, outBytes: outBytes) }
+}
+
+/// 一次元数据校验的结果。"没校验"和"校验通过"是两个值，下游只能靠匹配
+/// `.passed` 得出"通过"——没有一个空数组能同时表示这两件事。
+enum Verification: Equatable {
+    case notVerified
+    case passed
+    /// 非空。只装元数据差异，别的什么都不要塞：下游（命令行的"发现 N 处差异"、
+    /// 界面的橙色徽章与弹窗标题）拿它的条数当差异条数，混进一句状态说明就会虚增。
+    case differences([String])
+
+    /// 由比对结果构造：空表示通过。只在真的做过比对时调用。
+    init(comparing differences: [String]) {
+        self = differences.isEmpty ? .passed : .differences(differences)
+    }
+
+    var hasDifferences: Bool {
+        if case .differences = self { return true }
+        return false
+    }
 }
 
 enum ConvertResult {
@@ -181,7 +198,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
     if opts.dryRun {
         return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: 0,
                                           tagCount: tagCount, xattrCount: 0,
-                                          issues: [], note: nil))
+                                          verification: .notVerified, note: nil))
     }
 
     // 先写临时文件，成功后再原子替换，避免中断留下半个文件。
@@ -222,12 +239,13 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
         return .failed("写入目标失败: \(error.localizedDescription)")
     }
 
-    let issues = opts.verifyEnabled ? metadataDiff(source: input, dest: dest) : []
+    let verification = opts.verifyEnabled
+        ? Verification(comparing: metadataDiff(source: input, dest: dest)) : .notVerified
 
     // 删源文件的前提是逐条比对确认无损；有差异就留着，并说明为什么留。
     var note: String?
     if opts.deleteOriginal {
-        if issues.isEmpty {
+        if verification == .passed {
             try? fm.removeItem(at: input)
         } else {
             note = "因元数据校验未通过，保留了源文件"
@@ -236,7 +254,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
 
     return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: fileSize(dest),
                                       tagCount: tagCount, xattrCount: xattrs,
-                                      issues: issues, note: note))
+                                      verification: verification, note: note))
 }
 
 func fileSize(_ url: URL) -> Int {

@@ -15,6 +15,8 @@
 //            是 ImageIO 合成的 XMP/photoshop:DateCreated。默认那张图里
 //            OffsetTimeOriginal 自己就承载了偏移，于是 XMP 那条腿怎么写都
 //            不影响结果，整条分支是空跑。
+//   --cmyk   像素画在 Generic CMYK 色彩空间里，写出 CMYK JPEG（带 CMYK 的 ICC）。
+//            转成 HEIF 后色彩模型和描述文件都会变成 RGB/sRGB，校验必须报出来。
 
 import CoreGraphics
 import Foundation
@@ -24,18 +26,24 @@ import UniformTypeIdentifiers
 var args = Array(CommandLine.arguments.dropFirst())
 let lossy = args.contains("--lossy")
 let noExifOffset = args.contains("--no-exif-offset")
-args.removeAll { $0 == "--lossy" || $0 == "--no-exif-offset" }
-let usage = "用法: fixture [--lossy] [--no-exif-offset] <输出.jpg>"
+let cmyk = args.contains("--cmyk")
+args.removeAll { $0 == "--lossy" || $0 == "--no-exif-offset" || $0 == "--cmyk" }
+let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] <输出.jpg>"
 guard let path = args.first else {
     FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
 }
 let w = 1200, h = 900
-let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                    space: cs, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+let cs = CGColorSpace(name: cmyk ? CGColorSpace.genericCMYK : CGColorSpace.sRGB)!
+let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                    bitmapInfo: (cmyk ? CGImageAlphaInfo.none : .noneSkipLast).rawValue)!
 for i in 0..<30 {
-    ctx.setFillColor(red: Double(i) / 30, green: 0.45, blue: 1 - Double(i) / 30, alpha: 1)
+    let t = Double(i) / 30
+    if cmyk {
+        ctx.setFillColor(cyan: t, magenta: 0.45, yellow: 1 - t, black: 0.1, alpha: 1)
+    } else {
+        ctx.setFillColor(red: t, green: 0.45, blue: 1 - t, alpha: 1)
+    }
     ctx.fill(CGRect(x: i * (w / 30), y: 0, width: w / 30, height: h))
 }
 

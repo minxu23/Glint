@@ -24,9 +24,9 @@ ROUNDS=0
 # 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
-EXPECTED_ASSERTIONS=69
-EXPECTED_UNIT=229
-EXPECTED_GUI=37
+EXPECTED_ASSERTIONS=84
+EXPECTED_UNIT=237
+EXPECTED_GUI=41
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -87,6 +87,22 @@ refute() {
         pass "$what"
     fi
 }
+# 一张必有差异的样本走 --delete-original：校验必须报出每一条期望文本，源文件必须留着。
+# 用法：expect_reported 描述 文件 期望文本...（每条期望文本一条断言，另加源文件一条）
+expect_reported() {
+    local what=$1 file=$2 out st want; shift 2
+    out=$("$BIN" -v --delete-original "$file" 2>&1); st=$?
+    for want in "$@"; do
+        if grep -qF -- "$want" <<< "$out"; then
+            pass "$what：报出「$want」"
+        else
+            fail "$what：没报出「$want」"; sed 's/^/     /' <<< "$out"
+        fi
+    done
+    refute "$what：源文件保留" "$st" test ! -f "$file"
+}
+# 造样本的那一步失败要出声，否则后面的断言测的是一张没改过的图。
+make_sample() { "$@" >/dev/null 2>&1 || fail "造不出样本：$*"; }
 
 [ -x "$BIN" ] || bail "先运行 make 构建 $BIN"
 
@@ -335,13 +351,11 @@ cp "$WORK/照片.jpg" "$WORK/预演不删.jpg"
 refute "预演不删源文件" "$st" test ! -f "$WORK/预演不删.jpg"
 
 # 真实相机照片：MakerNote 必然丢失，校验必须报出汇总行，--delete-original 不能删源。
-# 用拷贝，test_pic/ 里的原件不可再生。
-cp test_pic/IMG_1225.JPG "$WORK/相机.jpg"
-camera_out=$("$BIN" -v --delete-original "$WORK/相机.jpg" 2>&1); st=$?
-echo "$camera_out" | grep -q "丢失 厂商私有数据 MakerNote" \
-    && pass "相机照片丢失 MakerNote 被报出" \
-    || { fail "相机照片丢失 MakerNote 却没报"; echo "$camera_out" | sed 's/^/     /'; }
-refute "相机照片丢了 MakerNote，源文件保留" "$st" test ! -f "$WORK/相机.jpg"
+# 用拷贝，test_pic/ 里的原件不可再生。截掉 EOI 之后的 MPF 预览图，让 MakerNote
+# 成为这张图唯一的差异——"源文件保留"这条于是只由 MakerNote 那一行撑着。
+cp test_pic/P1130939.JPG "$WORK/相机.jpg"
+make_sample ./Tests/mangle-tool --strip-trailer "$WORK/相机.jpg"
+expect_reported "相机照片丢失 MakerNote" "$WORK/相机.jpg" "丢失 厂商私有数据 MakerNote"
 
 round "7b. 偏移只靠 XMP 承载"
 # IIM 时间后缀里的偏移，在目标里的唯一承载是 ImageIO 合成的
@@ -378,12 +392,48 @@ case "$v" in
     *) fail "目标的 XMP/photoshop:DateCreated 没带偏移（[$v]）——承载者另有其人" ;;
 esac
 
+round "7c. ImageIO 视图之外的源数据"
+# 源侧的时间以原始字节为准。ImageIO 读 JPEG 时会把 EXIF、IIM、XMP 的时间互相
+# 调和，只看它的属性视图，源文件里实际写着的时间与偏移会在比对前被抹掉。
+# 只改 EXIF：三处 EXIF 时间等长改成 18:42:08，IIM 的 184207+0800 与 XMP 的 +08:00 不动。
+./Tests/fixture --no-exif-offset "$WORK/只改EXIF.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --replace "$WORK/只改EXIF.jpg" "2024:09:15 18:42:07" "2024:09:15 18:42:08"
+# 前提：视图里 IIM 时间确实被调和掉了，否则这张图测不到源侧读原始字节那一路。
+check "前提：ImageIO 视图把 IIM 时间调和成 EXIF 的 184208" \
+    "$(./Tests/probe "$WORK/只改EXIF.jpg" '{IPTC}/TimeCreated')" "184208"
+expect_reported "只改过 EXIF 时间" "$WORK/只改EXIF.jpg" "丢失 {IPTC}/TimeCreated = 184207+0800"
+# 只改 IIM：视图里的 EXIF 拍摄时间会跟着 IIM 变成 10:42:07。
+./Tests/fixture "$WORK/只改IIM.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --replace "$WORK/只改IIM.jpg" "184207+0800" "104207+0000"
+check "前提：ImageIO 视图把 EXIF 拍摄时间调和成 IIM 的 10:42:07" \
+    "$(./Tests/probe "$WORK/只改IIM.jpg" '{Exif}/DateTimeOriginal')" "2024:09:15 10:42:07"
+expect_reported "只改过 IIM 时间" "$WORK/只改IIM.jpg" \
+    "变化 {Exif}/DateTimeOriginal: 2024:09:15 18:42:07 → 2024:09:15 10:42:07"
+
+# ImageIO 不读的段：COM 注释、不认识的 APPn（APP11 是 C2PA 用的）、EOI 之后的数据。
+cp "$WORK/照片.jpg" "$WORK/注释段.jpg"
+make_sample ./Tests/mangle-tool --segment "$WORK/注释段.jpg" FE "JPEG 注释段里的备注"
+expect_reported "COM 注释段" "$WORK/注释段.jpg" "丢失 JPEG 注释段（COM）= JPEG 注释段里的备注"
+cp "$WORK/照片.jpg" "$WORK/APP11.jpg"
+make_sample ./Tests/mangle-tool --segment "$WORK/APP11.jpg" EB "JP c2pa 内容凭证"
+expect_reported "APP11 段" "$WORK/APP11.jpg" "丢失 APP11 段（JP c2pa "
+cp "$WORK/照片.jpg" "$WORK/尾部数据.jpg"
+make_sample ./Tests/mangle-tool --append "$WORK/尾部数据.jpg" "动态照片的视频放在这里"
+expect_reported "EOI 之后的数据" "$WORK/尾部数据.jpg" "丢失 EOI 之后的 33 字节"
+
+# CMYK 的 ICC 描述文件和色彩模型被换成 sRGB/RGB，必须报。
+./Tests/fixture --cmyk "$WORK/CMYK.jpg" >/dev/null
+expect_reported "CMYK 被转成 RGB" "$WORK/CMYK.jpg" \
+    "变化 ColorModel: CMYK → RGB" "变化 ProfileName: Generic CMYK Profile → sRGB"
+
 round "8. 界面模型：指定输出文件夹与取消"
 # 这两条走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，
 # 模态面板没法自动化，而 ConversionModel 覆盖的是同一套逻辑。
 mkdir -p "$WORK/界面模型/源" "$WORK/界面模型/取消" "$WORK/界面模型/中途取消" \
-         "$WORK/界面模型/递归/子目录"
+         "$WORK/界面模型/递归/子目录" "$WORK/界面模型/未校验"
 ./Tests/fixture "$WORK/界面模型/源/一.jpg" >/dev/null
+# 关掉校验时必然丢数据的那张，不能显示「校验无差异」
+./Tests/fixture --lossy "$WORK/界面模型/未校验/有损.jpg" >/dev/null
 ./Tests/fixture "$WORK/界面模型/源/二.jpg" >/dev/null
 # 递归开关的素材：顶层一张、子目录一张，勾与不勾的张数必须不同
 ./Tests/fixture "$WORK/界面模型/递归/顶层.jpg" >/dev/null

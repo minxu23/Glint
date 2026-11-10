@@ -87,16 +87,19 @@ let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result 
         if opts.verbose {
             print("    元数据条目 \(r.tagCount) 项，扩展属性 \(r.xattrCount) 项")
         }
-        if !r.issues.isEmpty {
-            print("    ⚠︎ 元数据校验发现 \(r.issues.count) 处差异:")
+        switch r.verification {
+        case .differences(let issues):
+            print("    ⚠︎ 元数据校验发现 \(issues.count) 处差异:")
             // 差异多的时候默认只列前几条，加 -v 看全部。
-            let shown = opts.verbose ? r.issues.count : 10
-            for i in r.issues.prefix(shown) { print("       - \(i)") }
-            if r.issues.count > shown {
-                print("       - …还有 \(r.issues.count - shown) 处（加 -v 看全部）")
+            let shown = opts.verbose ? issues.count : 10
+            for i in issues.prefix(shown) { print("       - \(i)") }
+            if issues.count > shown {
+                print("       - …还有 \(issues.count - shown) 处（加 -v 看全部）")
             }
-        } else if opts.verifyEnabled {
+        case .passed:
             print("    ✓ 元数据校验通过")
+        case .notVerified:
+            break
         }
         // 状态说明单独一行，不混进上面的差异列表。
         if let note = r.note { print("    \(note)") }
