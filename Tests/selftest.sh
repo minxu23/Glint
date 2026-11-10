@@ -11,16 +11,19 @@ ROUNDS=0
 # 「少跑了却宣布通过」有三种走法，光看 FAILED 一种都看不出来——没跑就没失败。
 # 三条 `[ -x Tests/X ]` 包装干的就是第二种（缺产物则静默少跑一整节，
 # 结尾照样宣布通过）。那三条已经删了，下面三道守卫是防它从别的地方回来。
-#   整轮消失      -> ROUNDS 对不上（轮次标题一律走 round()）
-#   轮还在、正文被跳过 -> PASSED 对不上（这是最阴的一种：轮次照打印）
-#   脚本中途死掉     -> trap 兜底（结尾的检查本身都执行不到）
-# 加断言时要同步改 EXPECTED_PASSES。用精确值而不是下限：下限挡不住
-# 「加了 5 条、同时静默少了 3 条」。
-EXPECTED_ROUNDS=12
-EXPECTED_PASSES=60
-# 两个子套件自己的断言条数。它们各自只在本脚本里产出 1 个 pass，
-# EXPECTED_PASSES 看不见它们缩水，所以单列。
-EXPECTED_UNIT=202
+#   整轮消失 / 正文被跳过 -> 执行的断言条数对不上（EXPECTED_ASSERTIONS）
+#   子套件自己缩水        -> 它自己的条数对不上（EXPECTED_UNIT / EXPECTED_GUI；
+#                            它们各自只产出 1 个 pass，总数看不见它们缩水）
+#   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
+# 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了 5 条、
+# 同时静默少了 3 条」。
+#
+# 原先还有一个 EXPECTED_ROUNDS=12，删了：没有哪一轮是零断言（最少的也有 2 条），
+# 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
+# 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
+# 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
+EXPECTED_ASSERTIONS=60
+EXPECTED_UNIT=215
 EXPECTED_GUI=37
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -39,6 +42,17 @@ bail() { printf '%s\n' "$1"; REACHED_END=1; exit 1; }
 pass() { printf '  ✓ %s\n' "$1"; PASSED=$((PASSED + 1)); }
 fail() { printf '  ✗ %s\n' "$1"; FAILED=$((FAILED + 1)); }
 round() { ROUNDS=$((ROUNDS + 1)); printf '%s\n' "$1"; }
+# 「某一组断言有没有少跑」只有这一处实现。成功时也出声，好让这条守卫自己
+# 落在 EXPECTED_ASSERTIONS 的覆盖范围里——否则它被静默删掉时没人发现。
+expect_count() {
+    [ "$2" -eq "$3" ] \
+        && pass "$1跑满 $2 条，没有静默缩水" \
+        || fail "$1跑了 $2 条，预期 $3 条（改动断言后请同步 $4）"
+}
+# 数「执行了多少条」而不是「通过了多少条」：一条用例失败就少一个 ✓，
+# 于是守卫会跟着报「跑少了」——那是误诊。锚到行首，免得正文里出现
+# ✓/✗ 的说明文字虚增计数、反而掩盖缩水。
+count_assertions() { printf '%s\n' "$1" | grep -cE '^ *[✓✗]'; }
 check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (期望 [$3]，实际 [$2])"; fi; }
 
 [ -x "$BIN" ] || bail "先运行 make 构建 $BIN"
@@ -82,20 +96,13 @@ round "0. 校验规则单元测试"
 # 套件照样打印「全部通过（12 轮，58 项断言）」。这是「少跑了却宣布通过」的
 # 第四种走法——被压成一个 pass 的子套件自己缩水——上一轮三道守卫都没看见。
 unit_out=$(Tests/unit-test 2>&1); unit_ok=$?
-# 数「执行了多少条」而不是「通过了多少条」：一条用例失败就少一个 ✓，
-# 于是这条守卫会跟着报「跑少了」——那是误诊，和 EXPECTED_PASSES 原先
-# 那个毛病一模一样（实测：改坏一处核心逻辑，2 条真失败被放大成 3 条）。
-unit_n=$(printf '%s\n' "$unit_out" | grep -cE '✓|✗')
+unit_n=$(count_assertions "$unit_out")
 if [ "$unit_ok" -eq 0 ]; then
     pass "值比较与 MakerNote 归类规则"
 else
     fail "值比较规则有用例不通过"; printf '%s\n' "$unit_out" | grep '✗' | sed 's/^/     /'
 fi
-# 成功也出声：这条守卫自己得落在 EXPECTED_PASSES 的覆盖范围里，
-# 否则它被静默删掉时没人发现。
-[ "$unit_n" -eq "$EXPECTED_UNIT" ] \
-    && pass "单测跑满 $unit_n 条，没有静默缩水" \
-    || fail "单测跑了 $unit_n 条，预期 $EXPECTED_UNIT 条（改动用例后请同步 EXPECTED_UNIT）"
+expect_count "单测" "$unit_n" "$EXPECTED_UNIT" EXPECTED_UNIT
 
 round "1. 单文件转换 + 元数据校验"
 OUT=$("$BIN" --verify -v "$WORK/照片.jpg" 2>&1)
@@ -348,10 +355,7 @@ if out=$(./Tests/guimodel-test "$WORK/界面模型" 2>&1); then
 else
     fail "界面模型测试未通过"; echo "$out" | grep '✗' | sed 's/^/     /'
 fi
-gui_n=$(printf '%s\n' "$out" | grep -cE '✓|✗')   # 同上：数执行数，不数通过数
-[ "$gui_n" -eq "$EXPECTED_GUI" ] \
-    && pass "模型层跑满 $gui_n 条，没有静默缩水" \
-    || fail "模型层跑了 $gui_n 条，预期 $EXPECTED_GUI 条（改动用例后请同步 EXPECTED_GUI）"
+expect_count "模型层" "$(count_assertions "$out")" "$EXPECTED_GUI" EXPECTED_GUI
 
 round "9. 图形界面端到端"
 mkdir -p "$WORK/界面"
@@ -365,19 +369,20 @@ got=$(./Tests/probe "$WORK/界面/拖入的照片.heic" '{GPS}/Latitude')
 check "界面产物同样保留 GPS" "$got" "$want"
 
 echo
-# 数目不对就是有东西没跑，必须计为失败而不是默默通过。
-[ "$ROUNDS" -eq "$EXPECTED_ROUNDS" ] \
-    || fail "只跑了 $ROUNDS 轮，预期 $EXPECTED_ROUNDS 轮——有整轮没有执行"
-# 查的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」。
+# 数的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」。
 # 原先比 PASSED：真失败时 PASSED 必然偏小，于是额外报一句「有断言没有执行」
 # ——那是误诊，断言执行了，只是失败了（实测把 2 条真失败放大成 3 条）。
+# 这一条不走 expect_count：它要是也发一个 pass，就会把自己要比的那个数顶高
+# 一位（实测比的是 60、打印的是 61）。所以只在不符时出声，并且下面的结论
+# 打印的就是它比过的那个数。代价是它自己没人罩着——它是最外层那一条，
+# 没有更外层可以罩它了，这一点如实记下来。
 executed=$((PASSED + FAILED))
-[ "$executed" -eq "$EXPECTED_PASSES" ] \
-    || fail "执行了 $executed 项断言，预期 $EXPECTED_PASSES 项（改动断言后请同步 EXPECTED_PASSES）"
+[ "$executed" -eq "$EXPECTED_ASSERTIONS" ] \
+    || fail "执行了 $executed 项断言，预期 $EXPECTED_ASSERTIONS 项（改动断言后请同步 EXPECTED_ASSERTIONS）"
 if [ "$FAILED" -eq 0 ]; then
-    echo "全部通过（$ROUNDS 轮，$PASSED 项断言）"
+    echo "全部通过（$ROUNDS 轮，$executed 项断言）"
 else
-    echo "$FAILED 项失败（$ROUNDS 轮，$PASSED 项通过）"
+    echo "$FAILED 项失败（$ROUNDS 轮，$executed 项断言、$PASSED 项通过）"
 fi
 REACHED_END=1
 exit $((FAILED > 0))

@@ -158,6 +158,11 @@ for (text, want) in [// 该认出来的
                      ("2024-09-15T18:42:07.42Z", "+0000"),    // 小数秒（ImageIO 就写这个）
                      ("2024-09-15T18:42:07,42Z", "+0000"),    // 逗号小数点，ISO 也合法
                      ("2024-09-15 18:42:07Z", "+0000"),       // 空格代替 T
+                     // EXIF 自己的日期是冒号分隔的，而 README 把
+                     // {Exif}/DateTimeOriginal 点名为等价承载键之一。
+                     // 按 ISO 8601 列全集时漏了它——EXIF 的日期不属于 ISO 8601。
+                     ("2024:09:15 18:42:07Z", "+0000"),
+                     ("2024:09:15 18:42:07.42Z", "+0000"),
                      ("23:59:60Z", "+0000"),                  // 闰秒
                      // 边界本身合法
                      ("+14:00", "+1400"), ("-12:00", "-1200"),
@@ -227,6 +232,14 @@ for (text, want) in [// 该认出来的
                      ("2024-09-15T18:42:07.42+08:00", "+0800"),   // ImageIO 实际写的
                      ("2024-09-15T18:42+08:00", "+0800"),         // 分钟精度
                      ("20240915T184207+0800", "+0800"),           // 基本格式
+                     ("2024:09:15 18:42:07+08:00", "+0800"),      // EXIF 的冒号日期
+                     ("2024:09:15 18:42:07-0800", "-0800"),
+                     // 闰秒：Z 侧有用例，± 侧原先没有——而本轮主题正是两侧对称
+                     ("23:59:60+08:00", "+0800"),
+                     ("235960+0800", "+0800"),
+                     ("2024-09-15T23:59:60+08:00", "+0800"),
+                     // 冒号日期同样要验月日范围
+                     ("9999:99:99 18:42:07+08:00", ""),
                      // 裸 Z 不再算（前面没有数字）
                      ("Z", "")] {
     checkRule(text, UTCOffset(parsing: text)?.text ?? "", want,
@@ -246,30 +259,48 @@ expectEquivalent(timeKey, "184207Z",
                  [shotAt: "2024:09:15 18:42:07", offsetAt: "未知9Z"],
                  false, "结尾是「数字+Z」也不算 UTC——Z 必须终结一个时刻")
 
-print("numericFields：四处形状解析共用的那把尺子")
-// 时刻、日期、偏移、IIM 时间四处本来各写了一遍同样的 switch count，现在共用
-// 这一个。它是单点故障，所以直接钉住，而不只是透过上面那些间接验。
-func expectFields(_ value: String, _ template: String, _ want: [Int]?, _ why: String) {
-    let got = numericFields(Array(value), template)
-    checkRule("\(value) / \(template)", got?.description ?? "nil",
-              want?.description ?? "nil", why)
+print("numericFields：三处形状解析共用的那把尺子")
+// 时刻、日期、偏移本来各写了一遍同样的 switch count，现在共用这一个。
+// 它是单点故障，所以直接钉住，而不只是透过上面那些间接验。
+let hhmmssColon = DigitShape([2, 2, 2], ":")
+let hhmmss = DigitShape([2, 2, 2])
+let ymdDash = DigitShape([4, 2, 2], "-")
+let ymdPlain = DigitShape([4, 2, 2])
+let ymdColon = DigitShape([4, 2, 2], ":")
+let hhmm = DigitShape([2, 2])
+
+func expectFields(_ value: String, _ shape: DigitShape, _ want: [Int]?, _ why: String) {
+    let got = numericFields(Array(value), shape)
+    checkRule("\(value) / \(shape.widths)\(shape.separator.map { "\($0)" } ?? "")",
+              got?.description ?? "nil", want?.description ?? "nil", why)
 }
-expectFields("18:42:07", "dd:dd:dd", [18, 42, 7], "带冒号的时刻")
-expectFields("184207", "dd|dd|dd", [18, 42, 7], "无分隔的时刻")
-expectFields("2024-09-15", "dddd-dd-dd", [2024, 9, 15], "带连字符的日期")
-expectFields("20240915", "dddd|dd|dd", [2024, 9, 15], "无分隔的日期")
-expectFields("0800", "dd|dd", [8, 0], "偏移的四位")
-expectFields("184207", "dddddd", [184207], "IIM 时间整段当一个字段")
-expectFields("42", "d*", [42], "不限长度的小数秒")
+expectFields("18:42:07", hhmmssColon, [18, 42, 7], "带冒号的时刻")
+expectFields("184207", hhmmss, [18, 42, 7], "无分隔的时刻")
+expectFields("2024-09-15", ymdDash, [2024, 9, 15], "带连字符的日期")
+expectFields("20240915", ymdPlain, [2024, 9, 15], "无分隔的日期")
+expectFields("2024:09:15", ymdColon, [2024, 9, 15], "EXIF 的冒号日期")
+expectFields("0800", hhmm, [8, 0], "偏移的四位（前导零归一化成数值）")
 // 必须拒的：
-expectFields("18:42:0", "dd:dd:dd", nil, "短一位")
-expectFields("18:42:077", "dd:dd:dd", nil, "长一位——末尾多出的字符不能被忽略")
-expectFields("18-42-07", "dd:dd:dd", nil, "分隔符不对")
-// 这一条守的是"全角数字不算数字"，不是守 isASCII 那个条件本身：
-// 实测 Int(String) 自己就拒掉非 ASCII 数字，去掉 isASCII 这条用例照样过。
-expectFields("1８4207", "dd|dd|dd", nil, "全角数字不算数字")
-expectFields("", "d*", nil, "d* 要求至少一位")
-expectFields("abc", "d*", nil, "不是数字")
+expectFields("18:42:0", hhmmssColon, nil, "短一位")
+expectFields("18:42:077", hhmmssColon, nil, "长一位——末尾多出的字符不能被忽略")
+expectFields("18-42-07", hhmmssColon, nil, "分隔符不对")
+expectFields("184207", hhmmssColon, nil, "该有分隔符却没有")
+expectFields("18:42:07", hhmmss, nil, "不该有分隔符却有")
+// 这一条守的是"全角数字不算数字"这个行为，不是守 isASCII 那一个条件：
+// numericFields 里还有 Int(String) 兜着，实测去掉 isASCII 它照样拒。
+// isASCII 真正不可或缺的地方是 isAllDigits（那里没有 Int 这道后手）。
+expectFields("1８4207", hhmmss, nil, "全角数字不算数字")
+
+print("isAllDigits：IIM 前六位和小数秒只需要这一句")
+func expectAllDigits(_ value: String, _ want: Bool, _ why: String) {
+    checkRule(value, isAllDigits(Array(value)), want, why)
+}
+expectAllDigits("184207", true, "六位数字")
+expectAllDigits("42", true, "小数秒")
+expectAllDigits("", false, "空串不算")
+expectAllDigits("abc", false, "不是数字")
+expectAllDigits("1８4207", false, "全角数字不算——这里没有 Int 兜着，isASCII 是真守卫")
+expectAllDigits("18:42", false, "带分隔符不算")
 
 print("源侧与目标侧用同一把尺子")
 for (text, time, offset) in [("184207+0800", "184207", "+0800"),

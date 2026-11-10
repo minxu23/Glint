@@ -179,7 +179,7 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     // 所以这里每一个漏洞都朝着静默放过的方向。上一轮改成按键拆，解决的是
     // `2024-0915` 被砍成 `2024` 那一半；这是同一个失效族的另一半。
     guard chars.count == 7 || chars.count == 11 || chars.count == 12,
-          numericFields(Array(chars[0..<6]), "dddddd") != nil,
+          isAllDigits(Array(chars[0..<6])),
           chars[6] == "+" || chars[6] == "-" || chars[6] == "Z",
           let offset = UTCOffset(parsing: value) else { return (value, nil) }
     return (String(chars[0..<6]), offset)
@@ -192,60 +192,68 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
 /// `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00` 都是合法 String，只有一种
 /// 能直接拿去比较。包成类型之后，比较只可能发生在解析之后。
 ///
-/// 按模板从 `value` 里切出各字段的数值。模板里连续的 `d` 是一个字段（每个 `d`
-/// 一位数字），`d*` 是「一位以上数字，长度不限」，`|` 表示两个字段紧挨着、
-/// 中间没有分隔符，其余字符必须在同一位置原样出现。长度不符、分隔符不对、
-/// 出现非 ASCII 数字（全角数字、其他数系），一律 nil。
+/// 一串固定位数的数字字段，字段之间可以有一个字面分隔符。
 ///
-/// 那个 `isASCII` 是冗余的，留着是为了读代码时意图自明：实测 `Int(String)`
-/// 本身就拒掉 `１２`、`٣٤`、`३४` 等所有非 ASCII 数字写法，所以去掉它不改变
-/// 任何输入的结果——也就不可能有用例钉住它。不想依赖 `Int.init?` 的这个性质，
-/// 才把条件写在取字符的地方。
+/// 例：`DigitShape([2, 2, 2], ":")` 是 `hh:mm:ss`，`DigitShape([2, 2, 2])` 是
+/// `hhmmss`，`DigitShape([4, 2, 2], "-")` 是 `yyyy-mm-dd`。
 ///
-/// 抽出来是因为时刻、日期、偏移、IIM 时间四处形状解析本来各写了一遍
-/// 「switch count → 查分隔符位 → 攒 digits → Int(String(...)) 验范围」，
-/// 连「宽度前提在本函数内成立」那句注释都重复了三遍。现在只有这里需要那句话：
-/// 下面所有下标都由 template 与 value 的长度在本函数内对齐。
-func numericFields(_ value: [Character], _ template: String) -> [Int]? {
-    let symbols = Array(template)
-    var fields: [Int] = []
-    var digits = ""
-    var i = 0, k = 0
+/// 上一版把形状编成模板字符串（`"dd:dd:dd"`、`"dddddd"`、`"dd|dd"`），两个毛病：
+///   `"dddddd"`（一个六位字段）和 `"dd|dd|dd"`（三个两位字段）字面几乎一样、
+///   分段却完全不同，边界只由看不见的 `|` 决定；
+///   位数和字段个数都埋在字符串里，读的人只能靠注释。
+/// 现在两者都是数据，`|` 这种不可见记号不必存在。
+struct DigitShape {
+    let widths: [Int]
+    let separator: Character?
 
-    // 把攒着的数字收成一个字段；没攒到就什么也不做。
-    func close() -> Bool {
-        if digits.isEmpty { return true }
-        guard let n = Int(digits) else { return false }
-        fields.append(n)
-        digits = ""
-        return true
+    init(_ widths: [Int], _ separator: Character? = nil) {
+        self.widths = widths
+        self.separator = separator
     }
+}
 
-    while k < symbols.count {
-        let symbol = symbols[k]
-        k += 1
-        switch symbol {
-        case "d" where k < symbols.count && symbols[k] == "*":
-            k += 1
-            while i < value.count, value[i].isASCII, value[i].isNumber {
-                digits.append(value[i])
-                i += 1
-            }
-            guard !digits.isEmpty, close() else { return nil }
-        case "d":
-            guard i < value.count, value[i].isASCII, value[i].isNumber else { return nil }
-            digits.append(value[i])
-            i += 1
-        case "|":
-            guard !digits.isEmpty, close() else { return nil }
-        default:
-            guard i < value.count, value[i] == symbol, close() else { return nil }
+/// 按形状从 `value` 里切出各字段的数值。整个 `value` 必须被形状用尽——末尾
+/// 多一个字符也不算匹配。分隔符不对、长度不符、出现非 ASCII 数字，一律 nil。
+/// 成功时返回的个数恒等于 `shape.widths.count`。
+///
+/// 抽出来是因为时刻、日期、偏移三处形状解析本来各写了一遍「switch count →
+/// 查分隔符位 → 攒 digits → Int(String(...))」，连「宽度前提在本函数内成立」
+/// 那句注释都重复了三遍——不过它并没有就此只剩一处：`normalizedOffset` 里
+/// 那句「宽度前提在本函数内成立」还在，而且该在，因为那里真有一个按宽度
+/// 分支的 switch。调用点各自 guard 字段个数也是同一个道理：前提要在用它的
+/// 那一层就地立住，别寄托给别处。
+func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
+    var fields: [Int] = []
+    var i = 0
+    for (index, width) in shape.widths.enumerated() {
+        if index > 0, let separator = shape.separator {
+            guard i < value.count, value[i] == separator else { return nil }
             i += 1
         }
+        guard i + width <= value.count else { return nil }
+        var digits = ""
+        for _ in 0..<width {
+            guard value[i].isASCII, value[i].isNumber else { return nil }
+            digits.append(value[i])
+            i += 1
+        }
+        guard let n = Int(digits) else { return nil }
+        fields.append(n)
     }
-    // 整个 value 必须被模板用尽：末尾多一个字符也不算匹配。
-    guard i == value.count, close() else { return nil }
+    guard i == value.count else { return nil }
     return fields
+}
+
+/// `value` 非空且全由 ASCII 数字组成。
+///
+/// IIM 时间的前六位、ISO 小数秒都只需要这一句，不需要分段——上一版硬把它们
+/// 塞进模板（`"dddddd"`、`"d*"`），而两个调用点都只判 `!= nil`、把切出来的
+/// 字段扔掉，于是模板里那个"分几段"的语义根本没人消费。
+///
+/// 这里的 `isASCII` 是**真守卫**：本函数没有 `Int(String)` 那道后手，
+/// 去掉它全角数字就会被当成数字。
+func isAllDigits(_ value: [Character]) -> Bool {
+    !value.isEmpty && value.allSatisfy { $0.isASCII && $0.isNumber }
 }
 
 /// 刻意不把 `+0000` 与 `-0000` 当同一个值：RFC 3339 里后者是"本地偏移未知"。
@@ -316,12 +324,13 @@ struct UTCOffset: Equatable {
         // 可选小数秒：ISO 8601 的小数点可以是 `.` 也可以是 `,`。
         if let point = head.lastIndex(where: { $0 == "." || $0 == "," }),
            point < head.count - 1,
-           numericFields(Array(head[(point + 1)...]), "d*") != nil {
+           isAllDigits(Array(head[(point + 1)...])) {
             head = Array(head[..<point])
         }
-        for (width, template) in [(8, "dd:dd:dd"), (6, "dd|dd|dd"), (5, "dd:dd"), (4, "dd|dd")]
+        for (width, shape) in [(8, DigitShape([2, 2, 2], ":")), (6, DigitShape([2, 2, 2])),
+                               (5, DigitShape([2, 2], ":")), (4, DigitShape([2, 2]))]
         where head.count >= width {
-            guard isTimeOfDay(Array(head[(head.count - width)...]), template) else { continue }
+            guard isTimeOfDay(Array(head[(head.count - width)...]), shape) else { continue }
             // 整个值就是时刻。4 位无分隔的与年份无法区分，不收。
             if head.count == width { return width != 4 }
             let before = Array(head[..<(head.count - width)])
@@ -332,17 +341,25 @@ struct UTCOffset: Equatable {
     }
 
     /// 按模板核对一个时刻并验范围。秒允许 60，那是闰秒。
-    private static func isTimeOfDay(_ value: [Character], _ template: String) -> Bool {
-        guard let parts = numericFields(value, template), parts.count >= 2,
+    private static func isTimeOfDay(_ value: [Character], _ shape: DigitShape) -> Bool {
+        guard let parts = numericFields(value, shape), parts.count >= 2,
               parts[0] <= 23, parts[1] <= 59 else { return false }
         return parts.count == 2 || parts[2] <= 60
     }
 
-    /// `YYYY-MM-DD` 或 `YYYYMMDD`，并验月日范围。不查某月到底有几天：
-    /// 这里只是在判断「这段是不是一个日期」，不是在校验日历。
+    /// `YYYY-MM-DD`、`YYYYMMDD` 或 `YYYY:MM:DD`，并验月日范围。不查某月到底有
+    /// 几天：这里只是在判断「这段是不是一个日期」，不是在校验日历。
+    ///
+    /// 冒号那一种是 **EXIF 自己的日期格式**（`{Exif}/DateTimeOriginal`、
+    /// `{TIFF}/DateTime` 实际写的就是 `2024:09:15 18:42:07`），而 README 把
+    /// `{Exif}/DateTimeOriginal` 点名为等价承载键之一。上一版只列了 ISO 8601
+    /// 的两种，于是 `2024:09:15 18:42:07+08:00` 读不出偏移——方向上只多报，
+    /// 但它让本项目读得最多的那个格式成了读不出来的那个。
+    /// 漏掉的原因是我按 ISO 8601 的全集列形状，而 EXIF 的日期不属于 ISO 8601。
     private static func isDate(_ value: [Character]) -> Bool {
-        for template in ["dddd-dd-dd", "dddd|dd|dd"] {
-            guard let parts = numericFields(value, template), parts.count == 3 else { continue }
+        for shape in [DigitShape([4, 2, 2], "-"), DigitShape([4, 2, 2]),
+                      DigitShape([4, 2, 2], ":")] {
+            guard let parts = numericFields(value, shape), parts.count == 3 else { continue }
             if (1...12).contains(parts[1]), (1...31).contains(parts[2]) { return true }
         }
         return false
@@ -353,10 +370,10 @@ struct UTCOffset: Equatable {
         guard let sign = token.first, sign == "+" || sign == "-" else { return nil }
         let body = Array(token.dropFirst())
         // 宽度前提在本函数内成立，不寄托于调用方的 `for width in [5, 6]`。
-        let template: String
+        let shape: DigitShape
         switch body.count {
-        case 4: template = "dd|dd"
-        case 5: template = "dd:dd"
+        case 4: shape = DigitShape([2, 2])
+        case 5: shape = DigitShape([2, 2], ":")
         default: return nil
         }
         // ISO 8601 的偏移范围是 -12:00…+14:00（README「--verify」一节同此），
@@ -366,7 +383,7 @@ struct UTCOffset: Equatable {
         //     +14:59、-12:30、-12:59 这些不存在的偏移。
         // 前两版分别踩了"不分符号"和"分符号但按分量"，都是后一种失效：
         // 目标侧读取器一宽松，offsetSurvives 就把真丢失误判成"还在"。
-        guard let parts = numericFields(body, template), parts.count == 2,
+        guard let parts = numericFields(body, shape), parts.count == 2,
               parts[1] <= 59 else { return nil }
         let total = (sign == "-" ? -1 : 1) * (parts[0] * 60 + parts[1])
         guard total >= -12 * 60, total <= 14 * 60 else { return nil }
