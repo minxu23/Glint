@@ -4,11 +4,11 @@ Status: resolved
 Round: 1
 Source: Spec 1 + Spec 2（第 1 轮报告，2026-11-09T12:57Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-01-aggregate.md
+Review: ../reviews/round-01-spec.md
 
 ## 意见原文
 
-> 把 `strippingTimeZone` 限定到两个 Time 键、要求 `head.count == 6`、删掉走不到的 5 位/冒号分支，并在目标确实没有承载偏移时照样报出来
+> `strippingTimeZone` can let `--verify` hide a real loss (false negative).
 
 ## 结论
 

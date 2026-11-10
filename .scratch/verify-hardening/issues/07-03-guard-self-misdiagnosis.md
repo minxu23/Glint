@@ -4,11 +4,11 @@ Status: resolved
 Round: 7
 Source: Standards 5/6 + Spec (a) 1/2（第 7 轮报告，2026-11-10T03:43Z）
 Fixed by: cb4b42e
-Review: ../reviews/round-07-aggregate.md
+Review: ../reviews/round-07-standards.md
 
 ## 意见原文
 
-> 修守卫的误诊（`FAILED > 0` 时跳过断言数检查）、把单测与模型层的条数钉进期望值、`round 8` 改成断言 ✓ 数
+> `Tests/selftest.sh`：`EXPECTED_PASSES` 用精确值会在真失败时制造第二条假失败
 
 ## 结论
 

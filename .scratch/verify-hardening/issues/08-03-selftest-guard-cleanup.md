@@ -4,11 +4,11 @@ Status: resolved
 Round: 8
 Source: Standards 5/6/7（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: b5244c1
-Review: ../reviews/round-08-aggregate.md
+Review: ../reviews/round-08-standards.md
 
 ## 意见原文
 
-> 删 `EXPECTED_ROUNDS`、`EXPECTED_PASSES` 改名 `EXPECTED_ASSERTIONS`、计数锚成 `^ *[✓✗]`、两段守卫抽成 `expect_count`
+> 四常量里 `EXPECTED_ROUNDS` 基本被吞掉
 
 ## 结论
 

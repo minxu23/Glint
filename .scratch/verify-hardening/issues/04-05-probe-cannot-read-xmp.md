@@ -6,9 +6,9 @@ Source: 我自己发现（两轴都没提）（第 4 轮报告，2026-11-09T15:0
 Fixed by: (git init 之前)
 Review: ../reviews/round-04-aggregate.md
 
-## 意见原文
+## 缺陷
 
-> 给 `probe` 加上 XMP 读取，让它名副其实
+给 `probe` 加上 XMP 读取，让它名副其实
 
 ## 结论
 

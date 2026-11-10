@@ -4,11 +4,11 @@ Status: resolved
 Round: 2
 Source: Spec 2 + Spec 1（第 2 轮报告，2026-11-09T13:48Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-02-aggregate.md
+Review: ../reviews/round-02-spec.md
 
 ## 意见原文
 
-> 把 `utcOffset` 锚定到末尾、`Z` 也走形状检查，并补畸形输入的用例
+> `utcOffset`'s `Z` branch still has no shape check
 
 ## 结论
 

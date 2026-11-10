@@ -195,7 +195,7 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
 ///   分段却完全不同，边界只由看不见的 `|` 决定；
 ///   位数和字段个数都埋在字符串里，读的人只能靠注释。
 /// 现在两者都是数据，`|` 这种不可见记号不必存在。
-struct DigitShape {
+struct DigitShape: Equatable {
     let widths: [Int]
     let separator: Character?
 
@@ -221,7 +221,9 @@ struct DigitShape {
     static let ymdPlain = DigitShape([4, 2, 2])
     static let ymdColon = DigitShape([4, 2, 2], ":")
 
-    /// 按用途分组的清单，每张只在这里出现一次。上一版把清单写在调用点，而
+    /// 按用途分组的清单。**每张清单**只在这里出现一次——不是每个形状只属于一张：
+    /// `hhmm` 同时在 timeOfDayShapes 和 offsetBodyShapes 里，因为 `18:42` 和
+    /// `+08:00` 的数字布局确实一样，只是含义不同。上一版把清单写在调用点，而
     /// `normalizedOffset(atEndOf:)` 的 `for width in [5, 6]` 更进一步，把长度也
     /// 重述成了字面量——那正是 `length` 这个属性要消掉的东西，却漏了这一处。
     static let timeOfDayShapes: [DigitShape] = [.hhmmssColon, .hhmmss, .hhmmColon, .hhmm]
@@ -259,8 +261,12 @@ func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
         // 前导符号，`Int("+999")` 是 999。少了这一句，`+999-09-15` 会被当成一个
         // 日期，于是 `+999-09-15T18:42:07+08:00` 能读出 `+0800`——目标侧读取器
         // 一松就是静默放过。「ASCII 数字」这个判定只由 isAllDigits 定义；
-        // carriesSameValue 另有一处 `filter(\.isNumber)`，那是刻意更松的跨格式
-        // 比对（只会少判承载、多报丢失），不是同一个判定，别当成第二份定义。
+        // carriesSameValue 另有一处 `filter(\.isNumber)`，不是同一个判定。
+        // 它更松，而且**松的方向不是安全那一侧**：isNumber 留下非 ASCII 数字，
+        // 于是 carriesSameValue("٢٣", "x٢٣") 是 true，而 ASCII-only 过滤会让
+        // 源侧过滤成空串、返回 false。也就是说它偏向"算承载"，正是本项目叫
+        // 静默放过的那个方向。实测不可达（ImageIO 写的是 ASCII），所以这里只
+        // 记事实，不写"只会多报"那种它给不出的保证。
         guard isAllDigits(digits), let n = Int(String(digits)) else { return nil }
         i += width
         fields.append(n)
@@ -366,10 +372,10 @@ struct UTCOffset: Equatable {
             let width = shape.length
             guard isTimeOfDay(Array(head[(head.count - width)...]), shape) else { continue }
             // 整个值就是时刻。无分隔的四位数字与年份分不开（`2024` 会被读成
-            // 20:24），不收——直接写出这个条件，不靠注释解码一个 `!= 4`。
-            if head.count == width {
-                return !(shape.separator == nil && shape.widths == [2, 2])
-            }
+            // 20:24），不收。直接拿形状本身比，不按它的内部字段描述它——
+            // 上一版写的是 `shape.separator == nil && shape.widths == [2, 2]`，
+            // 那是在重述 `hhmm` 的定义，等于第三遍犯同一个毛病（见 10-05、10-06）。
+            if head.count == width { return shape != .hhmm }
             let before = Array(head[..<(head.count - width)])
             guard let separator = before.last, separator == "T" || separator == " " else { continue }
             if isDate(Array(before.dropLast())) { return true }

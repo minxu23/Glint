@@ -4,11 +4,11 @@ Status: resolved
 Round: 8
 Source: Spec (c)（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: b5244c1
-Review: ../reviews/round-08-aggregate.md
+Review: ../reviews/round-08-spec.md
 
 ## 意见原文
 
-> `isDate` 加 `"dddd:dd:dd"`（唯一行为缺陷，带用例，并补 EXIF 冒号日期进"真实写法"那一组）
+> ### (c) 实现看起来不对：`±` 侧新引入了一处真实误拒
 
 ## 结论
 

@@ -4,11 +4,11 @@ Status: wontfix
 Round: 8
 Source: Spec (b) 1（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: —
-Review: ../reviews/round-08-aggregate.md
+Review: ../reviews/round-08-spec.md
 
 ## 意见原文
 
-> 那条用例守的是"全角数字不算数字"这个行为，不是守 `isASCII` 那个条件
+> `numericFields` 里的 `isASCII`：注释自承「去掉它不改变任何输入的结果——也就不可能有用例钉住它」
 
 ## 结论
 

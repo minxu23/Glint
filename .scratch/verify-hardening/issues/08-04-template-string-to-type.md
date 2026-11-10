@@ -4,11 +4,11 @@ Status: resolved
 Round: 8
 Source: Standards 2/3（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: b5244c1
-Review: ../reviews/round-08-aggregate.md
+Review: ../reviews/round-08-standards.md
 
 ## 意见原文
 
-> `numericFields` 的模板改成小类型（消掉 `"dddddd"`/`"dd|dd|dd"` 那个陷阱和三处运行时 `parts.count` 检查）
+> 模板是陷阱：`"dddddd"` vs `"dd|dd|dd"`（Primitive Obsession）
 
 ## 结论
 

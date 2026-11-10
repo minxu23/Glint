@@ -4,11 +4,11 @@ Status: resolved
 Round: 6
 Source: Spec (c) 2 + Standards 1/2（第 6 轮报告，2026-11-10T01:51Z）
 Fixed by: d717eeb
-Review: ../reviews/round-06-aggregate.md
+Review: ../reviews/round-06-standards.md
 
 ## 意见原文
 
-> 新鲜度守卫由 Makefile 传产物清单进来，缺产物改成出声而非 `continue`
+> `Tests/selftest.sh` 新鲜度守卫有两条静默通道，与提交标题相反
 
 ## 结论
 

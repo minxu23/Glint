@@ -4,11 +4,11 @@ Status: resolved
 Round: 4
 Source: Standards hard（第 4 轮报告，2026-11-09T15:02Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-04-aggregate.md
+Review: ../reviews/round-04-standards.md
 
 ## 意见原文
 
-> 范围改成总分钟数约束（带 `+1430`/`-1230` 用例）
+> `normalized(token:precededBy:)` still accepts offsets outside the README's range
 
 ## 结论
 

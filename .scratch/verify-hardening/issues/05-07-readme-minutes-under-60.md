@@ -9,3 +9,7 @@ Review: ../reviews/round-05-aggregate.md
 ## 意见原文
 
 > README 补"分钟 < 60"
+
+## 结论
+
+README 补上「分钟本身还要 `< 60`」。单测早就靠它拒 `+0070`，只是规范里没写。

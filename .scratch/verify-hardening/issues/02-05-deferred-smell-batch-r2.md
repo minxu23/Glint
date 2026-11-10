@@ -4,11 +4,11 @@ Status: needs-triage
 Round: 2
 Source: Standards 判断题 + Spec 5（第 2 轮报告，2026-11-09T13:48Z）
 Fixed by: —
-Review: ../reviews/round-02-aggregate.md
+Review: ../reviews/round-02-standards.md
 
 ## 意见原文
 
-> 气味那三条和 Spec 5 的潜在通知缺口押后
+> ### Judgement calls (baseline smells)
 
 ## 结论
 

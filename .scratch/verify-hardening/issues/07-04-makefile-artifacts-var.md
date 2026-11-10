@@ -4,8 +4,12 @@ Status: resolved
 Round: 7
 Source: Standards 1/2（第 7 轮报告，2026-11-10T03:43Z）
 Fixed by: cb4b42e
-Review: ../reviews/round-07-aggregate.md
+Review: ../reviews/round-07-standards.md
 
 ## 意见原文
 
-> Makefile 提 `ARTIFACTS :=`、删重复 `.PHONY`
+> `Makefile`：`print-artifacts` 被声明了两次 `.PHONY`
+
+## 结论
+
+`ARTIFACTS :=` 消掉真实的双份产物清单；两处 `.PHONY` 里单独那条删掉——两处编辑之一本来就是死的。

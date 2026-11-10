@@ -9,3 +9,7 @@ Review: ../reviews/round-05-aggregate.md
 ## 意见原文
 
 > fixture 的 stderr 用法串与重复
+
+## 结论
+
+stderr 的用法串漏了新旗标，而文件头那份跟着改了。两份合成一个 `usage` 常量，不再各写一遍。

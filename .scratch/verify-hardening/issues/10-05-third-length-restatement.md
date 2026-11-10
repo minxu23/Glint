@@ -12,4 +12,4 @@ Review: ../reviews/round-10-standards.md
 
 ## 结论
 
-第 9 轮我收了两处长度重述（isTimestamp、normalizedOffset(_:)），漏了这一处——又是「紧了两侧、留松第三侧」。改法不止换成形状：四张形状清单（timeOfDayShapes / dateShapes / offsetBodyShapes）各命名一次放在 DigitShape 旁边，两个调用点共用同一张表。破坏测试：删掉 offsetBodyShapes 里的 hhmmColon，两个调用点一起红。
+第 9 轮我收了两处长度重述（isTimestamp、normalizedOffset(_:)），漏了这一处——又是「紧了两侧、留松第三侧」。改法不止换成形状：三张形状清单（timeOfDayShapes / dateShapes / offsetBodyShapes）各命名一次放在 DigitShape 旁边，两个调用点共用同一张表。破坏测试：删掉 offsetBodyShapes 里的 hhmmColon，两个调用点一起红。

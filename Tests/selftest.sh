@@ -22,7 +22,7 @@ ROUNDS=0
 # 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
-EXPECTED_ASSERTIONS=63
+EXPECTED_ASSERTIONS=67
 EXPECTED_UNIT=220
 EXPECTED_GUI=37
 
@@ -58,6 +58,11 @@ check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (期望 [$3]，实�
 [ -x "$BIN" ] || bail "先运行 make 构建 $BIN"
 
 rm -rf "$WORK"; mkdir -p "$WORK/相册/子目录"
+# 擦干净这件事要查，不要假设。见 issues/11-16：有一次实测里 guimodel 报
+# 「续跑后全部完成（40 张）」，那是上一轮产物还在的症状，而那次失败至今没复现。
+# 前提没成立时，后面几十条断言全都在测别的东西。
+leftover=$(find "$WORK" -type f 2>/dev/null | wc -l | tr -d ' ')
+[ "$leftover" -eq 0 ] || bail "工作目录没被擦干净（还剩 $leftover 个文件），后面的结论不可信"
 # 所有测试工具都由 Makefile 构建，这里只管用。
 for tool in fixture probe; do
     [ -x "Tests/$tool" ] || bail "先运行 make test（缺 Tests/$tool）"
@@ -368,51 +373,125 @@ want=$(./Tests/probe "$WORK/界面/拖入的照片.jpg" '{GPS}/Latitude')
 got=$(./Tests/probe "$WORK/界面/拖入的照片.heic" '{GPS}/Latitude')
 check "界面产物同样保留 GPS" "$got" "$want"
 
-round "10. 审查账本的引文逐字可核"
-# .scratch/verify-hardening 的全部价值在于「引的是审查当时的原话」。这条性质
-# 会无声腐坏：改一个字让它更顺口，账本就退回成我自己的转述，而那正是它要避免
-# 的东西（第 10 轮 Spec 轴实测 9/52 对不上，根因是 reviews/ 当时只存了聚合报告）。
-# 所以它必须有守卫，而不是靠记得。
+round "10. 审查账本：引文逐字、来源可溯、记录不腐"
+# .scratch/verify-hardening 的全部价值在于「引的是审查当时的原话」。这组性质会
+# 无声腐坏，所以必须有守卫而不是靠记得。四条独立性质，一个循环里一起查
+# （上一版写成两个几乎逐字相同的循环——`08-03` 记的就是这个房规）。
 ledger=.scratch/verify-hardening
-unsupported=0
-checked=0
+checked=0; unsupported=0; derivative=0; rotten=0; noconcl=0; miscast=0
 for issue in "$ledger"/issues/*.md; do
     [ -e "$issue" ] || break
-    quote=$(sed -n 's/^> //p' "$issue" | head -1)
-    target=$(sed -n 's|^Review: \.\./|'"$ledger"'/|p' "$issue" | head -1)
     checked=$((checked + 1))
-    if [ -z "$quote" ] || [ -z "$target" ] || [ ! -f "$target" ]; then
-        unsupported=$((unsupported + 1)); continue
+    rnd=$(sed -n 's/^Round: //p' "$issue" | head -1)
+    source=$(sed -n 's/^Source: //p' "$issue" | head -1)
+    sha=$(sed -n 's/^Fixed by: //p' "$issue" | head -1)
+    revname=$(sed -n 's|^Review: \.\./reviews/||p' "$issue" | head -1)
+    target="$ledger/reviews/$revname"
+    printf -v _pad '%02d' "$rnd" 2>/dev/null || _pad=$(printf '%02d' "$rnd")
+
+    grep -q '^## 结论$' "$issue" || noconcl=$((noconcl + 1))
+
+    # 不是审查提的条目没有「意见原文」可引。上一版让 10-11 借了 round-10-spec.md
+    # 里一句无关的真话来填这个字段，守卫照样放行——那是把字段当装饰。
+    # 这类条目改用 `## 缺陷`（我观察到什么），并且不参与引文与溯源两项。
+    selffound=0
+    case "$source" in *我自己*) selffound=1 ;; esac
+    # 数的是「几个文件错了」，不是「触发了几个条件」：一个自发现条目既缺
+    # `## 缺陷` 又多一个 `## 意见原文`，那是一处错，不是两处（实测报成 2）。
+    wrong=0
+    if [ "$selffound" -eq 1 ]; then
+        grep -q '^## 缺陷$' "$issue" || wrong=1
+        grep -q '^## 意见原文$' "$issue" && wrong=1
+        [ "$wrong" -eq 0 ] || miscast=$((miscast + 1))
+        continue
     fi
-    # 比对前去掉 markdown 的强调记号，免得格式差异造成假阳性。
-    strip() { tr -d '`*' < "$1"; }
-    printf '%s' "$quote" | tr -d '`*' > "$WORK/quote.txt"
-    strip "$target" | grep -qF -f "$WORK/quote.txt" \
-        || unsupported=$((unsupported + 1))
+    grep -q '^## 意见原文$' "$issue" || miscast=$((miscast + 1))
+
+    # Fixed by: 只认三种取值。未知取值必须出声——上一版的 case 分支把它静默跳过，
+    # 于是 14 条 `(git init 之前)` 从没被任何守卫看过一眼。
+    # 别按长度猜它是不是 SHA：`dbb1e1`（6 位）git 认、而 `[0-9a-f]×7` 的模式
+    # 不认，于是一个腐坏的短 SHA 会被静默跳过（实测）。交给 git 判。
+    case "$sha" in
+        "—"|"(git init 之前)") ;;
+        *)  if git rev-parse --verify --quiet "$sha^{commit}" >/dev/null 2>&1; then
+                git merge-base --is-ancestor "$sha" HEAD 2>/dev/null \
+                    || rotten=$((rotten + 1))
+            else
+                rotten=$((rotten + 1))
+            fi ;;
+    esac
+
+    # 引文：只取 `## 意见原文` 段内的 blockquote，整段每一行都要核。
+    # 上一版取的是整个文件的第一行 `> `，多行引文只查了一半。
+    awk '/^## 意见原文$/{f=1;next} /^## /{f=0} f && /^> /{sub(/^> /,"");print}' \
+        "$issue" > "$WORK/quote.txt"
+    nq=$(grep -c . "$WORK/quote.txt")
+    if [ ! -f "$target" ] || [ "$nq" -eq 0 ]; then
+        unsupported=$((unsupported + 1))
+    else
+        tr -d '`*' < "$target" > "$WORK/target.txt"
+        miss=0
+        while IFS= read -r qline; do
+            [ -n "$qline" ] || continue
+            printf '%s' "$qline" | tr -d '`*' > "$WORK/q1.txt"
+            grep -qF -f "$WORK/q1.txt" "$WORK/target.txt" || miss=1
+        done < "$WORK/quote.txt"
+        [ "$miss" -eq 0 ] || unsupported=$((unsupported + 1))
+    fi
+
+    # 来源可溯：`Review:` 和引文是同一只手写的，所以不能让它自由指定。某轮某轴的
+    # agent 原文在库里时，引文就必须出自那一份；聚合报告是我自己写的，引它只能
+    # 证明我写过，证明不了审查当时说了什么。只有那一侧的 agent 原文确实丢失
+    # （上下文压缩，spec.md 列了哪些），或者这条本来就不是审查提的，才允许引聚合。
+    {
+        allowed=""
+        case "$source" in *Standards*|*标准*) allowed="$allowed standards" ;; esac
+        case "$source" in *Spec*) allowed="$allowed spec" ;; esac
+        have=""
+        for ax in $allowed; do
+            [ -f "$ledger/reviews/round-$_pad-$ax.md" ] && have="$have $ax"
+        done
+        if [ -n "$have" ]; then
+            ok=0
+            for ax in $have; do
+                [ "$revname" = "round-$_pad-$ax.md" ] && ok=1
+            done
+            [ "$ok" -eq 1 ] || derivative=$((derivative + 1))
+        fi
+    }
 done
+
+# 每条守卫都配一个「清单非空」的证人：空集上的「全都满足」恒真，那正是本文件
+# 开头列的「少跑了却宣布通过」。
 [ "$checked" -gt 0 ] \
-    && pass "查了 $checked 条 issue（清单非空）" \
+    && pass "查了 $checked 条 issue（清单非空，下面四条不是空集上的恒真）" \
     || fail "一条 issue 都没查到——账本路径对不上了"
 [ "$unsupported" -eq 0 ] \
     && pass "每条意见原文都在它 Review: 指名的那份报告里逐字存在" \
     || fail "$unsupported 条引文在所指报告里找不到（引文必须逐字，不能转述或删节）"
-
-# Fixed by: 的 SHA 必须从 HEAD 可达。只存在于 reflog 的悬空提交会被 gc 回收，
-# 于是这条记录无声腐坏——写完上面那个守卫几分钟后我就亲手造了一个：先提交、
-# 把 SHA 回填进文件、再 `--amend`，而 amend 换掉了 SHA。本守卫的证人就是它。
-rotten=0
-for issue in "$ledger"/issues/*.md; do
-    [ -e "$issue" ] || break
-    sha=$(sed -n 's/^Fixed by: //p' "$issue" | head -1)
-    case "$sha" in
-        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
-            git merge-base --is-ancestor "$sha" HEAD 2>/dev/null \
-                || rotten=$((rotten + 1)) ;;
-    esac
-done
+[ "$derivative" -eq 0 ] \
+    && pass "每条引文都出自 agent 原文，而不是我自己的聚合（丢失那几侧除外）" \
+    || fail "$derivative 条引的是我自己的聚合，而那一轮那一轴的 agent 原文就在库里"
 [ "$rotten" -eq 0 ] \
-    && pass "每个 Fixed by: 的提交都从 HEAD 可达" \
-    || fail "$rotten 条 Fixed by: 指向 HEAD 不可达的提交（悬空或被改写，会被 gc 回收）"
+    && pass "每个 Fixed by: 要么是可达的提交，要么是两种成文的字面值" \
+    || fail "$rotten 条 Fixed by: 不可达或取值未成文"
+[ "$noconcl" -eq 0 ] \
+    && pass "每条 issue 都有 ## 结论" \
+    || fail "$noconcl 条 issue 缺 ## 结论（issue-tracker.md 要求两节都在）"
+[ "$miscast" -eq 0 ] \
+    && pass "审查提的用 ## 意见原文，我自己发现的用 ## 缺陷，两者不混" \
+    || fail "$miscast 条用错了章节（不是审查提的就没有「原文」可引）"
+
+rounds=$(ls "$ledger"/issues/*.md 2>/dev/null \
+    | sed -n 's|.*/\([0-9][0-9]\)-[0-9][0-9]-.*|\1|p' | sort -u)
+nrounds=$(printf '%s\n' $rounds | grep -c '[0-9]')
+missing_agg=0
+for r in $rounds; do
+    [ -f "$ledger/reviews/round-$r-aggregate.md" ] || missing_agg=$((missing_agg + 1))
+done
+[ "$nrounds" -gt 0 ] && [ "$missing_agg" -eq 0 ] \
+    && pass "$nrounds 个轮次各有聚合报告（轮号非空）" \
+    || fail "取到 $nrounds 个轮号、其中 $missing_agg 轮缺聚合报告"
 
 echo
 # 数的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」。

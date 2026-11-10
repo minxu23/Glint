@@ -4,11 +4,11 @@ Status: resolved
 Round: 6
 Source: Standards 6（第 6 轮报告，2026-11-10T01:51Z）
 Fixed by: d717eeb
-Review: ../reviews/round-06-aggregate.md
+Review: ../reviews/round-06-standards.md
 
 ## 意见原文
 
-> `canBegin` 内联回 `splitIIMTime`
+> Middle Man / Speculative Generality
 
 ## 结论
 

@@ -4,11 +4,11 @@ Status: resolved
 Round: 4
 Source: Spec (a) 1（第 4 轮报告，2026-11-09T15:02Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-04-aggregate.md
+Review: ../reviews/round-04-spec.md
 
 ## 意见原文
 
-> 删掉夹具的 `OffsetTimeOriginal`、改正那段"做不出来"的注释，让 XMP 腿真正端到端
+> Item 3's limitation claim is half wrong — the XMP leg *is* reachable end-to-end (verified).
 
 ## 结论
 

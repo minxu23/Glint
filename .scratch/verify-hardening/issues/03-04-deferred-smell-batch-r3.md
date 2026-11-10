@@ -4,11 +4,11 @@ Status: needs-triage
 Round: 3
 Source: Standards 判断题（第 3 轮报告，2026-11-09T14:22Z）
 Fixed by: —
-Review: ../reviews/round-03-aggregate.md
+Review: ../reviews/round-03-standards.md
 
 ## 意见原文
 
-> `xmpKey` 和「解析器藏在 init 里」两条判断题押后
+> ### Judgement calls (baseline)
 
 ## 结论
 

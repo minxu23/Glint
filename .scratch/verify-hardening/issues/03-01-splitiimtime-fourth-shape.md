@@ -4,11 +4,11 @@ Status: resolved
 Round: 3
 Source: Standards hard（第 3 轮报告，2026-11-09T14:22Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-03-aggregate.md
+Review: ../reviews/round-03-standards.md
 
 ## 意见原文
 
-> `splitIIMTime` 同时要求偏移起始于第 6 位且总长 ∈ {7, 11, 12}
+> ### Hard: `splitIIMTime` accepts a fourth shape (`MetadataDiff.swift:149-159`)
 
 ## 结论
 

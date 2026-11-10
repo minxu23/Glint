@@ -4,11 +4,11 @@ Status: resolved
 Round: 6
 Source: Spec (c) 5 + (c) 6 + Standards 4（第 6 轮报告，2026-11-10T01:51Z）
 Fixed by: d717eeb
-Review: ../reviews/round-06-aggregate.md
+Review: ../reviews/round-06-standards.md
 
 ## 意见原文
 
-> Z 门两个方向一起重写（按 ISO 8601 的时刻定义来，而不是凑形状：验范围、接受分钟精度与基本格式与逗号小数、前导要求是分隔符而非"非数字"，上面七个串全部进用例）
+> `terminatesTime` 的 "`HHMMSS`，且整个值就是它：IIM 时间字段之外没有别的东西长这样"
 
 ## 结论
 

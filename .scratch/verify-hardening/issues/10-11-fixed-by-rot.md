@@ -6,9 +6,9 @@ Source: 我自己（两轴都没提——这个缺陷是在修本轮意见的过
 Fixed by: 765150b
 Review: ../reviews/round-10-spec.md
 
-## 意见原文
+## 缺陷
 
-> 44 quotes appear literally in the cited review
+44 quotes appear literally in the cited review
 
 ## 结论
 

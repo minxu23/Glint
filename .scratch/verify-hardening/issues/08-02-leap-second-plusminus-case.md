@@ -4,11 +4,11 @@ Status: resolved
 Round: 8
 Source: Spec (a)（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: b5244c1
-Review: ../reviews/round-08-aggregate.md
+Review: ../reviews/round-08-spec.md
 
 ## 意见原文
 
-> 补 `±` 侧闰秒用例
+> 闰秒只在 Z 侧有用例
 
 ## 结论
 

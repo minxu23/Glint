@@ -4,11 +4,11 @@ Status: resolved
 Round: 4
 Source: Spec (a) 2（第 4 轮报告，2026-11-09T15:02Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-04-aggregate.md
+Review: ../reviews/round-04-spec.md
 
 ## 意见原文
 
-> 补长度守卫的用例并改正注释里的证人（`184207+12+0800`）
+> Guard #1 (length) is necessary but untested — mutation-verified.
 
 ## 结论
 

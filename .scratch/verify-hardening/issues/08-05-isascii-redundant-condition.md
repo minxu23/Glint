@@ -4,11 +4,11 @@ Status: resolved
 Round: 8
 Source: Standards 4（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: b5244c1
-Review: ../reviews/round-08-aggregate.md
+Review: ../reviews/round-08-standards.md
 
 ## 意见原文
 
-> 删 `isASCII` 冗余条件与四行自白，保留行为用例
+> `isASCII` 冗余条件 + 四行自白
 
 ## 结论
 

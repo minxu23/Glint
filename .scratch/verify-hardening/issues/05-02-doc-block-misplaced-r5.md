@@ -4,11 +4,11 @@ Status: resolved
 Round: 5
 Source: Spec (b) + Standards 3（第 5 轮报告，2026-11-10T01:29Z）
 Fixed by: f2b016a
-Review: ../reviews/round-05-aggregate.md
+Review: ../reviews/round-05-spec.md
 
 ## 意见原文
 
-> 注释串位 + `canBegin` 的过度承诺（同一处 hunk，一起改）
+> ### (b) 越界：注释块串位
 
 ## 结论
 
