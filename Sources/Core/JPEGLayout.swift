@@ -1,7 +1,8 @@
 // JPEG 的段结构：哪些标记段、各自的内容在哪、EOI 在哪。
 //
 // 手写 EXIF 解析（ExifReader.swift）、源侧原始字节里的时间（RawTimes.swift）、
-// 「ImageIO 搬不走的段」清单（unportableSegments）都从这里取段，不各自扫一遍。
+// 「ImageIO 搬不走的段」清单（unportableSegments）、APP13 的 Photoshop 资源
+// （photoshopResources）都从这里取段，不各自扫一遍。
 
 import Foundation
 
@@ -116,4 +117,62 @@ func unportableSegments(in bytes: [UInt8]) -> [String] {
         }
     }
     return issues
+}
+
+// MARK: - APP13 里的 Photoshop 资源
+
+/// IPTC-IIM 所在的资源号。ImageIO 只读、只搬 APP13 里的这一个资源。
+let iptcResourceID = 0x0404
+
+/// 不进汇总行的资源：IPTC 由键空间比对逐字段管着；IPTC 摘要（0x0425）是 IPTC
+/// 的校验和，从它派生；两个缩略图（0x0409、0x040C）是从像素派生的预览，理由同
+/// EXIF 缩略图（README「--verify 到底比什么」）。别的资源一律报。
+let ignoredPhotoshopResources: Set<Int> = [iptcResourceID, 0x0425, 0x0409, 0x040C]
+
+/// APP13 `Photoshop 3.0` 段里的资源块。一份资源块可以跨多个段，按顺序拼起来。
+func photoshopResourceBlock(_ bytes: [UInt8], _ layout: JPEGLayout) -> [UInt8] {
+    let photoshopID: [UInt8] = Array("Photoshop 3.0".utf8) + [0]
+    var block: [UInt8] = []
+    for s in layout.segments where s.marker == 0xED && s.begins(with: photoshopID, in: bytes) {
+        block += bytes[(s.payload.lowerBound + photoshopID.count)..<s.payload.upperBound]
+    }
+    return block
+}
+
+/// 资源块里的 `8BIM` 资源，按出现顺序。遇到不是 `8BIM` 开头或长度越界的地方就停，
+/// `unparsed` 是停下之后剩下的非零字节数（资源块末尾可能有 0 填充）。
+func photoshopResources(in block: [UInt8]) -> (resources: [(id: Int, content: [UInt8])], unparsed: Int) {
+    var found: [(id: Int, content: [UInt8])] = []
+    var i = 0
+    while i + 12 <= block.count, Array(block[i..<(i + 4)]) == Array("8BIM".utf8) {
+        let id = Int(block[i + 4]) << 8 | Int(block[i + 5])
+        // 名字是 Pascal 串，连长度字节在内补齐到偶数。
+        let nameLength = Int(block[i + 6])
+        var j = i + 6 + nameLength + 1
+        if (nameLength + 1) % 2 == 1 { j += 1 }
+        guard j + 4 <= block.count else { break }
+        let size = Int(block[j]) << 24 | Int(block[j + 1]) << 16 | Int(block[j + 2]) << 8 | Int(block[j + 3])
+        let start = j + 4
+        guard start + size <= block.count else { break }
+        found.append((id, Array(block[start..<(start + size)])))
+        // 内容补齐到偶数；最后一个资源缺了补齐字节也照收。
+        i = min(start + size + (size % 2), block.count)
+    }
+    let unparsed = block[i...].filter { $0 != 0 }.count
+    return (found, unparsed)
+}
+
+/// APP13 里 ImageIO 不搬、也不从别处派生的 Photoshop 资源，合成一条差异：
+/// Photoshop 存出来的 JPEG 常带十来个资源，每个一行会刷屏。解析不了的数据一并计入。
+func unportablePhotoshopResources(in bytes: [UInt8]) -> [String] {
+    guard let layout = JPEGLayout(bytes) else { return [] }
+    let parsed = photoshopResources(in: photoshopResourceBlock(bytes, layout))
+    let lost = parsed.resources.map(\.id).filter { !ignoredPhotoshopResources.contains($0) }
+    guard !lost.isEmpty || parsed.unparsed > 0 else { return [] }
+    let ids = Set(lost).sorted().map { "0x" + String(format: "%04X", $0) }.joined(separator: "、")
+    let unparsed = "\(parsed.unparsed) 字节解析不了"
+    let what = lost.isEmpty
+        ? "丢失 APP13 里 \(unparsed)的 Photoshop 资源数据"
+        : "丢失 APP13 里的 \(lost.count) 个 Photoshop 资源（\(ids)）" + (parsed.unparsed > 0 ? "，另有 \(unparsed)" : "")
+    return [what + "——ImageIO 只搬其中的 IPTC（0x0404）"]
 }

@@ -569,8 +569,12 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     // 源侧的时间字段以原始字节为准，覆盖属性视图里被调和过的值（见 RawTimes.swift）。
     let before = metadataKeySpace(of: sourceImage, url: source)
         .merging(rawTimeFields(of: bytes)) { _, raw in raw }
-    return keySpaceDiff(before: before, after: metadataKeySpace(of: destImage, url: dest))
+    let after = metadataKeySpace(of: destImage, url: dest)
+    // 后三项都是属性视图里没有的源数据，直接读源文件字节。
+    return keySpaceDiff(before: before, after: after)
+        + windowsTagLosses(rawWindowsTags(of: bytes), after: after)
         + unportableSegments(in: bytes)
+        + unportablePhotoshopResources(in: bytes)
 }
 
 /// XMP 的时间戳按时刻比（Timestamp.isCarried）：目标可以多带小数秒或偏移，

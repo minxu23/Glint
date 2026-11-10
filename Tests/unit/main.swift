@@ -433,6 +433,104 @@ check("易变键丢失或变化都跳过",
       keySpaceDiff(before: ["PixelWidth": "100", "{JFIF}/XDensity": "72"],
                    after: ["{JFIF}/XDensity": "96"]), [])
 
+print("Windows 标签：等价字段带着同一个值才算承载")
+func expectWindows(_ raw: [Int: String?], _ after: [String: String], _ want: [String], _ why: String) {
+    checkRule("\(raw) / \(after)", windowsTagLosses(raw, after: after), want, why)
+}
+let tiffDescription = "{TIFF}/ImageDescription", tiffArtist = "{TIFF}/Artist"
+let lostTitle = "丢失 Windows 标题 XPTitle（IFD0 0x9C9B） = "
+let lostAuthor = "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = "
+let lostKeywords = "丢失 Windows 关键词 XPKeywords（IFD0 0x9C9E） = "
+let lostRating = "丢失 Windows 评级 Rating（IFD0 0x4746） = "
+expectWindows([0x9C9B: "西湖"], [tiffDescription: "西湖"], [], "XPTitle 由 ImageDescription 承载")
+expectWindows([0x9C9B: "西湖"], ["XMP/dc:title[en-US]": "西湖"], [], "dc:title 的任一语言都算")
+expectWindows([0x9C9B: "西湖"], ["XMP/dc:description[x-default]": "西湖"], [], "dc:description 也算")
+expectWindows([0x9C9B: "西湖"], [tiffDescription: "别的"], [lostTitle + "西湖"], "等价字段在、值不同——必须报")
+expectWindows([0x9C9B: "西湖"], [:], [lostTitle + "西湖"], "目标里没有等价字段——必须报")
+expectWindows([0x9C9C: "备注"], ["XMP/exif:UserComment": "备注"], [], "XPComment 由 exif:UserComment 承载")
+expectWindows([0x9C9D: "甲;乙"], [tiffArtist: "甲;乙"], [], "XPAuthor 与 Artist 同值（ImageIO 不拆分号）")
+expectWindows([0x9C9D: "甲;乙"], ["XMP/dc:creator[0]": "甲", "XMP/dc:creator[1]": "乙"], [],
+              "dc:creator 拆成两项也算")
+expectWindows([0x9C9D: "甲;乙"], [tiffArtist: "甲; 乙"], [], "分号两边的空白不算差异")
+expectWindows([0x9C9D: "甲;乙"], ["XMP/dc:creator[0]": "甲"], [lostAuthor + "甲;乙"], "少了一个作者——必须报")
+expectWindows([0x9C9D: "甲;乙"], [tiffArtist: "乙;甲"], [lostAuthor + "甲;乙"], "作者顺序变了——必须报")
+expectWindows([0x9C9E: "a;b"], ["{IPTC}/Keywords[0]": "a", "{IPTC}/Keywords[1]": "b"], [],
+              "XPKeywords 由 IPTC 关键词数组承载")
+expectWindows([0x9C9E: "a;b"], ["XMP/dc:subject[0]": "a", "XMP/dc:subject[1]": "b", "XMP/dc:subject[2]": "c"],
+              [lostKeywords + "a;b"], "目标多出一个关键词也不算同一个值——必须报")
+expectWindows([0x9C9F: "主题"], [tiffDescription: "主题", "XMP/dc:title[x-default]": "主题"],
+              ["丢失 Windows 主题 XPSubject（IFD0 0x9C9F） = 主题"], "XPSubject 没有等价字段，出现就报")
+expectWindows([0x4746: "5"], ["XMP/xmp:Rating": "5"], [], "Rating 由 xmp:Rating 承载")
+expectWindows([0x4746: "3"], ["XMP/xmp:Rating": "5"], [lostRating + "3"], "评级不同——必须报")
+expectWindows([0x4746: "5"], ["{IPTC}/StarRating": "5"], [lostRating + "5"], "IPTC 星级不在等价表里")
+expectWindows([0x4749: "99"], ["XMP/MicrosoftPhoto:Rating": "99"], [], "RatingPercent 由 MicrosoftPhoto:Rating 承载")
+expectWindows([0x9C9C: String?.none], ["{Exif}/UserComment": "备注"],
+              ["丢失 Windows 备注 XPComment（IFD0 0x9C9C）：值读不出（越界或类型不对）"], "值读不出的照样报")
+check("承载字段的下标按数字排", carrierValues("XMP/dc:subject",
+      in: ["XMP/dc:subject[10]": "k", "XMP/dc:subject[2]": "c", "XMP/dc:subject[0]": "a"]), ["a", "c", "k"])
+check("嵌套的子字段不算这个字段的值", carrierValues("XMP/dc:subject",
+      in: ["XMP/dc:subject[0]/x": "a"]), [])
+
+print("原始字节读取器：残缺、越界的输入不崩，读不出就照实说")
+func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8(v >> 8 & 0xFF)] }
+func le32(_ v: Int) -> [UInt8] { le16(v & 0xFFFF) + le16(v >> 16 & 0xFFFF) }
+/// 小端 TIFF：IFD0 在偏移 8，条目是（标签, 类型, 个数, 4 字节值域），表后接 `tail`。
+func tiffLE(_ entries: [(Int, Int, Int, [UInt8])], tail: [UInt8] = []) -> [UInt8] {
+    var t: [UInt8] = [0x49, 0x49, 42, 0] + le32(8) + le16(entries.count)
+    for (tag, type, count, value) in entries { t += le16(tag) + le16(type) + le32(count) + value }
+    return t + le32(0) + tail
+}
+func jpegWithExif(_ tiff: [UInt8]) -> [UInt8] {
+    let payload = Array("Exif".utf8) + [0, 0] + tiff
+    let n = payload.count + 2
+    return [0xFF, 0xD8, 0xFF, 0xE1, UInt8(n >> 8), UInt8(n & 0xFF)] + payload + [0xFF, 0xD9]
+}
+let xpNote: [UInt8] = [0x07, 0x59, 0xE8, 0x6C, 0, 0]   // "备注" 的 UTF-16LE 加 NUL
+let afterOneEntry = 8 + 2 + 12 + 4
+check("读出 XP 文本", rawWindowsTags(of: jpegWithExif(tiffLE([(0x9C9C, 1, 6, le32(afterOneEntry))], tail: xpNote))),
+      [0x9C9C: "备注"])
+check("读出 SHORT 评级", rawWindowsTags(of: jpegWithExif(tiffLE([(0x4746, 3, 1, le16(4) + [0, 0])]))), [0x4746: "4"])
+check("大端文件的评级按大端读",
+      rawWindowsTags(of: jpegWithExif([0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 1, 0x47, 0x46, 0, 3, 0, 0, 0, 1, 0, 3, 0, 0,
+                                       0, 0, 0, 0])), [0x4746: "3"])
+check("值的偏移越界：条目照样列出、值是 nil",
+      rawWindowsTags(of: jpegWithExif(tiffLE([(0x9C9C, 1, 6, le32(0xFFFF00))], tail: xpNote))), [0x9C9C: String?.none])
+check("个数大得离谱：值是 nil",
+      rawWindowsTags(of: jpegWithExif(tiffLE([(0x9C9C, 1, 0x7FFF_FFFF, le32(afterOneEntry))]))), [0x9C9C: String?.none])
+check("评级的类型不对：值是 nil", rawWindowsTags(of: jpegWithExif(tiffLE([(0x4746, 2, 2, [0x35, 0, 0, 0])]))),
+      [0x4746: String?.none])
+let lyingCount = jpegWithExif([0x49, 0x49, 42, 0] + le32(8) + le16(200) + le16(0x4746) + le16(3) + le32(1) + le16(2))
+check("IFD 条目数比实际多、文件在表中间就完了：读到哪算哪", rawWindowsTags(of: lyingCount), [0x4746: "2"])
+let whole = jpegWithExif(tiffLE([(0x9C9C, 1, 6, le32(afterOneEntry))], tail: xpNote))
+let cuts = (0..<whole.count).map { rawWindowsTags(of: Array(whole.prefix($0))).count }
+check("逐字节截短的文件都不崩", cuts.count, whole.count)
+check("XP 文本没有 NUL 结尾、长度是奇数", decodeXPText([0x41, 0, 0x42, 0, 0x43]), "AB")
+check("XP 文本里不成对的代理项解成替换字符", decodeXPText([0x00, 0xD8, 0x41, 0]), "\u{FFFD}A")
+check("XP 文本是空的", decodeXPText([0, 0, 0x41, 0]), "")
+check("空的 XP 标签不列", rawWindowsTags(of: jpegWithExif(tiffLE([(0x9C9B, 1, 2, [0, 0, 0, 0])]))), [:])
+
+print("APP13 的 Photoshop 资源：解析不了的部分算进来，不当作没有")
+func resource(_ id: Int, name: [UInt8] = [], _ content: [UInt8]) -> [UInt8] {
+    var r = Array("8BIM".utf8) + [UInt8(id >> 8), UInt8(id & 0xFF), UInt8(name.count)] + name
+    if (name.count + 1) % 2 == 1 { r.append(0) }
+    return r + [0, 0, UInt8(content.count >> 8), UInt8(content.count & 0xFF)] + content
+        + (content.count % 2 == 1 ? [0] : [])
+}
+func expectResources(_ block: [UInt8], _ ids: [Int], _ unparsed: Int, _ why: String) {
+    let parsed = photoshopResources(in: block)
+    checkRule("\(block.count) 字节", "\(parsed.resources.map(\.id)) \(parsed.unparsed)", "\(ids) \(unparsed)", why)
+}
+expectResources(resource(0x0404, [1, 2, 3]) + resource(0x0425, Array(repeating: 9, count: 16)), [0x0404, 0x0425], 0,
+                "IPTC 与它的摘要")
+expectResources(resource(0x0BB7, name: Array("abc".utf8), [1, 2]), [0x0BB7], 0, "资源名长度加长度字节是偶数，不补齐")
+expectResources(resource(0x0404, [1, 2]) + [0, 0, 0, 0], [0x0404], 0, "末尾的 0 填充不算解析不了")
+expectResources(Array(resource(0x0BB7, [1, 2, 3]).dropLast()), [0x0BB7], 0, "最后一个资源缺了补齐字节照收")
+expectResources(Array(resource(0x0BB7, Array(repeating: 7, count: 40)).prefix(20)), [], 15,
+                "资源长度越界：一个都收不下，剩下的非零字节全算解析不了")
+expectResources(resource(0x0404, [1, 2]) + Array("PHUT".utf8) + [0, 1, 0, 0], [0x0404], 5,
+                "不是 8BIM 开头的旧式资源算解析不了")
+expectResources(Array(resource(0x0404, [1, 2]).prefix(11)), [], 6, "不到一个资源头长")
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args) else { return nil }

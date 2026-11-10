@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=82
-EXPECTED_UNIT=237
+EXPECTED_ASSERTIONS=103
+EXPECTED_UNIT=277
 EXPECTED_GUI=41
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -426,6 +426,60 @@ expect_reported "EOI 之后的数据" "$WORK/尾部数据.jpg" "丢失 EOI 之�
 ./Tests/fixture --cmyk "$WORK/CMYK.jpg" >/dev/null
 expect_reported "CMYK 被转成 RGB" "$WORK/CMYK.jpg" \
     "变化 ColorModel: CMYK → RGB" "变化 ProfileName: Generic CMYK Profile → sRGB"
+
+round "7d. ImageIO 不读的 Windows 标签与 Photoshop 资源"
+# Windows 资源管理器写在 IFD0 的 XP 标签和评级，ImageIO 不读也不搬。目标里有等价字段
+# 带着同一个值才算承载。三张样本：没有等价字段、等价字段同值、等价字段不同值。
+./Tests/fixture --no-text "$WORK/只有XP.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --ifd0 "$WORK/只有XP.jpg" '9C9B=XP标题' '9C9C=XP备注' \
+    '9C9D=作者甲;作者乙' '9C9E=关键词一;关键词二' '9C9F=XP主题' '4746=4' '4749=75'
+expect_reported "只有 Windows 标签" "$WORK/只有XP.jpg" \
+    "丢失 Windows 标题 XPTitle（IFD0 0x9C9B） = XP标题" \
+    "丢失 Windows 备注 XPComment（IFD0 0x9C9C） = XP备注" \
+    "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = 作者甲;作者乙" \
+    "丢失 Windows 关键词 XPKeywords（IFD0 0x9C9E） = 关键词一;关键词二" \
+    "丢失 Windows 主题 XPSubject（IFD0 0x9C9F） = XP主题" \
+    "丢失 Windows 评级 Rating（IFD0 0x4746） = 4" \
+    "丢失 Windows 评级百分比 RatingPercent（IFD0 0x4749） = 75"
+# 同值：每个标签都抄一份目标里会有的标准字段。Artist 改成带分号的两个作者，
+# 和 test_pic/IMG_1225.JPG 的情形一样；XPComment 抄源里 UserComment 实际存的值。
+./Tests/fixture --ms-rating "$WORK/XP同值.jpg" >/dev/null
+note=$(./Tests/probe "$WORK/XP同值.jpg" '{Exif}/UserComment')
+make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP同值.jpg" '013B=作者甲;作者乙' \
+    '9C9B=西湖日落 sunset at West Lake' "9C9C=$note" '9C9D=作者甲;作者乙' '9C9E=sunset;hangzhou' \
+    '4746=5' '4749=99'
+same_out=$("$BIN" --verify "$WORK/XP同值.jpg" 2>&1)
+case "$note" in
+    ""|"<无>"|"<无法读取>") fail "前提：源里读不出 UserComment（[$note]），XPComment 那一行没测到" ;;
+    *) grep -q "元数据校验通过" <<< "$same_out" \
+           && pass "Windows 标签与等价字段同值，不报" \
+           || { fail "Windows 标签与等价字段同值却报了差异"; sed 's/^/     /' <<< "$same_out"; } ;;
+esac
+./Tests/fixture --ms-rating "$WORK/XP不同值.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP不同值.jpg" '9C9B=另一个标题' '9C9C=另一段备注' \
+    '9C9D=另一个作者' '9C9E=sunset;另一个关键词' '4746=2' '4749=25'
+expect_reported "Windows 标签与等价字段不同值" "$WORK/XP不同值.jpg" \
+    "丢失 Windows 标题 XPTitle（IFD0 0x9C9B） = 另一个标题" \
+    "丢失 Windows 备注 XPComment（IFD0 0x9C9C） = 另一段备注" \
+    "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = 另一个作者" \
+    "丢失 Windows 关键词 XPKeywords（IFD0 0x9C9E） = sunset;另一个关键词" \
+    "丢失 Windows 评级 Rating（IFD0 0x4746） = 2" \
+    "丢失 Windows 评级百分比 RatingPercent（IFD0 0x4749） = 25"
+# 真实照片：IMG_1225 的 XPAuthor 与 Artist 同值，不能报；把 Artist 改掉就必须报——
+# 后一条同时证明前一条不是因为根本没读到 XPAuthor 才安静。
+cp test_pic/IMG_1225.JPG "$WORK/XP作者.jpg"
+out=$("$BIN" --verify "$WORK/XP作者.jpg" 2>&1); st=$?
+refute "IMG_1225 的 XPAuthor 由同值的 Artist 承载，不报" "$st" grep -qF "XPAuthor" <<< "$out"
+cp test_pic/IMG_1225.JPG "$WORK/XP作者改.jpg"
+make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP作者改.jpg" '013B=Someone Else'
+expect_reported "IMG_1225 改掉 Artist" "$WORK/XP作者改.jpg" \
+    "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = Zhang San;Li Si"
+# APP13 里 IPTC 以外的资源：默认夹具本来就有 0x0404 和 0x0425，第 1 轮守着它们不报；
+# 追加一个 0x0BB7 就必须报出汇总行。
+cp "$WORK/照片.jpg" "$WORK/PS资源.jpg"
+make_sample ./Tests/mangle-tool --8bim "$WORK/PS资源.jpg" 0BB7 "Photoshop 资源里的标记串"
+expect_reported "APP13 里的其它 Photoshop 资源" "$WORK/PS资源.jpg" \
+    "丢失 APP13 里的 1 个 Photoshop 资源（0x0BB7）"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

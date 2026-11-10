@@ -23,6 +23,13 @@
 //   --extended-xmp
 //            再加一个扩展 XMP 段（APP1 `http://ns.adobe.com/xmp/extension/`），
 //            里面有一个只存在于扩展包的标签 jt:Extended。
+//   --ms-rating
+//            XMP 包里再加一个 MicrosoftPhoto:Rating="99"：Windows 百分制评级在 XMP
+//            里的字段，对应 EXIF IFD0 的 RatingPercent（0x4749）。
+//   --no-text
+//            不写描述、作者、备注、关键词和星级评分（TIFF ImageDescription/Artist、
+//            EXIF UserComment、IPTC Caption/Keywords/Byline/StarRating）。目标里于是
+//            没有任何能承载 Windows XP 标签和评级的字段。
 
 import CoreGraphics
 import CryptoKit
@@ -36,8 +43,14 @@ let noExifOffset = args.contains("--no-exif-offset")
 let cmyk = args.contains("--cmyk")
 let richXMP = args.contains("--rich-xmp")
 let extendedXMP = args.contains("--extended-xmp")
-args.removeAll { ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp"].contains($0) }
-let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] <输出.jpg>"
+let msRating = args.contains("--ms-rating")
+let noText = args.contains("--no-text")
+args.removeAll {
+    ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp", "--ms-rating", "--no-text"]
+        .contains($0)
+}
+let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
+    + " [--no-text] <输出.jpg>"
 guard let path = args.first else {
     FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
@@ -110,6 +123,20 @@ var props: [CFString: Any] = [
     kCGImageDestinationLossyCompressionQuality: 0.95,
 ]
 
+if noText {
+    let drop: [(CFString, [CFString])] = [
+        (kCGImagePropertyTIFFDictionary, [kCGImagePropertyTIFFImageDescription, kCGImagePropertyTIFFArtist]),
+        (kCGImagePropertyExifDictionary, [kCGImagePropertyExifUserComment]),
+        (kCGImagePropertyIPTCDictionary, [kCGImagePropertyIPTCCaptionAbstract, kCGImagePropertyIPTCKeywords,
+                                          kCGImagePropertyIPTCByline, kCGImagePropertyIPTCStarRating]),
+    ]
+    for (dictionary, keys) in drop {
+        guard var d = props[dictionary] as? [CFString: Any] else { die("夹具里没有 \(dictionary)") }
+        for k in keys { d.removeValue(forKey: k) }
+        props[dictionary] = d
+    }
+}
+
 if lossy, var iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any] {
     iptc[kCGImagePropertyIPTCEditStatus] = "已编辑"
     props[kCGImagePropertyIPTCDictionary] = iptc
@@ -132,6 +159,7 @@ let xmpNamespaces = """
     xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
     xmlns:stDim="http://ns.adobe.com/xap/1.0/sType/Dimensions#"
     xmlns:jt="http://example.com/jpeg2heif/test/1.0/"
+    xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/"
 """
 let richBody = """
     xmpMM:DocumentID="xmp.did:0001"
@@ -160,7 +188,7 @@ let xmpPacket = """
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
 \(xmpNamespaces)
-    xmp:Label="红色"\(richXMP ? "\n" + richBody : "/>")
+    \(msRating ? "MicrosoftPhoto:Rating=\"99\"\n    " : "")xmp:Label="红色"\(richXMP ? "\n" + richBody : "/>")
  </rdf:RDF>
 </x:xmpmeta>
 """
@@ -205,7 +233,8 @@ for (prefix, uri) in [("lr", "http://ns.adobe.com/lightroom/1.0/"), ("xmpMM", "h
                       ("mwg-rs", "http://www.metadataworkinggroup.com/schemas/regions/"),
                       ("stArea", "http://ns.adobe.com/xmp/sType/Area#"),
                       ("stDim", "http://ns.adobe.com/xap/1.0/sType/Dimensions#"),
-                      ("jt", "http://example.com/jpeg2heif/test/1.0/")] {
+                      ("jt", "http://example.com/jpeg2heif/test/1.0/")]
+    + (msRating ? [("MicrosoftPhoto", "http://ns.microsoft.com/photo/1.0/")] : []) {
     CGImageMetadataRegisterNamespaceForPrefix(merged, uri as CFString, prefix as CFString, nil)
 }
 CGImageMetadataEnumerateTagsUsingBlock(extra, nil, nil) { path, tag in

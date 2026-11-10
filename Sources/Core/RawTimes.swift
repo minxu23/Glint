@@ -48,14 +48,9 @@ private func rawIIMTimes(_ bytes: [UInt8], _ layout: JPEGLayout) -> [String: Str
         62: iptcKey(kCGImagePropertyIPTCDigitalCreationDate),
         63: iptcKey(kCGImagePropertyIPTCDigitalCreationTime),
     ]
-    // 一份 Photoshop 资源块可以跨多个 APP13 段，按顺序拼起来再解析。
-    let photoshopID: [UInt8] = Array("Photoshop 3.0".utf8) + [0]
-    var block: [UInt8] = []
-    for s in layout.segments where s.marker == 0xED && s.begins(with: photoshopID, in: bytes) {
-        block += bytes[(s.payload.lowerBound + photoshopID.count)..<s.payload.upperBound]
-    }
     var fields: [String: String] = [:]
-    for iim in photoshopResources(block, id: 0x0404) {
+    let resources = photoshopResources(in: photoshopResourceBlock(bytes, layout)).resources
+    for iim in resources.filter({ $0.id == iptcResourceID }).map(\.content) {
         var i = 0
         while i + 5 <= iim.count, iim[i] == 0x1C {
             let record = iim[i + 1], dataset = iim[i + 2]
@@ -71,26 +66,6 @@ private func rawIIMTimes(_ bytes: [UInt8], _ layout: JPEGLayout) -> [String: Str
         }
     }
     return fields
-}
-
-/// Photoshop 资源块（一串 `8BIM` 资源）里给定编号的资源内容。
-private func photoshopResources(_ block: [UInt8], id wanted: Int) -> [[UInt8]] {
-    var found: [[UInt8]] = []
-    var i = 0
-    while i + 12 <= block.count, Array(block[i..<(i + 4)]) == Array("8BIM".utf8) {
-        let id = Int(block[i + 4]) << 8 | Int(block[i + 5])
-        // 名字是 Pascal 串，连长度字节在内补齐到偶数。
-        let nameLength = Int(block[i + 6])
-        var j = i + 6 + nameLength + 1
-        if (nameLength + 1) % 2 == 1 { j += 1 }
-        guard j + 4 <= block.count else { break }
-        let size = Int(block[j]) << 24 | Int(block[j + 1]) << 16 | Int(block[j + 2]) << 8 | Int(block[j + 3])
-        let start = j + 4
-        guard size >= 0, start + size <= block.count else { break }
-        if id == wanted { found.append(Array(block[start..<(start + size)])) }
-        i = start + size + (size % 2)
-    }
-    return found
 }
 
 /// XMP 包里值形如时间戳（见 Timestamp）的标签。

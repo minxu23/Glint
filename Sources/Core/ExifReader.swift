@@ -1,8 +1,8 @@
 // 手写的 EXIF 解析器：按标签读 EXIF 字段的原始字节，不经过 ImageIO。
 //
-// 两处要用：把 ImageIO 读不出来的 UserComment 捞回来；以及 --verify 在源侧取
-// 时间字段的原始值（ImageIO 的属性视图会把 EXIF、IIM、XMP 的时间互相调和，
-// 见 RawTimes.swift）。
+// 用处：把 ImageIO 读不出来的 UserComment 捞回来；--verify 在源侧取时间字段的
+// 原始值（ImageIO 的属性视图会把 EXIF、IIM、XMP 的时间互相调和，见 RawTimes.swift）；
+// --verify 读 ImageIO 不读的 Windows XP 标签和评级（见 WindowsTags.swift）。
 
 import Foundation
 
@@ -61,23 +61,44 @@ struct TIFFStructure {
         return u32(pointer.offset)
     }
 
-    /// 在某个 IFD 里找标签，返回它的值所在偏移和字节数。
-    func find(_ ifd: Int, tag wanted: Int) -> (offset: Int, size: Int)? {
+    /// 一个 IFD 条目：标签号、类型，以及值所在的偏移和字节数。类型不认识、个数为 0、
+    /// 值越界时 `field` 是 nil——条目在，值读不出。
+    struct Entry {
+        let tag: Int
+        let type: Int
+        let field: (offset: Int, size: Int)?
+    }
+
+    /// 某个 IFD 的全部条目，按表里的顺序。条目头本身越界就停在那里。
+    func entries(_ ifd: Int) -> [Entry] {
         let unitSize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8]
-        guard let count = u16(ifd), count > 0, count < 4096 else { return nil }
+        guard let count = u16(ifd), count > 0, count < 4096 else { return [] }
+        var result: [Entry] = []
         for k in 0..<count {
             let entry = ifd + 2 + k * 12
-            guard let tag = u16(entry), let type = u16(entry + 2), let n = u32(entry + 4) else { return nil }
-            guard tag == wanted else { continue }
+            guard let tag = u16(entry), let type = u16(entry + 2), let n = u32(entry + 4) else { break }
             let unit = type < unitSize.count ? unitSize[type] : 0
-            guard unit > 0, n > 0, n < length else { return nil }
-            let size = unit * n
-            // 值不超过 4 字节时就地存放，否则存的是偏移。
-            let offset = size > 4 ? (u32(entry + 8) ?? -1) : entry + 8
-            guard offset >= 0, offset + size <= length else { return nil }
-            return (offset, size)
+            var field: (offset: Int, size: Int)?
+            if unit > 0, n > 0, n < length {
+                let size = unit * n
+                // 值不超过 4 字节时就地存放，否则存的是偏移。
+                let offset = size > 4 ? (u32(entry + 8) ?? -1) : entry + 8
+                if offset >= 0, offset + size <= length { field = (offset, size) }
+            }
+            result.append(Entry(tag: tag, type: type, field: field))
         }
-        return nil
+        return result
+    }
+
+    /// 在某个 IFD 里找标签，返回它的值所在偏移和字节数。
+    func find(_ ifd: Int, tag wanted: Int) -> (offset: Int, size: Int)? {
+        entries(ifd).first { $0.tag == wanted }?.field
+    }
+
+    /// 某个条目值的原始字节。
+    func value(of entry: Entry) -> [UInt8]? {
+        guard let field = entry.field else { return nil }
+        return Array(bytes[(base + field.offset)..<(base + field.offset + field.size)])
     }
 
     /// 某个标签值的原始字节（相对文件起点的范围）。

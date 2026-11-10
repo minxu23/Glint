@@ -127,6 +127,39 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 - `EOI` 之后的数据（安卓动态照片的视频、MPF 多图格式的附加图像等）。全是
   `0x00`/`0xFF` 填充的不算。
 
+**认识的段里还有两类 ImageIO 不读的数据，同样直接从源文件字节里读。**
+
+- Windows 资源管理器写在 EXIF IFD0 里的 `XPTitle`、`XPComment`、`XPAuthor`、
+  `XPKeywords`、`XPSubject`（`0x9C9B`–`0x9C9F`，UTF-16LE 文本）和 `Rating`
+  （`0x4746`）、`RatingPercent`（`0x4749`）。ImageIO 不读也不搬这几个标签。
+  Windows 写它们时通常同时写一份标准字段（`test_pic/IMG_1225.JPG` 的 `XPAuthor`
+  与 `Artist` 都是 `Zhang San;Li Si`），标准字段会被搬走，所以判据和 IIM 日期一样：
+  目标里的等价字段**确实带着同一个值**才算承载，不是"等价字段存在"；否则每个
+  标签报一条丢失。等价字段：
+
+  | 源标签 | 目标里的等价字段 |
+  |---|---|
+  | `XPTitle` | `{TIFF}/ImageDescription`、`XMP/dc:title` 的任一语言、`XMP/dc:description` 的任一语言 |
+  | `XPComment` | `{Exif}/UserComment`、`XMP/exif:UserComment` |
+  | `XPAuthor` | `{TIFF}/Artist`、`XMP/dc:creator` |
+  | `XPKeywords` | `XMP/dc:subject`、`{IPTC}/Keywords` |
+  | `XPSubject` | 没有，出现就报 |
+  | `Rating` | `XMP/xmp:Rating` |
+  | `RatingPercent` | `XMP/MicrosoftPhoto:Rating` |
+
+  标题、备注按整串比。作者和关键词是分号分隔的列表：拆成各项、去掉两边空白，
+  再和等价字段按顺序逐项比。等价字段可以是一个同样带分号的串——ImageIO 不拆
+  `Artist` 里的分号，产物的 `dc:creator[0]` 就是 `Zhang San;Li Si`——也可以是数组
+  （`[甲, 乙]`）；多一项、少一项、顺序不同都算丢失。评级按整数比；IPTC 的
+  `StarRating` 不在等价字段里。标签在、值读不出（偏移越界、类型不对）也报。
+- APP13 里 IPTC 以外的 Photoshop 资源。ImageIO 只读、只搬其中的 IPTC-IIM（8BIM
+  `0x0404`），同一段里的其它资源随段消失。它们合成**一条**差异，写个数和资源号，
+  例如 `丢失 APP13 里的 1 个 Photoshop 资源（0x0BB7）`——Photoshop 存出来的 JPEG
+  常带十来个资源，每个一行会刷屏。不计入的只有 `0x0404` 本身（由逐字段比对管着）、
+  `0x0425`（IPTC 摘要，`0x0404` 的校验和）和两个缩略图资源 `0x0409`、`0x040C`
+  （见下面的有意忽略）。资源块里解析不了的数据（长度越界、不以 `8BIM` 开头）
+  按字节数计入同一行。
+
 有几类差异会被有意忽略，因为它们描述的是文件本身而非照片内容：
 
 - 编码相关的键：文件体积、像素尺寸、色深、压缩方式、JFIF 段、ImageIO 内部标记。
@@ -134,6 +167,10 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   子串匹配会让 `{MakerCanon}/FocusDepth`、`XMP/crs:DepthMapInfo` 这类真实字段
   被整条跳过且悄无声息。色彩描述文件名（`ProfileName`）和色彩模型
   （`ColorModel`）**不**在其中：它们决定像素怎么解读，CMYK 被转成 sRGB 会报出来。
+- 缩略图：EXIF IFD1 里的缩略图，以及 Photoshop 资源里的缩略图（8BIM `0x0409`、
+  `0x040C`）。缩略图是从像素派生的预览，不是照片内容，和文件体积、压缩方式同类。
+  产物里不带内嵌缩略图，而几乎所有相机直出的 JPEG 都带一个（`test_pic/` 里两张
+  都有），报它会让几乎所有真实照片校验不过，所以不检测。
 - EXIF 定长字符串的尾部 NUL 填充——JPEG 和 HEIC 的填充长度天然不同，
   只比对有效内容。
 - **有理数的重新编码噪声**。EXIF 的数值以「分子/分母」存放，写入方常常换成另一个
@@ -216,15 +253,16 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   所以 `--delete-original` 不会删这样的源文件。
 - **深度图、视差图、HDR 增益图等辅助图像不会保留**。`AddImageFromSource` 不搬它们。
   `--verify` 会报出来（`{FileContents}/…/AuxiliaryData…` 几条，外加 EOI 之后的数据）。
-- **APP13 里 IPTC 以外的 Photoshop 资源、EXIF 的 IFD1 缩略图不会保留，`--verify`
-  也不报**。APP13 段里只有 8BIM `0x0404`（IPTC-IIM）会被 ImageIO 读出并搬走，
-  同一段里的其它 8BIM 资源随段一起消失；IFD1 里的 EXIF 缩略图同样不会写进产物。
-  两者都不在属性视图里，而 APP13 段本身算"认识的段"，所以校验看不见。
-- **Windows 资源管理器写的 EXIF 备注与评级不会保留，`--verify` 也发现不了**：
-  IFD0 里的 `XPTitle`、`XPComment`、`XPAuthor`、`XPKeywords`（`0x9C9B`–`0x9C9E`）
-  和 `Rating`（`0x4746`）。ImageIO 不读这几个标签，它们既不在属性视图里，也不会
-  写进产物，所以校验通过、`--delete-original` 照样会删源。在意它们就别用
-  `--delete-original`。
+- **APP13 里 IPTC 以外的 Photoshop 资源不会保留**。只有 8BIM `0x0404`（IPTC-IIM）
+  会被 ImageIO 读出并搬走，其它资源随段一起消失。`--verify` 把它们报成一条
+  （见「`--verify` 到底比什么」），所以 `--delete-original` 不会删这样的源文件。
+- **Windows 资源管理器写的 XP 标签和评级本身不会保留**：IFD0 里的 `XPTitle`、
+  `XPComment`、`XPAuthor`、`XPKeywords`、`XPSubject`（`0x9C9B`–`0x9C9F`）和
+  `Rating`、`RatingPercent`（`0x4746`、`0x4749`）。ImageIO 不读也不写它们，信息
+  只有在同时写了同值的标准字段时才跟着标准字段走。没有同值的标准字段时
+  `--verify` 逐个报出，`--delete-original` 不会删源。
+- **EXIF 的 IFD1 缩略图和 Photoshop 资源里的缩略图不会保留，`--verify` 有意不报**：
+  它们是从像素派生的预览（见「`--verify` 到底比什么」的有意忽略）。
 - **界面用 AppKit 而非 SwiftUI**。SwiftUI 的 `@State` 等属性包装器现在是宏，
   宏插件只随完整版 Xcode 分发；用 AppKit 才能只靠命令行工具构建。
 - **应用是本地临时签名的**，没有开发者证书。自己构建自己用没问题，拷给别人
@@ -276,8 +314,9 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
 | `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：捞回 ImageIO 读不出的 `UserComment`，按标签读原始值 |
-| `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后） |
+| `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）和 APP13 里的 Photoshop 资源 |
 | `Sources/Core/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
+| `Sources/Core/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
 | `Sources/CLI/Arguments.swift` | 命令行参数解析（纯函数，可被测试直接调用） |
 | `Sources/CLI/main.swift` | 命令行入口：串起解析、转换与输出 |
 | `Sources/GUI/` | AppKit 界面：窗口、列表行、拖放区、界面状态 |
