@@ -6,15 +6,14 @@ import Foundation
 import ImageIO
 
 // 下面这些 expectXxx 都是同一个形状：喂一组输入给某条判定规则，比对结果。
-// 打印与失败计数一律交给 harness 的 checkRule——以前每个都自己写一遍
-// print("  ✗ …") + failedChecks += 1，五份近乎相同的代码绕开了 pass/fail，
-// 改一处格式就得改五处，漏掉某个 failedChecks 还会让失败悄悄变成通过。
+// 打印与失败计数一律交给 harness 的 checkRule：自己写 print + failedChecks
+// 的话，漏掉一处 failedChecks 就会让失败悄悄变成通过。
 func expect(_ a: String, _ b: String, same expected: Bool, _ why: String) {
     checkRule("\(a) vs \(b)", valuesMatch(a, b), expected, why)
 }
 
 print("flatten：两种键类型都要能下钻")
-// flatten 只留了一条字典分支：String 键会桥接成 CFString，被同一个 as? 接走。
+// flatten 只有一条字典分支：String 键会桥接成 CFString，被同一个 as? 接走。
 // 这组用例守的正是这件事——桥接哪天不管用了，下面「String 键」那条会红。
 // 也守着 flatten 整个别哑掉：它一哑，元数据集合会整块变空，而「校验无差异」
 // 照样通过——比较的两边一起空了，差异自然是零。
@@ -58,11 +57,8 @@ expect(trimPadding("备注\0\0\0"), trimPadding("备注\0\0\0\0\0"), same: true,
 expect(trimPadding("备注   "), trimPadding("备注"), same: true, "尾部空格")
 
 print("等价字段必须真的带着同一个值")
-// 曾经只判断"等价键存在"：源里 {IPTC}/DateCreated 丢了，只要目标有个
-// DateTimeOriginal 就放过，哪怕它写着另一个年份。这组用例守的就是后半句。
-// 注：端到端样本造不出来——ImageIO 写 JPEG 时会强制把 IPTC 日期同步成 EXIF
-// 日期，不允许二者不一致；但相机/exiftool/Photoshop 写的文件可以，所以这条
-// 判断在真实文件上有意义。
+// 只判断"等价键存在"的话，源里 {IPTC}/DateCreated 丢了、目标有个写着另一个
+// 年份的 DateTimeOriginal 也会被放过。这组用例守的就是"值也得对上"。
 func expectCarried(_ source: String, _ equivalent: String, _ want: Bool, _ why: String) {
     checkRule("\(source) vs \(equivalent)", carriesSameValue(source, equivalent), want, why)
 }
@@ -81,9 +77,8 @@ expectCarried("٢٣", "x٢٣", false, "非 ASCII 数字不算数字")
 expectCarried("184207", "2024-09-15T18:42:07+08:00", true, "带偏移的 XMP 时间戳，时刻位照样比得上")
 
 print("带时区的 IIM 时间：偏移本身也得在目标里找得到")
-// 这一组是审查抓出来的假阴性。IIM 的 TimeCreated 可以带 UTC 偏移
-// （HHMMSS±HHMM）。只把偏移剥掉再比时间，看着是消掉了一个误报，实际在
-// 「偏移只存在于 IIM 后缀、目标又没有 OffsetTime」时把真丢失吞了——
+// IIM 的 TimeCreated 可以带 UTC 偏移（HHMMSS±HHMM）。只把偏移剥掉再比时间，
+// 会在「偏移只存在于 IIM 后缀、目标又没有 OffsetTime」时把真丢失吞掉——
 // README 里「时区由 OffsetTime 单独承载」是对目标文件的断言，必须真查。
 let shotAt = "{Exif}/DateTimeOriginal"
 let offsetAt = "{Exif}/OffsetTimeOriginal"
@@ -113,9 +108,6 @@ expectEquivalent(timeKey, "184207", noOffset, true, "不带偏移的时间，目
 //     而 OffsetTime* 它不会自己补。所以源里不写 EXIF OffsetTime* 时，
 //     XMP 就是目标里唯一的偏移承载——selftest.sh 的「偏移只靠 XMP 承载」
 //     一轮走的正是这条路（夹具的 --no-exif-offset）。
-// 这段注释原先写着"端到端做不出来，得用 exiftool 之类的外部写入器"，是错的：
-// 当时的测量用 Tests/probe 查 XMP 键，而那个工具根本不读 XMP，所有 XMP 查询
-// 都无条件返回「无」——结论是仪器的产物，不是 ImageIO 的行为。
 // 键的拼法已对着真实照片核过：IMG_1225.JPG / P1130939.JPG 的 ImageIO 输出里
 // 确实是 `XMP/photoshop:DateCreated` 与 `XMP/xmp:CreateDate`（形如
 // `2011-01-19T22:01:00.00`），转成 HEIC 后两者都还在。
@@ -134,7 +126,7 @@ expectEquivalent(timeKey, "184207-12345", withOffset, false,
 expectEquivalent(timeKey, "184207+0800",
                  [shotAt: "2024:09:15 18:42:07", "{ExifAux}/LensModel": "RF24-70 +0800"],
                  false, "无关字段里巧合出现的偏移不算承载")
-// Date 键根本不进拆分——按长相拆的老写法会把 2024-0915 砍成 2024，
+// Date 键根本不进拆分——按长相拆会把 2024-0915 砍成 2024，
 // 而 2024 几乎出现在任何日期里，于是「9 月 15 日丢了」会被静默放过。
 expectEquivalent(dateKey, "20240915", noOffset, true, "IIM 日期被 EXIF 时间戳承载")
 expectEquivalent(dateKey, "2024-0915", [shotAt: "2024:01:01 00:00:00"], false,
@@ -143,16 +135,14 @@ expectEquivalent("{Exif}/DateTimeOriginal", "2024:09:15 18:42:07", noOffset, fal
                  "不在等价表里的键一律不算承载")
 
 print("UTCOffset：形状锚定在末尾，再验范围")
-// 这一组后半截是审查抓出来的：上一版用"取最后一个加减号、把数字滤出来数够
-// 4 位"冒充形状判断，于是从日期里读出时区、尾巴带垃圾也收、越界也收、
-// 任何以 Z 结尾的文本都算 UTC。它是**目标侧**的读取器，松了就是静默放过。
+// 形状锚定在末尾、逐字符核对：不能从日期里读出时区，尾巴带垃圾、越界、
+// 随便什么以 Z 结尾的文本都不算。它是**目标侧**的读取器，松了就是静默放过。
 for (text, want) in [// 该认出来的
                      ("+08:00", "+0800"), ("+0800", "+0800"), ("-05:00", "-0500"),
                      ("2024-09-15T18:42:07+08:00", "+0800"),
                      ("2024-09-15T18:42:07-0800", "-0800"),
                      // `…Z`：整个值必须是 <时刻> 或 <日期><分隔><时刻>，两头都锚定。
-                     // 下面这些是真实写入器会产出的形状，一条都不能误拒
-                     // ——上一版只凑了 HHMMSS 和 HH:MM:SS 两条，把后四条全拒了。
+                     // 下面这些是真实写入器会产出的形状，一条都不能误拒。
                      ("184207Z", "+0000"),                    // IIM 的 HHMMSS
                      ("18:42Z", "+0000"),                     // 分钟精度
                      ("10:42:07Z", "+0000"),                  // 整个值就是时刻
@@ -165,7 +155,7 @@ for (text, want) in [// 该认出来的
                      ("2024-09-15 18:42:07Z", "+0000"),       // 空格代替 T
                      // EXIF 自己的日期是冒号分隔的，而 README 把
                      // {Exif}/DateTimeOriginal 点名为等价承载键之一。
-                     // 按 ISO 8601 列全集时漏了它——EXIF 的日期不属于 ISO 8601。
+                     // EXIF 的日期不属于 ISO 8601，按 ISO 8601 列形状会漏掉它。
                      ("2024:09:15 18:42:07Z", "+0000"),
                      ("2024:09:15 18:42:07.42Z", "+0000"),
                      ("23:59:60Z", "+0000"),                  // 闰秒
@@ -175,10 +165,9 @@ for (text, want) in [// 该认出来的
                      ("+05:30", "+0530"), ("+0545", "+0545"),
                      ("+09:30", "+0930"), ("+13:45", "+1345"),
                      // 上下界不对称：负向最多 -12:00，正向最多 +14:00。
-                     // 第一版两侧都用 14，下面三条全被错误接受。
                      ("-13:00", ""), ("-1400", ""), ("+1500", ""),
-                     // 第二版分了符号但按分量各自设上限（时 <= 14、分 <= 59），
-                     // 于是越过边界一点的偏移照收。约束的必须是总偏移量。
+                     // 约束的是总偏移量，不是时和分各自的上限（时 <= 14、分 <= 59）：
+                     // 越过边界一点的偏移也要拒。
                      ("+1430", ""), ("+14:59", ""), ("-1230", ""), ("-12:59", ""),
                      // 分钟本身仍要 < 60：+00:70 折算后落在范围内，
                      // 但它不是一个合规的偏移拼法。
@@ -187,14 +176,13 @@ for (text, want) in [// 该认出来的
                      ("2024-09-15T18:42:07", ""), ("2024-09-15", ""),
                      ("2024:09:15 18:42:07", ""),
                      ("2024-09-15T18:42:07.4200", ""),
-                     // 以下四条上一版全部误读
-                     ("2024-09-15T18", ""),      // 读成 -1518
-                     ("184207 -0800mm", ""),     // 读成 -0800
-                     ("+9999", ""),              // 越界照收
+                     // 宽松的读法会把下面几条读出偏移
+                     ("2024-09-15T18", ""),      // 日期里的减号不是偏移
+                     ("184207 -0800mm", ""),     // 垃圾尾巴
+                     ("+9999", ""),              // 越界
                      ("随便什么Z", ""),
-                     // 「Z 前一位是数字」那一版把下面六条全读成了 +0000。
-                     // 上面那条 `随便什么Z` 之所以能过，只是因为「么」不是数字——
-                     // 形状这件事当时没有任何证人钉着。
+                     // 只查「Z 前一位是数字」会把下面这些读成 +0000：
+                     // Z 前面必须是一个完整时刻。
                      ("abc0Z", ""),
                      ("0Z", ""),
                      ("未知9Z", ""),
@@ -205,9 +193,8 @@ for (text, want) in [// 该认出来的
                      ("20240915Z", ""),           // 这是个日期，不是时刻
                      ("99184207Z", ""),           // 末六位恰好像时刻，整体不是
                      ("2024Z", ""),               // 4 位无分隔与年份分不开，不收
-                     // 数值范围：三个分量各有一条独占证人。只放一条 `995999Z`
-                     // 是不够的——它的秒也越界，于是秒那道检查就把它拦了，
-                     // 时和分的上限实际上裸着（破坏测试抓到的）。
+                     // 数值范围：时、分、秒各有一条只越界一个分量的证人。
+                     // 只放 `995999Z` 不够——它的秒也越界，时和分的上限就没人守。
                      ("240000Z", ""),             // 24 时，只有「时」越界
                      ("186000Z", ""),             // 60 分，只有「分」越界
                      ("184299Z", ""),             // 99 秒，只有「秒」越界
@@ -218,11 +205,9 @@ for (text, want) in [// 该认出来的
                      ("拍摄于 18:42:07Z", ""),     // 空格前面不是日期，是散文
                      ("9999-99-99T18:42:07Z", ""),// 时刻合法但日期不是日期
                      // 偏移的前文必须是空或一个完整时刻——和 Z 侧同一把尺子。
-                     // `±` 侧曾只查"符号前一位是数字"，于是 Z 侧明确拒掉的东西
-                     // 它全收（第四轮才补上的对称性）。下面每一条都和 Z 侧的
-                     // 孪生反例一一对应。
-                     ("abc+0800", ""),            // 前一位非数字，旧版也拒
-                     ("abc1+0800", ""),           // 前一位是数字，旧版就收了
+                     // 下面每一条都和 Z 侧的孪生反例一一对应。
+                     ("abc+0800", ""),            // 符号前一位不是数字
+                     ("abc1+0800", ""),           // 符号前一位是数字，前文仍不是时刻
                      ("镜头型号RF50mm1+0800", ""),
                      ("ISO100+0800", ""),
                      ("+08:00 (approx)5+0800", ""),
@@ -242,21 +227,21 @@ for (text, want) in [// 该认出来的
                      ("20240915T184207+0800", "+0800"),           // 基本格式
                      ("2024:09:15 18:42:07+08:00", "+0800"),      // EXIF 的冒号日期
                      ("2024:09:15 18:42:07-0800", "-0800"),
-                     // 闰秒：Z 侧有用例，± 侧原先没有——而本轮主题正是两侧对称
+                     // 闰秒：± 侧和 Z 侧一样认
                      ("23:59:60+08:00", "+0800"),
                      ("235960+0800", "+0800"),
                      ("2024-09-15T23:59:60+08:00", "+0800"),
                      // 冒号日期同样要验月日范围
                      ("9999:99:99 18:42:07+08:00", ""),
-                     // 裸 Z 不再算（前面没有数字）
+                     // 裸 Z 不算（前面没有时刻）
                      ("Z", "")] {
     checkRule(text, UTCOffset(parsing: text)?.text ?? "", want,
               want.isEmpty ? "\(text) 里没有时区" : "\(text) → \(want)")
 }
 
 print("目标侧读松了就会静默放过：拿畸形值当承载")
-// 这两条直接对着上面那四种误读：源里偏移确实丢了，但目标某个字段里有一段
-// 能被旧读取器读成同一个偏移的垃圾，于是整条差异被吞掉。
+// 源里偏移确实丢了，但目标某个字段里有一段能被宽松读法读成同一个偏移的垃圾：
+// 读取器一松，整条差异就被吞掉。
 expectEquivalent(timeKey, "184207+0800",
                  [shotAt: "2024:09:15 18:42:07", offsetAt: "+08:00 (approx)"],
                  false, "目标的偏移字段带垃圾尾巴，不算承载")
@@ -268,8 +253,8 @@ expectEquivalent(timeKey, "184207Z",
                  false, "结尾是「数字+Z」也不算 UTC——Z 必须终结一个时刻")
 
 print("numericFields：三处形状解析共用的那把尺子")
-// 时刻、日期、偏移本来各写了一遍同样的 switch count，现在共用这一个。
-// 它是单点故障，所以直接钉住，而不只是透过上面那些间接验。
+// 时刻、日期、偏移的形状解析共用它。它是单点故障，所以直接钉住，
+// 而不只是透过上面那些间接验。
 // 用生产代码里那套命名常量，不另起一套：这样用例同时也钉住了常量本身——
 // 把 ymdDash 的分隔符改掉，下面「带连字符的日期」就会红。
 let hhmmssColon = DigitShape.hhmmssColon
@@ -302,8 +287,7 @@ expectFields("18-42-07", hhmmssColon, nil, "分隔符不对")
 expectFields("184207", hhmmssColon, nil, "该有分隔符却没有")
 expectFields("18:42:07", hhmmss, nil, "不该有分隔符却有")
 expectFields("+999-09-15", ymdDash, nil, "字段里不能有前导符号——Int 认 +999，isAllDigits 不认")
-// 这一条钉的是"全角数字不算数字"这个行为。isASCII 只在 isAllDigits 里有一份，
-// numericFields 现在也调它，所以不存在"哪一份是冗余的"这个问题了。
+// 这一条钉的是"全角数字不算数字"：numericFields 用 isAllDigits 判数字。
 expectFields("1８4207", hhmmss, nil, "全角数字不算数字")
 
 print("isAllDigits：IIM 前六位和小数秒只需要这一句")
@@ -347,9 +331,9 @@ for (text, time, offset) in [("184207+0800", "184207", "+0800"),
 }
 
 print("isVolatile：只跳过描述文件自身的键")
-// 这里曾经用子串匹配，"Depth"/"Compression"/"ProfileName" 这类片段太短，
-// 任何名字里含这几个字的真实字段都会被整条跳过且悄无声息。下面后半组用例
-// 正是守这件事——它们必须**不**被跳过。
+// 按完整键路径匹配，不用子串："Depth"/"Compression"/"ProfileName" 这类片段太短，
+// 子串匹配会让名字里含这几个字的真实字段被整条跳过且悄无声息。下面后半组用例
+// 守这件事——它们必须**不**被跳过。
 func expectVolatile(_ key: String, _ want: Bool, _ why: String) {
     checkRule(key, isVolatile(key), want, why)
 }
@@ -375,8 +359,7 @@ expectVolatile("{ExifAux}/LensProfileName", false, "镜头配置文件名不是�
 expectVolatile("{TIFF}/CompressionScheme", false, "名字含 Compression 但不是它")
 expectVolatile("{Exif}/DateTimeOriginal", false, "拍摄时间")
 expectVolatile("{GPS}/Latitude", false, "拍摄位置")
-// 老片段表里把它写成小写 hasAlpha，和拼错的 EncodingProcess 一样从来没匹配过。
-// 改用 ImageIO 常量后两处笔误都自动消失了——这正是不写死字符串的好处。
+// 键名取自 ImageIO 常量，大小写写错的键名不会被当成易变键。
 expectVolatile("hasAlpha", false, "小写 hasAlpha 不是真实键名")
 
 print("MakerNote 派生字典的归类")
@@ -479,15 +462,12 @@ expectRejected(["--bogus", "a.jpg"], "未知选项")
 expectRejected(["-q"], "选项缺少参数")
 
 print("命令行与界面的默认值")
-// recursive 曾经一端 false 一端 true，同一句「指定文件夹下」在两边含义不同。
-// 现在两端都取自 ConversionOptions.default，这组断言守住它们不再各自漂移。
+// 两端都取自 ConversionOptions.default，这组断言守住它们不各自漂移。
 func expectSame<T: Equatable>(_ gui: T, _ cli: T, _ why: String) {
     gui == cli ? pass("\(why) 两端一致（\(gui)）")
                : fail("\(why) 不一致：界面 \(gui)，命令行 \(cli)")
 }
-// 命令行这一侧必须真的解析一遍参数再读默认值。以前两边都取自同一个库，
-// 断言打印着"两端一致"却从未碰过命令行——把 CLI 改回 ConversionOptions()
-// 整套测试照样全绿。现在 parseArguments 是可链接的纯函数，这组才算数。
+// 命令行这一侧必须真的解析一遍参数再读默认值，否则"两端一致"从未碰过命令行。
 guard case .run(let cli) = (try? parseArguments(["照片.jpg"])) else {
     fail("命令行解析不出最简单的一条命令"); finish("单元测试")
 }

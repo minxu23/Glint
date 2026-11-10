@@ -17,7 +17,6 @@ guard let work = CommandLine.arguments.dropFirst().first.map({ URL(fileURLWithPa
 let fm = FileManager.default
 
 /// 目录里扩展名匹配的文件。`deep` 为真时连子目录一起找。
-/// 原先这里是三个只差一个字面量（jpg/heic）和一处深浅的函数。
 func files(in dir: URL, ext: String, deep: Bool = false) -> [URL] {
     let all: [URL] = deep
         ? (fm.enumerator(at: dir, includingPropertiesForKeys: nil)?
@@ -156,9 +155,8 @@ if midSources.isEmpty {
 
 // MARK: - 4. 设置项只有一个写入口
 
-// 每个开关原先各有一个只做转发的读写属性，recursive 那个还额外要重扫输入。
-// 现在统一走 updateOptions，这一组守两件事：值真的写进去了，
-// 以及 recursive 变化确实触发了重扫（不触发的话勾上"递归子文件夹"毫无反应）。
+// 设置统一走 updateOptions。这一组守着：值真的写进去了，以及 recursive 变化
+// 确实触发了重扫（不触发的话勾上"递归子文件夹"毫无反应）。
 print("界面模型：设置项与递归重扫")
 let recursiveDir = work.appendingPathComponent("递归")
 let shallowCount = files(in: recursiveDir, ext: "jpg").count
@@ -174,7 +172,7 @@ if shallowCount == 0 || deepCount <= shallowCount {
     m4.updateOptions { $0.recursive = false }
     check("取消勾选后退回顶层", m4.rows.count, shallowCount)
     // 非 recursive 的字段也必须真的写进去——只处理 recursive 的 updateOptions
-    // 会让质量滑块、覆盖开关统统失效，而上面三条照样全过。
+    // 会让质量滑块、覆盖开关统统失效，而上面那几条照样全过。
     m4.updateOptions { $0.quality = 0.95 }
     check("改质量同样写进了 options", m4.options.quality, 0.95)
     check("改质量不动文件列表", m4.rows.count, shallowCount)
@@ -182,9 +180,8 @@ if shallowCount == 0 || deepCount <= shallowCount {
 
 // MARK: - 5. 跳过的原因
 
-// 跳过/失败的原因现在挂在状态上（RowStatus.skipped(String)），不再和
-// "转换成功但有话要说" 挤在同一个 note 字段里。这一组确认原因真的传到了
-// 列表行的副标题——不然界面上只会出现一个没有任何说明的灰圈。
+// 跳过/失败的原因挂在状态上（RowStatus.skipped(String)）。这一组确认原因真的
+// 传到了列表行的副标题——不然界面上只会出现一个没有任何说明的灰圈。
 print("界面模型：跳过的原因")
 let disguiseDir = work.appendingPathComponent("伪装")
 try? fm.createDirectory(at: disguiseDir, withIntermediateDirectories: true)
@@ -206,10 +203,8 @@ if let anyHeic = produced.first, (try? fm.copyItem(at: anyHeic, to: disguised)) 
 
 // MARK: - 6. 改设置必须通知视图
 
-// 本文件开头的 Model.swift 写着「状态变化统一通过 onChange 回调通知视图刷新」。
-// 被 updateOptions 替换掉的那四个转发属性其实不通知，界面是靠
-// MainViewController 两处手工 refresh() 补的。收成一个入口之后这件事得由模型
-// 自己保证，否则对未来任何调用方都是静默失效——而那种失效没有任何征兆。
+// Model.swift 开头写着「状态变化统一通过 onChange 回调通知视图刷新」。这件事
+// 得由模型自己保证，不能靠调用方手工 refresh()，否则对别的调用方是静默失效。
 print("界面模型：改设置会通知视图")
 let m6 = ConversionModel()
 var notices = 0

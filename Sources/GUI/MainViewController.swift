@@ -373,7 +373,7 @@ final class MainViewController: NSViewController {
 
     @objc private func qualityChanged() {
         let stepped = (qualitySlider.doubleValue * 20).rounded() / 20
-        // 不再手工 refresh()：updateOptions 会通知，走 onChange 那一条路。
+        // 不手工 refresh()：updateOptions 会通知，走 onChange 那一条路。
         model.updateOptions { $0.quality = stepped }
     }
 

@@ -1,8 +1,5 @@
 // --verify 的比对规则：把元数据展开成「路径 = 值」逐条对照，并判定
-// 哪些差异是真丢失、哪些只是重新编码的噪声。
-//
-// 从 Converter.swift 拆出来——"什么算变了"是一套独立演化的判断，
-// 和怎么转码无关；它也是整个项目里最容易判错的部分，值得单独放。
+// 哪些差异是真丢失、哪些只是重新编码的噪声。和怎么转码无关。
 
 import Foundation
 import ImageIO
@@ -11,10 +8,8 @@ import ImageIO
 
 func flatten(_ value: Any, prefix: String = "", into result: inout [String: String]) {
     switch value {
-    // 一条分支接住所有字典。原先这里还有一条一模一样的 [String: Any] 分支，
-    // 看着是"两种键类型都得接"，其实是死代码：String 键会桥接成 CFString，
-    // 下面这个 as? 先接走了，那条永远走不到。实测把它删掉，展开结果一字不变。
-    // 「桥接确实管用」由单元测试 flatten 那组守着——哪天不管用了，那条会红。
+    // 一条分支接住所有字典：String 键会桥接成 CFString，被这个 as? 一并接走。
+    // 「桥接确实管用」由单元测试 flatten 那组守着。
     case let dict as [CFString: Any]:
         for (k, v) in dict {
             let name = k as String
@@ -71,10 +66,8 @@ func trimPadding(_ s: String) -> String {
 
 // MARK: - 键路径
 
-/// 元数据展开后的键路径形如 `{Exif}/DateTimeOriginal`。下面几张表都要拼它，
-/// 以前每张表各自 `let exif = kCGImagePropertyExifDictionary as String` 再手拼
-/// 一遍，四张表重复了四次——拼法真要动（比如换分隔符）得记得改四处。
-/// 字典名与字段名能用 ImageIO 常量就用常量，Apple 改了值也跟得上。
+/// 元数据展开后的键路径形如 `{Exif}/DateTimeOriginal`。下面几张表都用它拼，
+/// 拼法只在这里定义。字典名与字段名能用 ImageIO 常量就用常量，Apple 改了值也跟得上。
 func metadataKey(_ dictionary: CFString, _ name: CFString) -> String {
     "\(dictionary as String)/\(name as String)"
 }
@@ -83,9 +76,7 @@ func exifKey(_ name: CFString) -> String { metadataKey(kCGImagePropertyExifDicti
 func iptcKey(_ name: CFString) -> String { metadataKey(kCGImagePropertyIPTCDictionary, name) }
 
 /// XMP 侧没有 ImageIO 常量，键路径是「命名空间前缀 + 标签名」，再由展开时统一
-/// 冠上 `XMP/` 这一层。`path` 形如 `photoshop:DateCreated`。
-/// 这一层前缀以前在五处手写（三张表、volatileKeyPrefixes、xmpTags），
-/// 是那几张表里最后一个手拼的字符串——真要改层名得记得改五处。
+/// 冠上 `XMP/` 这一层。`path` 形如 `photoshop:DateCreated`。这一层前缀只在这里定义。
 func xmpKey(_ path: String) -> String { "XMP/\(path)" }
 
 /// 描述文件本身（编码方式、体积、色深）而非照片内容的键——转换后变化属正常，
@@ -94,8 +85,6 @@ func xmpKey(_ path: String) -> String { "XMP/\(path)" }
 /// 用**完整键路径**精确匹配，不用子串。子串匹配看着省事，但 "Depth"、
 /// "Compression"、"ProfileName" 这类片段太短：任何名字里含这几个字的真实字段
 /// （厂商的 FocusDepth、XMP 的 DepthMapInfo 之类）都会被整条跳过，而且悄无声息。
-/// 这和 makerNoteGroup 曾经按字典前缀整类归并是同一类错误——噪声是降了，
-/// 真丢失也一并藏了。
 ///
 /// 有常量的直接引用常量，Apple 改了值也跟得上；XMP 侧没有常量，只能写路径。
 ///
@@ -143,13 +132,10 @@ let equivalentKeys: [String: [String]] = {
     ]
 }()
 
-/// IIM 里会带 UTC 偏移的那两个键。只有 Time 能带（`HHMMSS±HHMM`），
+/// IIM 里会带 UTC 偏移的键。只有 Time 能带（`HHMMSS±HHMM`），
 /// Date 不能——所以要不要拆偏移是**按键**决定的，不是看值的长相。
-///
-/// 这件事上一版栽过：按长相拆（「全数字 + 号 + 4 位偏移」）会把不合规范的
-/// `2024-0915` 从减号处砍成 `2024`，而 `2024` 几乎出现在任何日期里，
-/// 于是「9 月 15 日丢了、目标写着 1 月 1 日」会被判成承载、一声不响地放过。
-/// 按键拆就不存在这个口子：Date 键根本不进拆分。
+/// 按长相拆会把不合规范的 `2024-0915` 从减号处砍成 `2024`，截短的源值更容易
+/// 被判成承载；Date 键根本不进拆分。
 let iimTimeKeys: Set<String> = Set([kCGImagePropertyIPTCTimeCreated,
                                     kCGImagePropertyIPTCDigitalCreationTime].map(iptcKey))
 
@@ -158,13 +144,13 @@ let iimTimeKeys: Set<String> = Set([kCGImagePropertyIPTCTimeCreated,
 /// 别的（含不带偏移的 `HHMMSS`）一律原样返回、偏移为 nil。偏移的形状与范围
 /// 交给 UTCOffset，源侧与目标侧用同一把尺子。
 ///
-/// 两道条件：
+/// 拆的条件：
 ///   第 7 个字符是 `+`/`-`/`Z` —— 只被它拦住的用例是 `184207.555Z`：UTCOffset 把
 ///                                `184207.555` 认作带小数秒的时刻，少了这一道就拆成
 ///                                (`184207`, +0000)，小数秒被悄悄丢掉
 ///   UTCOffset 认整个值末尾的偏移 —— 解析不出就不拆，如 `184207+9999`、
 ///                                `184207+12+0800`、`184207+1+080`
-/// 「前六位是数字」「总长 ∈ {7, 11, 12}」是这两道的推论：UTCOffset 要求偏移前面
+/// 「前六位是数字」「总长 ∈ {7, 11, 12}」是这两个条件的推论：UTCOffset 要求偏移前面
 /// 为空或是一个完整时刻，而第 7 个字符又必须是偏移的起头，于是前文只能是 `HHMMSS`。
 ///
 /// 每个漏洞都朝静默放过的方向：把源值截短总是让 carriesSameValue 更容易匹配上。
@@ -179,13 +165,8 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
 /// 一串固定位数的数字字段，字段之间可以有一个字面分隔符。
 ///
 /// 例：`DigitShape([2, 2, 2], ":")` 是 `hh:mm:ss`，`DigitShape([2, 2, 2])` 是
-/// `hhmmss`，`DigitShape([4, 2, 2], "-")` 是 `yyyy-mm-dd`。
-///
-/// 上一版把形状编成模板字符串（`"dd:dd:dd"`、`"dddddd"`、`"dd|dd"`），两个毛病：
-///   `"dddddd"`（一个六位字段）和 `"dd|dd|dd"`（三个两位字段）字面几乎一样、
-///   分段却完全不同，边界只由看不见的 `|` 决定；
-///   位数和字段个数都埋在字符串里，读的人只能靠注释。
-/// 现在两者都是数据，`|` 这种不可见记号不必存在。
+/// `hhmmss`，`DigitShape([4, 2, 2], "-")` 是 `yyyy-mm-dd`。字段宽度和分隔符都是
+/// 数据，不编进模板字符串。
 struct DigitShape: Equatable {
     let widths: [Int]
     let separator: Character?
@@ -195,9 +176,7 @@ struct DigitShape: Equatable {
         self.separator = separator
     }
 
-    /// 这个形状用尽时恰好多长。由形状自己推出来，不在调用点旁边重述——上一版
-    /// 把长度和形状配成元组写在一起（`(8, DigitShape([2, 2, 2], ":"))`），
-    /// 两者没有任何东西维持同步，改了形状不改数字就会错位。
+    /// 这个形状用尽时恰好多长。由形状自己推出来，不在调用点旁边重述成字面量。
     var length: Int {
         widths.reduce(0, +) + (separator == nil ? 0 : widths.count - 1)
     }
@@ -214,9 +193,7 @@ struct DigitShape: Equatable {
 
     /// 按用途分组的清单。**每张清单**只在这里出现一次——不是每个形状只属于一张：
     /// `hhmm` 同时在 timeOfDayShapes 和 offsetBodyShapes 里，因为 `18:42` 和
-    /// `+08:00` 的数字布局确实一样，只是含义不同。上一版把清单写在调用点，而
-    /// `normalizedOffset(atEndOf:)` 的 `for width in [5, 6]` 更进一步，把长度也
-    /// 重述成了字面量——那正是 `length` 这个属性要消掉的东西，却漏了这一处。
+    /// `+08:00` 的数字布局确实一样，只是含义不同。
     static let timeOfDayShapes: [DigitShape] = [.hhmmssColon, .hhmmss, .hhmmColon, .hhmm]
     static let dateShapes: [DigitShape] = [.ymdDash, .ymdPlain, .ymdColon]
     static let offsetBodyShapes: [DigitShape] = [.hhmm, .hhmmColon]
@@ -224,20 +201,8 @@ struct DigitShape: Equatable {
 
 /// 按形状从 `value` 里切出各字段的数值。整个 `value` 必须被形状用尽——末尾
 /// 多一个字符也不算匹配。分隔符不对、长度不符、出现非 ASCII 数字，一律 nil。
-/// 成功时返回的个数恒等于 `shape.widths.count`。
-///
-/// 抽出来是因为时刻、日期、偏移三处形状解析本来各写了一遍「switch count →
-/// 查分隔符位 → 攒 digits → Int(String(...))」，连「宽度前提在本函数内成立」
-/// 那句注释都重复了三遍。
-///
-/// 那句话现在仍在 `normalizedOffset(_:)` 里，但**理由已经不是原来那个**：那里
-/// 不再有按宽度分支的 switch，而是从 `DigitShape.offsetBodyShapes` 按长度挑
-/// 形状——挑的这一步在本函数内，所以前提照样就地成立。字段个数那一半则已经
-/// 作废：调用点不再各自 guard，因为本函数保证个数恒等于 `shape.widths.count`，
-/// 而调用点用的是命名常量，字段数在常量定义处一眼可见。
-///
-/// 这段话上一版是错的——它拿「那里真有一个 switch」当留住它的理由，而删掉那个
-/// switch 的正是同一个提交。注释写成"因为 X 所以 Y"时，X 必须跟着代码一起维护。
+/// 成功时返回的个数恒等于 `shape.widths.count`，所以调用点不必再查字段个数。
+/// 时刻、日期、偏移、Timestamp 的形状解析都走这里。
 func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
     var fields: [Int] = []
     var i = 0
@@ -260,11 +225,7 @@ func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
     return fields
 }
 
-/// `value` 非空且全由 ASCII 数字组成。
-///
-/// IIM 时间的前六位、ISO 小数秒都只需要这一句，不需要分段——上一版硬把它们
-/// 塞进模板（`"dddddd"`、`"d*"`），而两个调用点都只判 `!= nil`、把切出来的
-/// 字段扔掉，于是模板里那个"分几段"的语义根本没人消费。
+/// `value` 非空且全由 ASCII 数字组成。小数秒这类不分段的数字串用它判。
 ///
 /// 这里的 `isASCII` 是**真守卫**：本函数没有 `Int(String)` 那道后手，
 /// 去掉它全角数字就会被当成数字。
@@ -288,15 +249,12 @@ struct UTCOffset: Equatable {
     /// 从 `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00`、`…Z` 里解析出偏移；
     /// 解析不出就是 nil。
     ///
-    /// 三种形状都**锚定在末尾**、逐字符核对、再验范围；不是"取最后一个加减号、
-    /// 把后面的数字滤出来数够 4 位"。上一版是后者，于是：
-    ///   `2024-09-15T18`    → `-1518`   从日期里读出个时区
-    ///   `184207 -0800mm`   → `-0800`   尾巴是垃圾也收
-    ///   `+9999`            → `+9999`   越界不拦
-    ///   `abc0Z`、`20240915Z` → `+0000`  Z 分支只查前一位是不是数字
+    /// 每种形状都**锚定在末尾**、逐字符核对、再验范围，不是"取最后一个加减号、
+    /// 把后面的数字滤出来"。下面这些都必须读不出（单测「UTCOffset」一组）：
+    ///   `2024-09-15T18`（日期里的减号）、`184207 -0800mm`（垃圾尾巴）、
+    ///   `+9999`（越界）、`abc0Z`、`20240915Z`（Z 前面不是时刻）
     /// 这是**目标侧**的读取器：它一松，offsetSurvives 就会把"偏移其实已经丢了"
-    /// 误判成"还在"，方向上正是静默放过。源侧的 splitIIMTime 用的是同一个
-    /// 解析器，两侧不可能再一严一松——`±` 两种形状和 Z 分支分两轮才都锚住。
+    /// 误判成"还在"，方向上正是静默放过。源侧的 splitIIMTime 用的是同一个解析器。
     init?(parsing value: String) {
         guard let text = UTCOffset.normalizedOffset(atEndOf: value) else { return nil }
         self.text = text
@@ -304,14 +262,10 @@ struct UTCOffset: Equatable {
 
     /// 在 `value` 的末尾找一个偏移并归一化。
     ///
-    /// 三种形状共用**同一把尺子**：`Z` 和 `±` 的"前文"都必须是空（整个值就是
-    /// 一个偏移字段，如 `+08:00`）或一个完整时刻（isTimestamp）。
-    /// 这一条是第四轮才对称的——前三轮每次都只收紧一侧：
-    ///   `±` 侧曾只查"符号前一位是数字"，于是 Z 侧明确拒掉的东西它全收（实测）：
-    ///     `镜头型号RF50mm1+0800`、`ISO100+0800`、`abc1+0800`、
-    ///     `+08:00 (approx)5+0800`、`9999-99-99T18:42:07+08:00`、`20240915+0800`
-    ///   这是**目标侧**读取器，一松 offsetSurvives 就把"偏移其实已经丢了"
-    ///   读成"还在"——读出一个合法值比读不出更坏，因为连差异都不剩。
+    /// 所有形状共用**同一把尺子**：`Z` 和 `±` 的"前文"都必须是空（整个值就是
+    /// 一个偏移字段，如 `+08:00`）或一个完整时刻（isTimestamp）。所以
+    /// `镜头型号RF50mm1+0800`、`ISO100+0800`、`9999-99-99T18:42:07+08:00`、
+    /// `20240915+0800` 都读不出——读出一个合法值比读不出更坏，因为连差异都不剩。
     private static func normalizedOffset(atEndOf value: String) -> String? {
         let chars = Array(value)
         if chars.last == "Z" {
@@ -335,11 +289,10 @@ struct UTCOffset: Equatable {
     /// 日期是 `YYYY-MM-DD`、`YYYYMMDD` 或 `YYYY:MM:DD`（EXIF 自己的写法，见
     /// isDate），分隔是 `T` 或空格，时刻见 isTimeOfDay。
     ///
-    /// 只凑形状、不验数值、前导只拒数字的那一版**两个方向同时错**（实测）：
-    ///   松：`995999`（59 分 99 秒）、`99:99:99`、`拍摄于 18:42:07` 都算时刻
-    ///   严：`2024-09-15T18:42`（分钟精度）、`20240915T184207`（基本格式）、
-    ///       `2024-09-15T18:42:07,42`（逗号小数秒）全被误拒
-    /// 松的那一半是静默放过，所以现在照 ISO 8601 对"时刻"的定义写。
+    /// 照 ISO 8601 对"时刻"的定义写，两个方向都要对：
+    ///   `995999`（59 分 99 秒）、`99:99:99`、`拍摄于 18:42:07` 不是时刻；
+    ///   `2024-09-15T18:42`（分钟精度）、`20240915T184207`（基本格式）、
+    ///   `2024-09-15T18:42:07,42`（逗号小数秒）是时刻。
     ///
     /// 一个不可消除的歧义：`202409` 既像年月、也像 20:24:09，按形状分不开，
     /// 只能当时刻收下。前提是它必须是**整个值**——没有哪个元数据字段会把年月
@@ -357,9 +310,7 @@ struct UTCOffset: Equatable {
             let width = shape.length
             guard isTimeOfDay(Array(head[(head.count - width)...]), shape) else { continue }
             // 整个值就是时刻。无分隔的四位数字与年份分不开（`2024` 会被读成
-            // 20:24），不收。直接拿形状本身比，不按它的内部字段描述它——
-            // 上一版写的是 `shape.separator == nil && shape.widths == [2, 2]`，
-            // 那是在重述 `hhmm` 的定义，等于第三遍犯同一个毛病（见 10-05、10-06）。
+            // 20:24），不收。直接拿形状本身比，不按它的内部字段重述它。
             if head.count == width { return shape != .hhmm }
             let before = Array(head[..<(head.count - width)])
             guard let separator = before.last, separator == "T" || separator == " " else { continue }
@@ -381,15 +332,10 @@ struct UTCOffset: Equatable {
     ///
     /// 冒号那一种是 **EXIF 自己的日期格式**：`{Exif}/DateTimeOriginal` 写的
     /// 就是 `2024:09:15 18:42:07`，而 README 把它点名为等价承载键之一。
-    /// （别的键也这么写，但 README 把 `tiff:DateTime` 之类排除在搜索范围外，
-    /// 所以这里只该引那一个真正在范围内的。）上一版只列了 ISO 8601
-    /// 的两种，于是 `2024:09:15 18:42:07+08:00` 读不出偏移——方向上只多报，
-    /// 但它让本项目读得最多的那个格式成了读不出来的那个。
-    /// 漏掉的原因是我按 ISO 8601 的全集列形状，而 EXIF 的日期不属于 ISO 8601。
+    /// EXIF 的日期不属于 ISO 8601，按 ISO 8601 列形状会漏掉它。
     private static func isDate(_ value: [Character]) -> Bool {
         for shape in DigitShape.dateShapes {
-            // 不再 guard `parts.count == 3`：numericFields 保证个数恒等于
-            // `shape.widths.count`，而这三个常量都是三字段的，所以那一句恒真。
+            // dateShapes 都是三字段的，numericFields 保证个数恰好是三。
             guard let parts = numericFields(value, shape) else { continue }
             if (1...12).contains(parts[1]), (1...31).contains(parts[2]) { return true }
         }
@@ -409,9 +355,7 @@ struct UTCOffset: Equatable {
         //   - 要求分钟为 0 会拒掉真实存在的 +05:30、+05:45、+09:30、+13:45；
         //   - 时和分各自设上限（hours <= 14 && minutes <= 59）会放过 +14:30、
         //     +14:59、-12:30、-12:59 这些不存在的偏移。
-        // 前两版分别踩了"不分符号"和"分符号但按分量"，都是后一种失效：
-        // 目标侧读取器一宽松，offsetSurvives 就把真丢失误判成"还在"。
-        // 同样不 guard `parts.count == 2`：上面两个常量都是两字段的。
+        // offsetBodyShapes 都是两字段的，numericFields 保证个数恰好是二。
         guard let parts = numericFields(body, shape), parts[1] <= 59 else { return nil }
         let total = (sign == "-" ? -1 : 1) * (parts[0] * 60 + parts[1])
         guard total >= -12 * 60, total <= 14 * 60 else { return nil }
@@ -523,7 +467,7 @@ func equivalentCarries(key: String, value: String, in after: [String: String]) -
 
 /// 等价字段是否确实承载了源里那个值。
 ///
-/// 这四组都是日期/时间，只是格式不同：IIM 写 `20240915` 和 `184207`，
+/// 等价表里的值都是日期/时间，只是格式不同：IIM 写 `20240915` 和 `184207`，
 /// EXIF 写 `2024:09:15 18:42:07`，XMP 写 `2024-09-15T18:42:07.42`。
 /// 按位置比：等价值拆成 Timestamp，源值是 8 位的 IIM 日期就和日期位比，
 /// 是 6 位的 IIM 时间就和时刻位（时、分、秒）比。两边都只认 ASCII 数字；
@@ -600,10 +544,8 @@ func xmpTags(_ md: CGImageMetadata) -> [String: String] {
 ///
 /// `repairing: false` 只关掉 UserComment 那一处修补，XMP 层照旧——给
 /// Tests/probe 的 `--no-repair` 用，那一轮的前提恰恰是"ImageIO 自己读不出来"。
-/// 做成参数而不是让调用方自己拼一份：自己拼就会再次漏掉某一层，而漏掉是静默的。
-/// 抽成函数是因为 Tests/probe 原先自己拼了一份、只摊平了属性字典，于是它对
-/// 每个 XMP 键都答「无」，而它的文件头偏偏写着"要和校验本身理解一致"。
-/// 任何拿 probe 写的 XMP 断言都会恒真，没人会发现。
+/// 做成参数而不是让调用方自己拼一份：自己拼就可能漏掉某一层，而漏掉是静默的
+/// ——漏了 XMP 层的探针对每个 XMP 键都答「无」。
 func metadataKeySpace(of image: CGImageSource, url: URL,
                       repairing: Bool = true) -> [String: String] {
     var flat: [String: String] = [:]

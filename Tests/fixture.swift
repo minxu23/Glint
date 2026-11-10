@@ -1,8 +1,7 @@
 // 生成一张带完整元数据的测试 JPEG：拍摄时间、GPS 位置、备注、相机参数、
 // IPTC 与 XMP 字段一应俱全，供 selftest.sh 校验转换后是否原样保留。
 //
-// 用法串是下面的 `usage` 常量，不在注释里另写一份：改了旗标只改一处就够，
-// 否则必然漂移（实测漂移过——加了 --no-exif-offset 之后 stderr 那份还是旧的）。
+// 用法串是下面的 `usage` 常量，不在注释里另写一份：改了旗标只改一处就够。
 // 各旗标的含义：
 //   --lossy  额外写入一个转成 HEIF 必定丢失的字段（IPTC EditStatus，IIM 2:07
 //            在 HEIF 里没有对应容器，也没有等价的 XMP 映射）。用来测试
@@ -102,9 +101,9 @@ var props: [CFString: Any] = [
         // IIM 的日期与时间：HEIF 没有 IIM 容器，这两条转换后必然消失，
         // 由 EXIF 的 DateTimeOriginal + OffsetTimeOriginal 承载
         // （加 --no-exif-offset 时偏移只剩 XMP 那条腿，见文件头）。
-        // --verify 的等价判定（equivalentCarries）此前只有单元测试跑在手搭的
-        // 字典上，目标侧的键拼法从没跟真实 ImageIO 输出对过——这两行把它接上。
-        // 时间带着 +0800，正好也覆盖"偏移必须在目标里找得到"那条。
+        // 这两行让 --verify 的等价判定（equivalentCarries）跑在真实 ImageIO 输出上，
+        // 而不只是单元测试里手搭的字典。时间带着 +0800，也覆盖"偏移必须在目标里
+        // 找得到"那条。
         kCGImagePropertyIPTCDateCreated: "20240915",
         kCGImagePropertyIPTCTimeCreated: "184207+0800",
     ],

@@ -18,9 +18,8 @@ import UniformTypeIdentifiers
 // MARK: - 转换选项
 
 struct ConversionOptions: Equatable {
-    /// 命令行与界面共用的默认值。界面以前自己另写了一份，`recursive` 在两端
-    /// 悄悄分叉成 false / true，同一句「指定文件夹下」在两边含义不同。
-    /// 一律从这里取，想分叉就必须显式写出来并说明理由。
+    /// 命令行与界面共用的默认值。一律从这里取，想分叉就必须显式写出来并说明理由
+    /// （单测「命令行与界面的默认值」一组守着）。
     static let `default` = ConversionOptions()
 
     var quality: Double = 0.8
@@ -120,9 +119,7 @@ func copyFileAttributes(from src: URL, to dst: URL) {
 
 // MARK: - 转换
 
-/// 一张图转换成功后的全部结果。原先是 ConvertResult.converted 的六个关联值，
-/// 在命令行和界面两处各自逐个解包再搬进别的结构——六项总是一起出现，
-/// 本来就是一个类型。
+/// 一张图转换成功后的全部结果。
 struct ConversionReport {
     let dest: URL
     let inBytes: Int
@@ -251,7 +248,9 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
 ///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
 ///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
 /// 2. CopyImageSource 把第一遍的结果写到 `url`，同时把源的 XMP 合并进去。
-///    这一步只改元数据，不重新编码像素。
+///    这一步只改元数据，不重新编码像素。第二遍只传 XMP，不传 EXIF 等属性字典：
+///    CopyImageSource 会把传进来的 EXIF 重新序列化，非 ASCII 的 UserComment
+///    会被截断。
 func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
                 xmp: CGImageMetadata?, to url: URL) -> Bool {
     let heic = UTType.heic.identifier as CFString

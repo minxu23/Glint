@@ -217,6 +217,10 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   所以 `--delete-original` 不会删这样的源文件。
 - **深度图、视差图、HDR 增益图等辅助图像不会保留**。`AddImageFromSource` 不搬它们。
   `--verify` 会报出来（`{FileContents}/…/AuxiliaryData…` 几条，外加 EOI 之后的数据）。
+- **APP13 里 IPTC 以外的 Photoshop 资源、EXIF 的 IFD1 缩略图不会保留，`--verify`
+  也不报**。APP13 段里只有 8BIM `0x0404`（IPTC-IIM）会被 ImageIO 读出并搬走，
+  同一段里的其它 8BIM 资源随段一起消失；IFD1 里的 EXIF 缩略图同样不会写进产物。
+  两者都不在属性视图里，而 APP13 段本身算"认识的段"，所以校验看不见。
 - **Windows 资源管理器写的 EXIF 备注与评级不会保留，`--verify` 也发现不了**：
   IFD0 里的 `XPTitle`、`XPComment`、`XPAuthor`、`XPKeywords`（`0x9C9B`–`0x9C9E`）
   和 `Rating`（`0x4746`）。ImageIO 不读这几个标签，它们既不在属性视图里，也不会
@@ -237,7 +241,7 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   标识开头（`ASCII\0\0\0` / `UNICODE\0` / `JIS…` / 全零），但不少安卓机型直接写
   裸 UTF-8。ImageIO 认不出这种写法，会当作字段不存在，备注就在转码时被静默丢掉。
   本工具因此额外自己扫一遍 JPEG 的 EXIF 段（见
-  [`rawExifUserComment`](Sources/Core/Converter.swift)），把 ImageIO 漏掉的内容
+  [`rawExifUserComment`](Sources/Core/ExifReader.swift)），把 ImageIO 漏掉的内容
   补回去。注意有些机型往这个字段塞的是整段相机调试信息而非人写的备注，工具会
   一并原样保留——判断哪些算"噪音"不是转换工具该替你做的决定。
 - 需要 macOS 与 Xcode 命令行工具（`swiftc`）来构建。

@@ -50,13 +50,11 @@ uninstall:
 	rm -rf /Applications/$(APP)
 
 # 测试工具一律按同一条规则构建：目标依赖 $(CORE)，各自的额外源码写在
-# TOOL_SRC 里。以前四条配方逐字重复、工具清单还在 test 和 clean 各抄一遍，
-# 加一个工具要改三处。
+# TOOL_SRC 里。加一个工具只改这一处。
 #
 # TOOL_SRC 既是依赖又是源码，所以只写一遍：.SECONDEXPANSION 让依赖列表里的
 # $$(TOOL_SRC) 推迟到目标自身的上下文中展开，配方再用 $^ 把同一份清单喂给
-# 编译器。以前这份清单写两遍（一遍当依赖、一遍当参数），只改一处就会出现
-# 「改了源码却不重建」或者「重建了却没编进去」。
+# 编译器。写两遍的话只改一处就会出现「改了源码却不重建」或者「重建了却没编进去」。
 .SECONDEXPANSION:
 
 TEST_TOOLS := Tests/probe Tests/uisnapshot Tests/unit-test \
@@ -84,8 +82,7 @@ snapshot: Tests/uisnapshot
 	./Tests/uisnapshot $(or $(OUT),/tmp/jpeg2heif-ui.png) $(ARGS)
 
 # 「跑一遍自检需要哪些产物」只定义一处：test 的前置和 selftest.sh 的新鲜度
-# 守卫都从这里取。上一版把它写了两遍（print-artifacts 的 echo 与 test 的前置），
-# 注释却说"清单只在这里定义一份"——两行各自被改成不一致就没人发现了。
+# 守卫都从这里取。
 ARTIFACTS := $(BIN) Tests/fixture $(TEST_TOOLS)
 
 # selftest.sh 用它来问「该检查哪些产物」，免得在脚本里抄一份。

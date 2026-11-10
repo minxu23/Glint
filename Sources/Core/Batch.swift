@@ -1,7 +1,6 @@
 // 批量转换的编排：扫描输入、决定每个文件写到哪、并发调度。
 //
-// 从 Converter.swift 拆出来——这些都是"安排工作"，与单张图怎么转、
-// 元数据怎么搬无关。
+// 这些都是"安排工作"，与单张图怎么转、元数据怎么搬无关。
 
 import Foundation
 
@@ -153,10 +152,9 @@ enum OutputPlan {
 
 /// 开工前把每个任务的目标路径一次性定下来，并消解重名。
 ///
-/// 必须串行地、在任何转换开始之前做完。原先的做法是把「输出已存在」的判断留在
-/// 并发执行的 convert() 里，于是 `jpeg2heif A B -o OUT` 且 A/B 各有一个 a.jpg 时，
-/// 两个任务同时看到 OUT/a.heic 不存在，双双放行、双双写入，后写的静默覆盖先写的，
-/// 而汇总还报「完成 2 个」——文件丢了，用户还被告知一切正常。
+/// 必须串行地、在任何转换开始之前做完。把「输出已存在」的判断留在并发执行的
+/// convert() 里的话，`jpeg2heif A B -o OUT` 且 A/B 各有一个 a.jpg 时，两个任务
+/// 会同时看到 OUT/a.heic 不存在，双双写入，后写的静默覆盖先写的。
 ///
 /// 消解办法：把撞在一起的那一组**整组**挪进各自源目录名下（OUT/A/a.heic、
 /// OUT/B/a.heic），而不是只给后来者改名——只改后来者会得到 OUT/a.heic 与
@@ -166,9 +164,9 @@ enum OutputPlan {
 /// `x/照片` 与 `y/照片` 的最后一段相同，只用它区分不了，得退到 `x/照片`、`y/照片`。
 ///
 /// 入参允许重复——一个根可能在同一个冲突组里贡献多个文件（`A/a.jpg` 与
-/// `A/a.jpeg` 都映射到 `a.heic`），所以内部先去重。以前没去重，
+/// `A/a.jpeg` 都映射到 `a.heic`），所以内部先去重：不去重的话
 /// `Set(names).count == roots.count` 在有重复时**永不成立**，逐级上溯每一层都
-/// 失败，直接落到兜底，整个修复形同虚设。
+/// 失败，直接落到兜底。
 ///
 /// 返回值按**标准化路径字符串**索引，不拿 URL 当键：同一个目录可以有多种 URL
 /// 写法（尾斜杠、符号链接、`.` 段），用 URL 做键会把它们当成不同的根。
@@ -236,7 +234,7 @@ func assignDestinations(_ jobs: [Job], plan: OutputPlan,
 
             // 还占着就加数字后缀，直到找到空位。基名固定，避免变成 a-2-3。
             // 除了本批已占用的，也要让开磁盘上已有的文件——否则改名让出来的位置
-            // 可能正好压在上一轮的产物上。但 --overwrite 时不让：用户明确要覆盖。
+            // 可能正好压在先前某次运行的产物上。但 --overwrite 时不让：用户明确要覆盖。
             let folder = candidate.deletingLastPathComponent()
             let base = candidate.deletingPathExtension().lastPathComponent
             func occupied(_ url: URL) -> Bool {
@@ -309,8 +307,7 @@ func runConversions(_ jobs: [Job], opts: ConversionOptions, plan: OutputPlan,
 
 // MARK: - 结果统计
 
-/// 节省比例。命令行和界面原先各写了两份同样的式子（共四处），
-/// "省了几成"该怎么算只应有一个定义。
+/// 节省比例。命令行和界面共用这一个定义。
 /// 返回 nil 表示无从计算（缺少体积数据）；负数表示产物反而更大。
 func percentSaved(inBytes: Int, outBytes: Int) -> Int? {
     guard inBytes > 0, outBytes > 0 else { return nil }
