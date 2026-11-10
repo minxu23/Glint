@@ -130,7 +130,7 @@ expectEquivalent(timeKey, "184207+0800",
 // 而 2024 几乎出现在任何日期里，于是「9 月 15 日丢了」会被静默放过。
 expectEquivalent(dateKey, "20240915", noOffset, true, "IIM 日期被 EXIF 时间戳承载")
 expectEquivalent(dateKey, "2024-0915", [shotAt: "2024:01:01 00:00:00"], false,
-                 "不合规范的日期不按长相去砍——这正是上一版的静默放过")
+                 "不合规范的日期不按长相去砍，整串拿去比")
 expectEquivalent("{Exif}/DateTimeOriginal", "2024:09:15 18:42:07", noOffset, false,
                  "不在等价表里的键一律不算承载")
 
@@ -252,7 +252,7 @@ expectEquivalent(timeKey, "184207Z",
                  [shotAt: "2024:09:15 18:42:07", offsetAt: "未知9Z"],
                  false, "结尾是「数字+Z」也不算 UTC——Z 必须终结一个时刻")
 
-print("numericFields：三处形状解析共用的那把尺子")
+print("numericFields：各处形状解析共用的那把尺子")
 // 时刻、日期、偏移的形状解析共用它。它是单点故障，所以直接钉住，
 // 而不只是透过上面那些间接验。
 // 用生产代码里那套命名常量，不另起一套：这样用例同时也钉住了常量本身——
@@ -290,7 +290,7 @@ expectFields("+999-09-15", ymdDash, nil, "字段里不能有前导符号——In
 // 这一条钉的是"全角数字不算数字"：numericFields 用 isAllDigits 判数字。
 expectFields("1８4207", hhmmss, nil, "全角数字不算数字")
 
-print("isAllDigits：IIM 前六位和小数秒只需要这一句")
+print("isAllDigits：数字字段与小数秒的 ASCII 数字判定")
 func expectAllDigits(_ value: String, _ want: Bool, _ why: String) {
     checkRule(value, isAllDigits(Array(value)), want, why)
 }
