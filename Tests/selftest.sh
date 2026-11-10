@@ -18,6 +18,21 @@ rm -rf "$WORK"; mkdir -p "$WORK/相册/子目录"
 for tool in fixture probe; do
     [ -x "Tests/$tool" ] || { echo "先运行 make test（缺 Tests/$tool）"; exit 1; }
 done
+# 产物不仅要存在，还得是当前源码建出来的。本脚本原先只查存在，于是绕过 make
+# 直接 `bash Tests/selftest.sh` 时，可能拿着几个来自**不同源码版本**的二进制
+# 一起跑，得出任何单一版本都不会给出的结论——实测踩过一次，而且事后复现不出来，
+# 这正是它危险的地方。
+#
+# 问 make 而不是自己比 mtime：每个产物依赖哪些源文件只有 Makefile 知道
+# （Tests/fixture 只依赖自己那一个文件，Tests/probe 还依赖整个 Sources/Core），
+# 在这里重写一份依赖表等于复制 Makefile，必然漂移。`make -q` 是只读的问询模式，
+# 不执行任何规则，所以从 make test 里反过来调它不会递归。
+for art in "$BIN" Tests/fixture Tests/probe Tests/unit-test \
+           Tests/guimodel-test Tests/mangle-tool Tests/uisnapshot; do
+    [ -e "$art" ] || continue
+    make -q "$art" >/dev/null 2>&1 \
+        || { echo "$art 不是当前源码建出来的——先运行 make test，别直接跑本脚本"; exit 1; }
+done
 ./Tests/fixture "$WORK/照片.jpg" >/dev/null || exit 1
 xattr -w com.apple.metadata:kMDItemFinderComment "访达备注" "$WORK/照片.jpg"
 
@@ -161,9 +176,9 @@ NOTE="鲁汶市政厅是比利时最美的市政厅"
 cp "$WORK/照片.jpg" "$WORK/无前缀.jpg"
 if Tests/mangle-tool "$WORK/无前缀.jpg" "$NOTE" >/dev/null 2>&1; then
     # 先确认 ImageIO 自己确实读不出来，否则这个用例就没在测该测的东西。
-    # 必须用 --raw：默认模式走的是 --verify 那条路，里面已经含了本轮要测的
+    # 必须加 --no-repair：默认模式走的是 --verify 那条路，里面已经含了本轮要测的
     # UserComment 修补，拿它问等于先把答案填进去再考。
-    seen=$(./Tests/probe --raw "$WORK/无前缀.jpg" '{Exif}/UserComment')
+    seen=$(./Tests/probe --no-repair "$WORK/无前缀.jpg" '{Exif}/UserComment')
     [ "$seen" = "<无>" ] || [ "$seen" = "" ] \
         && pass "确认 ImageIO 读不出这种写法" \
         || fail "前提不成立：ImageIO 居然读出了 [$seen]"
@@ -189,34 +204,6 @@ out=$("$BIN" --delete-original "$WORK/有损.jpg" 2>&1)
 [ -f "$WORK/有损.heic" ] && pass "同时仍产出 .heic 供人工比对" || fail "没产出 .heic"
 echo "$out" | grep -q "保留了源文件" && pass "明确告知保留了源文件" || fail "没说明为何没删"
 
-# IIM 时间后缀里的偏移，在目标里的唯一承载是 ImageIO 合成的
-# XMP/photoshop:DateCreated——前提是源里没有 EXIF OffsetTime*。默认那张夹具图
-# 自己带 OffsetTimeOriginal，于是 offsetSurvives 永远在第一条就命中，等价字段
-# （XMP 那条腿）那一半怎么写都不影响结果：实测把它整条删掉，默认图照样"校验通过"。
-# 这一轮专门造一张只靠 XMP 承载的图，把那条腿接上。
-./Tests/fixture --no-exif-offset "$WORK/仅XMP偏移.jpg" >/dev/null
-# 不叫 out：下面那条「未加 --verify 也执行了校验」读的是上面 --delete-original
-# 留下的 $out，借用同名变量会把它冲掉（实测会让那条断言变成假阴性）。
-xmponly=$("$BIN" --verify "$WORK/仅XMP偏移.jpg" 2>&1)
-echo "$xmponly" | grep -q "元数据校验通过" \
-    && pass "偏移只靠 XMP 承载时校验也通过" \
-    || { fail "偏移只靠 XMP 承载却报了差异"; echo "$xmponly" | sed 's/^/     /'; }
-# 非空断言：这一轮只有在源和目标都确实没有 OffsetTime* 时才说明问题。
-# 哪天 ImageIO 开始自己补一个 OffsetTime，上面那条就退化成空跑，必须在这里喊出来。
-for f in "$WORK/仅XMP偏移.jpg" "$WORK/仅XMP偏移.heic"; do
-    for k in OffsetTime OffsetTimeOriginal OffsetTimeDigitized; do
-        v=$(./Tests/probe "$f" "{Exif}/$k" 2>/dev/null | tail -1)
-        [ "$v" = "<无>" ] || fail "$(basename "$f") 里有 {Exif}/$k=[$v]，上一条断言失去意义"
-    done
-done
-pass "该样本里确实没有任何 OffsetTime*（上一条断言非空）"
-# 正面指认承载者：偏移必须真的长在目标的 XMP 时间戳里，而不是"碰巧没人追究"。
-v=$(./Tests/probe "$WORK/仅XMP偏移.heic" "XMP/photoshop:DateCreated")
-case "$v" in
-    *+08:00) pass "目标的 XMP/photoshop:DateCreated 带着 +08:00（[$v]）" ;;
-    *) fail "目标的 XMP/photoshop:DateCreated 没带偏移（[$v]）——承载者另有其人" ;;
-esac
-
 # 那句说明是状态，不是元数据差异：它一度被塞进 issues 数组，于是差异数虚增一条，
 # 界面的橙色徽章和弹窗标题也跟着多算。加不加 --delete-original，差异条数必须一样。
 ./Tests/fixture --lossy "$WORK/计数.jpg" >/dev/null
@@ -236,6 +223,37 @@ echo "$out" | grep -q "差异" && pass "未加 --verify 也执行了校验" || f
 cp "$WORK/照片.jpg" "$WORK/预演不删.jpg"
 "$BIN" -n --delete-original "$WORK/预演不删.jpg" >/dev/null 2>&1
 [ -f "$WORK/预演不删.jpg" ] && pass "预演不删源文件" || fail "预演删了源文件"
+
+echo "7b. 偏移只靠 XMP 承载"
+# IIM 时间后缀里的偏移，在目标里的唯一承载是 ImageIO 合成的
+# XMP/photoshop:DateCreated——前提是源里没有 EXIF OffsetTime*。默认那张夹具图
+# 自己带 OffsetTimeOriginal，于是 offsetSurvives 永远在第一条就命中，等价字段
+# （XMP 那条腿）那一半怎么写都不影响结果：实测把它整条删掉，默认图照样"校验通过"。
+# 这一轮专门造一张只靠 XMP 承载的图，把那条腿接上。
+./Tests/fixture --no-exif-offset "$WORK/仅XMP偏移.jpg" >/dev/null
+out=$("$BIN" --verify "$WORK/仅XMP偏移.jpg" 2>&1)
+echo "$out" | grep -q "元数据校验通过" \
+    && pass "偏移只靠 XMP 承载时校验也通过" \
+    || { fail "偏移只靠 XMP 承载却报了差异"; echo "$out" | sed 's/^/     /'; }
+# 非空断言：这一轮只有在源和目标都确实没有任何 OffsetTime* 时才说明问题。
+# 哪天 ImageIO 开始自己补一个，上面那条就退化成空跑，必须在这里喊出来。
+# 探的键必须是 offsetSurvives 真会去找的那一整套（utcOffsetKeys），EXIF 和
+# XMP 两侧都要——只守一半的话，另一半照样能让整轮静默退化。
+for f in "$WORK/仅XMP偏移.jpg" "$WORK/仅XMP偏移.heic"; do
+    for k in OffsetTime OffsetTimeOriginal OffsetTimeDigitized; do
+        for key in "{Exif}/$k" "XMP/exif:$k"; do
+            v=$(./Tests/probe "$f" "$key" 2>/dev/null | tail -1)
+            [ "$v" = "<无>" ] || fail "$(basename "$f") 里有 $key=[$v]，上一条断言失去意义"
+        done
+    done
+done
+pass "该样本里确实没有任何 OffsetTime*（上一条断言非空）"
+# 正面指认承载者：偏移必须真的长在目标的 XMP 时间戳里，而不是"碰巧没人追究"。
+v=$(./Tests/probe "$WORK/仅XMP偏移.heic" "XMP/photoshop:DateCreated")
+case "$v" in
+    *+08:00) pass "目标的 XMP/photoshop:DateCreated 带着 +08:00（[$v]）" ;;
+    *) fail "目标的 XMP/photoshop:DateCreated 没带偏移（[$v]）——承载者另有其人" ;;
+esac
 
 echo "8. 界面模型：指定输出文件夹与取消"
 # 这两条走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

@@ -1,7 +1,9 @@
 // 生成一张带完整元数据的测试 JPEG：拍摄时间、GPS 位置、备注、相机参数、
 // IPTC 与 XMP 字段一应俱全，供 selftest.sh 校验转换后是否原样保留。
 //
-// 用法: fixture [--lossy] [--no-exif-offset] <输出.jpg>
+// 用法串是下面的 `usage` 常量，不在注释里另写一份：改了旗标只改一处就够，
+// 否则必然漂移（实测漂移过——加了 --no-exif-offset 之后 stderr 那份还是旧的）。
+// 各旗标的含义：
 //   --lossy  额外写入一个转成 HEIF 必定丢失的字段（IPTC EditStatus，IIM 2:07
 //            在 HEIF 里没有对应容器，也没有等价的 XMP 映射）。用来测试
 //            --delete-original 在校验不通过时是否真的保留源文件——没有这样
@@ -23,8 +25,9 @@ var args = Array(CommandLine.arguments.dropFirst())
 let lossy = args.contains("--lossy")
 let noExifOffset = args.contains("--no-exif-offset")
 args.removeAll { $0 == "--lossy" || $0 == "--no-exif-offset" }
+let usage = "用法: fixture [--lossy] [--no-exif-offset] <输出.jpg>"
 guard let path = args.first else {
-    FileHandle.standardError.write(Data("用法: fixture [--lossy] <输出.jpg>\n".utf8))
+    FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
 }
 let w = 1200, h = 900

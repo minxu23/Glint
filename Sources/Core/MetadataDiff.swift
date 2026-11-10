@@ -191,6 +191,16 @@ struct UTCOffset: Equatable {
     /// 规范写法，形如 `+0800`。
     let text: String
 
+    /// 一个偏移后缀可以由哪些字符起头：`+`/`-`（`±HHMM`、`±HH:MM`）或 `Z`（UTC）。
+    ///
+    /// 供 splitIIMTime 在 IIM 时间的第 7 个字符上做粗筛用。放在本类型里是为了
+    /// 和 init?(parsing:) 认的那三种形状**同处一处便于对照**——仅此而已：
+    /// 下面的解析路径并不经过本方法（Z 分支查的是末尾，± 分支查的是 token[0]），
+    /// 所以真要新增一种形状，这里和那里都得手改。它不是单一事实来源。
+    static func canBegin(with character: Character) -> Bool {
+        character == "+" || character == "-" || character == "Z"
+    }
+
     /// 从 `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00`、`…Z` 里解析出偏移；
     /// 解析不出就是 nil。
     ///
@@ -199,18 +209,10 @@ struct UTCOffset: Equatable {
     ///   `2024-09-15T18`    → `-1518`   从日期里读出个时区
     ///   `184207 -0800mm`   → `-0800`   尾巴是垃圾也收
     ///   `+9999`            → `+9999`   越界不拦
-    ///   任何以 Z 结尾的文本 → `+0000`   Z 分支完全不看形状
+    ///   `abc0Z`、`20240915Z` → `+0000`  Z 分支只查前一位是不是数字
     /// 这是**目标侧**的读取器：它一松，offsetSurvives 就会把"偏移其实已经丢了"
     /// 误判成"还在"，方向上正是静默放过。源侧的 splitIIMTime 用的是同一个
-    /// 解析器，两侧不可能再一严一松——上一轮只改严了源侧，漏了这里。
-    /// 一个偏移后缀可以由哪些字符起头：`+`/`-`（`±HHMM`、`±HH:MM`）或 `Z`（UTC）。
-    /// 这套字母表就是 init?(parsing:) 认的那三种形状的起头，属于本类型；
-    /// splitIIMTime 要在 IIM 时间的第 7 个字符上查它，在外面重述会让两边
-    /// 各走各路——哪天这里多认一种形状，外面那份就悄悄落后。
-    static func canBegin(with character: Character) -> Bool {
-        character == "+" || character == "-" || character == "Z"
-    }
-
+    /// 解析器，两侧不可能再一严一松——`±` 两种形状和 Z 分支分两轮才都锚住。
     init?(parsing value: String) {
         guard let text = UTCOffset.normalizedOffset(atEndOf: value) else { return nil }
         self.text = text
@@ -220,9 +222,14 @@ struct UTCOffset: Equatable {
     /// 候选 token 交给 normalizedOffset(token:precededBy:) 逐字符核对。
     private static func normalizedOffset(atEndOf value: String) -> String? {
         let chars = Array(value)
-        // `…Z` 就是 UTC。Z 前面必须紧跟数字，否则「随便什么Z」也会被当成 UTC。
+        // `…Z` 就是 UTC——但 Z 必须真的终结一个时刻，不能只查"前一位是数字"。
+        // 只查前一位时，目标侧会把垃圾当 UTC 承载收下（实测）：
+        //   `abc0Z`、`0Z`、`镜头型号RF50mm1Z`、`+08:00 (approx)5Z` 一律读成 +0000
+        //   `184207+0800Z` 更糟：splitIIMTime 三道守卫全过，中间的 `+0800` 被丢掉，
+        //   偏移还被**改读**成 +0000——丢还有机会被报出来，改读成一个合法值
+        //   连差异都不剩。这是 Z 门上的同一个失效族，`±` 两种形状上一轮已堵。
         if chars.last == "Z" {
-            return chars.count >= 2 && chars[chars.count - 2].isNumber ? "+0000" : nil
+            return terminatesTime(Array(chars.dropLast())) ? "+0000" : nil
         }
         // `±HHMM`（宽 5）或 `±HH:MM`（宽 6）。
         for width in [5, 6] where chars.count >= width {
@@ -231,6 +238,30 @@ struct UTCOffset: Equatable {
             if let text = normalizedOffset(token: token, precededBy: previous) { return text }
         }
         return nil
+    }
+
+    /// `head` 是否以一个完整的时刻收尾——即它后面紧跟的那个 `Z` 是时区标记，
+    /// 而不是碰巧出现在某段文本末尾的字母 Z。
+    ///
+    /// 和 `±` 两种形状同样锚定在末尾：允许可选的小数秒，再要求紧前面是
+    /// `HHMMSS`（整个值就是 IIM 的 TimeCreated，如 `184207Z`）或
+    /// `HH:MM:SS`（如 `2024-09-15T18:42:07Z`；它前面那位不能是数字，
+    /// 否则 `1234518:42:07Z` 这种拼接也会算数）。
+    private static func terminatesTime(_ value: [Character]) -> Bool {
+        var head = value
+        // 可选的小数秒，如 `…18:42:07.42Z`——ImageIO 合成的 XMP 时间戳就是这个形状。
+        if let dot = head.lastIndex(of: "."), dot < head.count - 1,
+           head[(dot + 1)...].allSatisfy(\.isNumber) {
+            head = Array(head[..<dot])
+        }
+        // `HHMMSS`，且整个值就是它：IIM 时间字段之外没有别的东西长这样。
+        if head.count == 6, head.allSatisfy(\.isNumber) { return true }
+        // `HH:MM:SS`
+        guard head.count >= 8 else { return false }
+        let t = Array(head[(head.count - 8)...])
+        guard t[2] == ":", t[5] == ":",
+              [0, 1, 3, 4, 6, 7].allSatisfy({ t[$0].isNumber }) else { return false }
+        return head.count == 8 || !head[head.count - 9].isNumber
     }
 
     /// 核对一个候选 token（`±HHMM` 或 `±HH:MM`）并归一化成 `±HHMM`。
@@ -389,12 +420,17 @@ func xmpTags(_ md: CGImageMetadata) -> [String: String] {
 ///
 /// 两层缺一不可：属性字典（含 UserComment 的修补）和 XMP 包。只摊平前者会让
 /// 所有 `XMP/...` 键静默缺席——不是"查不到"，是"无条件查不到"。
+///
+/// `repairing: false` 只关掉 UserComment 那一处修补，XMP 层照旧——给
+/// Tests/probe 的 `--no-repair` 用，那一轮的前提恰恰是"ImageIO 自己读不出来"。
+/// 做成参数而不是让调用方自己拼一份：自己拼就会再次漏掉某一层，而漏掉是静默的。
 /// 抽成函数是因为 Tests/probe 原先自己拼了一份、只摊平了属性字典，于是它对
 /// 每个 XMP 键都答「无」，而它的文件头偏偏写着"要和校验本身理解一致"。
 /// 任何拿 probe 写的 XMP 断言都会恒真，没人会发现。
-func metadataKeySpace(of image: CGImageSource, url: URL) -> [String: String] {
+func metadataKeySpace(of image: CGImageSource, url: URL,
+                      repairing: Bool = true) -> [String: String] {
     var flat: [String: String] = [:]
-    flatten(repairedProperties(image, url: url), into: &flat)
+    flatten(repairing ? repairedProperties(image, url: url) : imageProperties(image), into: &flat)
     if let m = CGImageSourceCopyMetadataAtIndex(image, 0, nil) {
         flat.merge(xmpTags(m)) { a, _ in a }
     }
