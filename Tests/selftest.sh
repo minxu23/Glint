@@ -22,7 +22,7 @@ ROUNDS=0
 # 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
-EXPECTED_ASSERTIONS=62
+EXPECTED_ASSERTIONS=63
 EXPECTED_UNIT=220
 EXPECTED_GUI=37
 
@@ -396,6 +396,23 @@ done
 [ "$unsupported" -eq 0 ] \
     && pass "每条意见原文都在它 Review: 指名的那份报告里逐字存在" \
     || fail "$unsupported 条引文在所指报告里找不到（引文必须逐字，不能转述或删节）"
+
+# Fixed by: 的 SHA 必须从 HEAD 可达。只存在于 reflog 的悬空提交会被 gc 回收，
+# 于是这条记录无声腐坏——写完上面那个守卫几分钟后我就亲手造了一个：先提交、
+# 把 SHA 回填进文件、再 `--amend`，而 amend 换掉了 SHA。本守卫的证人就是它。
+rotten=0
+for issue in "$ledger"/issues/*.md; do
+    [ -e "$issue" ] || break
+    sha=$(sed -n 's/^Fixed by: //p' "$issue" | head -1)
+    case "$sha" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+            git merge-base --is-ancestor "$sha" HEAD 2>/dev/null \
+                || rotten=$((rotten + 1)) ;;
+    esac
+done
+[ "$rotten" -eq 0 ] \
+    && pass "每个 Fixed by: 的提交都从 HEAD 可达" \
+    || fail "$rotten 条 Fixed by: 指向 HEAD 不可达的提交（悬空或被改写，会被 gc 回收）"
 
 echo
 # 数的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」。
