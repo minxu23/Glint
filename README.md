@@ -86,7 +86,9 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
    海拔、方位角、GPS 时间戳）、相机与镜头型号、光圈快门 ISO 焦距、
    图像描述、`UserComment` 备注、作者、版权、星级评分等。
 2. **XMP 数据包** —— Lightroom / Photoshop / Bridge 写入的标题、说明、
-   关键词、评级、版权、人脸区域等，原样搬运。
+   关键词、评级、版权、人脸区域等，整包合并进产物：包括属性字典表达不了的
+   `xmp:Label`、`lr:hierarchicalSubject`、`dc:title` 的各个语言、人脸区域的
+   `Name`、`xmpMM:*` 和自定义命名空间，也包括扩展 XMP 段里的内容。
 3. **文件层元数据** —— 创建时间、修改时间、POSIX 权限，以及全部扩展属性
    （访达备注 `kMDItemFinderComment`、访达标签 `kMDItemUserTags` 等）。
    相册类 App 在 EXIF 缺失时会回退到文件时间，所以这一层同样影响"拍摄时间"。
@@ -94,9 +96,11 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
 ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：产物会变成 RGB、
 描述文件变成 sRGB，`--verify` 会把这两项报出来。
 
-转换走 `CGImageDestinationAddImageFromSource`，直接从源转码而不是先解码成位图
-再编码，中间环节更少。写入采用「先写临时文件、成功后再原子替换」，中断不会留下
-半个文件。
+转换分两遍。第一遍走 `CGImageDestinationAddImageFromSource`，直接从源转码而不是
+先解码成位图再编码，ICC 跟着走，EXIF 等属性字典（含本工具修补过的 `UserComment`）
+写进去；但它不接受 XMP 包。第二遍用 `CGImageDestinationCopyImageSource` 把第一遍
+的结果连同源的 XMP 一起写出，这一步只合并元数据、不重新编码像素。写入采用「先写
+临时文件、成功后再原子替换」，中断不会留下半个文件。
 
 ## `--verify` 到底比什么
 
@@ -119,7 +123,7 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 
 - `COM` 注释段；
 - ImageIO 不认识的 `APPn` 段（如 C2PA 用的 APP11）。认识的是 JFIF/JFXX、EXIF、
-  XMP 主包、ICC、MPF、Photoshop（IPTC）和 Adobe 这几种；
+  XMP 主包与扩展 XMP、ICC、MPF、Photoshop（IPTC）和 Adobe 这几种；
 - `EOI` 之后的数据（安卓动态照片的视频、MPF 多图格式的附加图像等）。全是
   `0x00`/`0xFF` 填充的不算。
 
@@ -211,6 +215,8 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 - **ImageIO 不认识的 JPEG 段不会保留**：`COM` 注释段、C2PA 的 APP11 等未知 `APPn`
   段、`EOI` 之后的数据（动态照片的视频、MPF 附加图像）。`--verify` 会逐段报出，
   所以 `--delete-original` 不会删这样的源文件。
+- **深度图、视差图、HDR 增益图等辅助图像不会保留**。`AddImageFromSource` 不搬它们。
+  `--verify` 会报出来（`{FileContents}/…/AuxiliaryData…` 几条，外加 EOI 之后的数据）。
 - **Windows 资源管理器写的 EXIF 备注与评级不会保留，`--verify` 也发现不了**：
   IFD0 里的 `XPTitle`、`XPComment`、`XPAuthor`、`XPKeywords`（`0x9C9B`–`0x9C9E`）
   和 `Rating`（`0x4746`）。ImageIO 不读这几个标签，它们既不在属性视图里，也不会

@@ -79,6 +79,9 @@ private let portableAppSegments: [(marker: UInt8, id: [UInt8])] = [
     (0xE0, Array("JFXX".utf8) + [0]),
     (0xE1, Array("Exif".utf8) + [0]),
     (0xE1, Array("http://ns.adobe.com/xap/1.0/".utf8) + [0]),
+    // 扩展 XMP：ImageIO 读源时把它并进 XMP 视图，转换时随 XMP 一起搬走；
+    // 真搬丢了，键空间比对会逐个标签报出来。
+    (0xE1, Array("http://ns.adobe.com/xmp/extension/".utf8) + [0]),
     (0xE2, Array("ICC_PROFILE".utf8) + [0]),
     // MPF 只是 EOI 之后那些附加图像的目录，丢失由尾部数据那一条报。
     (0xE2, mpfID),

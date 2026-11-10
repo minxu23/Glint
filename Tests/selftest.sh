@@ -24,7 +24,7 @@ ROUNDS=0
 # 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
-EXPECTED_ASSERTIONS=84
+EXPECTED_ASSERTIONS=89
 EXPECTED_UNIT=237
 EXPECTED_GUI=41
 
@@ -179,12 +179,31 @@ KEYS='{Exif}/DateTimeOriginal
 {IPTC}/City
 {IPTC}/Country/PrimaryLocationName
 {IPTC}/Caption/Abstract
-{IPTC}/StarRating'
+{IPTC}/StarRating
+XMP/xmp:Label'
 while IFS= read -r key; do
     want=$(./Tests/probe "$WORK/照片.jpg" "$key")
     got=$(./Tests/probe "$WORK/照片.heic" "$key")
     check_same "$key" "$got" "$want"
 done <<< "$KEYS"
+
+# 属性字典表达不了的 XMP：多语言标题、层级关键词、人脸区域、xmpMM、自定义命名空间。
+./Tests/fixture --rich-xmp "$WORK/富XMP.jpg" >/dev/null
+check "前提：富 XMP 样本里确实有人脸区域的名字" \
+    "$(./Tests/probe "$WORK/富XMP.jpg" 'XMP/mwg-rs:Regions.RegionList[0].Name')" "张三"
+rich_out=$("$BIN" --verify -v "$WORK/富XMP.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$rich_out" \
+    && pass "富 XMP 整包搬过去，校验通过" \
+    || { fail "富 XMP 有标签没搬过去"; sed 's/^/     /' <<< "$rich_out"; }
+# 扩展 XMP 段：ImageIO 读源时把它并进 XMP，转换时随 XMP 一起搬走，所以这个段
+# 不算"搬不走"；里面的标签真丢了由键空间比对报。
+./Tests/fixture --extended-xmp "$WORK/扩展XMP.jpg" >/dev/null
+check "前提：扩展 XMP 里的标签读得到" \
+    "$(./Tests/probe "$WORK/扩展XMP.jpg" 'XMP/jt:Extended')" "只在扩展包里的值"
+ext_out=$("$BIN" --verify -v "$WORK/扩展XMP.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$ext_out" \
+    && pass "扩展 XMP 搬过去，校验通过" \
+    || { fail "扩展 XMP 的样本报了差异"; sed 's/^/     /' <<< "$ext_out"; }
 
 round "3. 文件层元数据"
 check_same "修改时间一致" \

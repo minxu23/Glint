@@ -17,8 +17,16 @@
 //            不影响结果，整条分支是空跑。
 //   --cmyk   像素画在 Generic CMYK 色彩空间里，写出 CMYK JPEG（带 CMYK 的 ICC）。
 //            转成 HEIF 后色彩模型和描述文件都会变成 RGB/sRGB，校验必须报出来。
+//   --rich-xmp
+//            XMP 包里再加上属性字典表达不了的几类标签：dc:title 的多语言、
+//            lr:hierarchicalSubject、人脸区域（mwg-rs:Regions，含 Name）、
+//            xmpMM:*、一个自定义命名空间。默认那张只有一个纯 XMP 键 xmp:Label。
+//   --extended-xmp
+//            再加一个扩展 XMP 段（APP1 `http://ns.adobe.com/xmp/extension/`），
+//            里面有一个只存在于扩展包的标签 jt:Extended。
 
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -27,8 +35,10 @@ var args = Array(CommandLine.arguments.dropFirst())
 let lossy = args.contains("--lossy")
 let noExifOffset = args.contains("--no-exif-offset")
 let cmyk = args.contains("--cmyk")
-args.removeAll { $0 == "--lossy" || $0 == "--no-exif-offset" || $0 == "--cmyk" }
-let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] <输出.jpg>"
+let richXMP = args.contains("--rich-xmp")
+let extendedXMP = args.contains("--extended-xmp")
+args.removeAll { ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp"].contains($0) }
+let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] <输出.jpg>"
 guard let path = args.first else {
     FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
@@ -112,14 +122,123 @@ if !noExifOffset, var exif = props[kCGImagePropertyExifDictionary] as? [CFString
     props[kCGImagePropertyExifDictionary] = exif
 }
 
-let url = URL(fileURLWithPath: path)
-guard let dst = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
-    FileHandle.standardError.write(Data("无法创建 JPEG 编码器\n".utf8))
+// 只存在于 XMP 包里、属性字典里没有对应字段的标签。默认只有 xmp:Label 一个；
+// --rich-xmp 换成下面这一整包。
+let xmpNamespaces = """
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
+    xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"
+    xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+    xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
+    xmlns:stDim="http://ns.adobe.com/xap/1.0/sType/Dimensions#"
+    xmlns:jt="http://example.com/jpeg2heif/test/1.0/"
+"""
+let richBody = """
+    xmpMM:DocumentID="xmp.did:0001"
+    xmpMM:InstanceID="xmp.iid:0002"
+    xmpMM:OriginalDocumentID="xmp.did:0000"
+    jt:Custom="自定义命名空间的值">
+   <dc:title><rdf:Alt>
+     <rdf:li xml:lang="x-default">西湖</rdf:li>
+     <rdf:li xml:lang="en-US">West Lake</rdf:li>
+     <rdf:li xml:lang="zh-CN">西湖日落</rdf:li>
+   </rdf:Alt></dc:title>
+   <lr:hierarchicalSubject><rdf:Bag>
+     <rdf:li>地点|中国|杭州</rdf:li><rdf:li>主题|日落</rdf:li>
+   </rdf:Bag></lr:hierarchicalSubject>
+   <mwg-rs:Regions rdf:parseType="Resource">
+     <mwg-rs:AppliedToDimensions stDim:w="1200" stDim:h="900" stDim:unit="pixel"/>
+     <mwg-rs:RegionList><rdf:Bag><rdf:li rdf:parseType="Resource">
+       <mwg-rs:Name>张三</mwg-rs:Name><mwg-rs:Type>Face</mwg-rs:Type>
+       <mwg-rs:Area stArea:x="0.5" stArea:y="0.5" stArea:w="0.1" stArea:h="0.1" stArea:unit="normalized"/>
+     </rdf:li></rdf:Bag></mwg-rs:RegionList>
+   </mwg-rs:Regions>
+  </rdf:Description>
+"""
+let xmpPacket = """
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+\(xmpNamespaces)
+    xmp:Label="红色"\(richXMP ? "\n" + richBody : "/>")
+ </rdf:RDF>
+</x:xmpmeta>
+"""
+
+func die(_ message: String) -> Never {
+    FileHandle.standardError.write(Data("\(message)\n".utf8))
     exit(1)
 }
-CGImageDestinationAddImage(dst, ctx.makeImage()!, props as CFDictionary)
-guard CGImageDestinationFinalize(dst) else {
-    FileHandle.standardError.write(Data("写入测试图失败\n".utf8))
-    exit(1)
+
+// 先按属性字典编码到内存，再只替换 XMP 那一个 APP1 段：把上面的标签并进 ImageIO
+// 写出的 XMP 包。不走 CopyImageSource——它会把 EXIF 重新序列化一遍，而 ImageIO
+// 写 UserComment 时按字符数当字节数算，非 ASCII 的备注会被截掉一半（README
+// 「已知限制」），夹具就不再是"元数据齐全"的了。
+let encoded = NSMutableData()
+guard let first = CGImageDestinationCreateWithData(encoded, UTType.jpeg.identifier as CFString, 1, nil) else {
+    die("无法创建 JPEG 编码器")
 }
+CGImageDestinationAddImage(first, ctx.makeImage()!, props as CFDictionary)
+guard CGImageDestinationFinalize(first) else { die("写入测试图失败") }
+var bytes = [UInt8](encoded as Data)
+
+// 定位 XMP 段：逐段走到 SOS 为止，找内容以 XMP 标识开头的 APP1。
+let xmpID: [UInt8] = Array("http://ns.adobe.com/xap/1.0/".utf8) + [0]
+var xmpSegment: Range<Int>?      // 整段（含 FF E1 与长度字段）
+var at = 2
+while at + 4 <= bytes.count, bytes[at] == 0xFF, bytes[at + 1] != 0xDA {
+    let payload = (at + 4)..<(at + 2 + (Int(bytes[at + 2]) << 8 | Int(bytes[at + 3])))
+    if bytes[at + 1] == 0xE1, payload.count >= xmpID.count,
+       Array(bytes[payload.lowerBound..<(payload.lowerBound + xmpID.count)]) == xmpID {
+        xmpSegment = at..<payload.upperBound
+        break
+    }
+    at = payload.upperBound
+}
+guard let segment = xmpSegment,
+      let written = CGImageMetadataCreateFromXMPData(
+          Data(bytes[(segment.lowerBound + 4 + xmpID.count)..<segment.upperBound]) as CFData),
+      let merged = CGImageMetadataCreateMutableCopy(written),
+      let extra = CGImageMetadataCreateFromXMPData(Data(xmpPacket.utf8) as CFData)
+else { die("夹具的 XMP 包读不出来") }
+for (prefix, uri) in [("lr", "http://ns.adobe.com/lightroom/1.0/"), ("xmpMM", "http://ns.adobe.com/xap/1.0/mm/"),
+                      ("mwg-rs", "http://www.metadataworkinggroup.com/schemas/regions/"),
+                      ("stArea", "http://ns.adobe.com/xmp/sType/Area#"),
+                      ("stDim", "http://ns.adobe.com/xap/1.0/sType/Dimensions#"),
+                      ("jt", "http://example.com/jpeg2heif/test/1.0/")] {
+    CGImageMetadataRegisterNamespaceForPrefix(merged, uri as CFString, prefix as CFString, nil)
+}
+CGImageMetadataEnumerateTagsUsingBlock(extra, nil, nil) { path, tag in
+    CGImageMetadataSetTagWithPath(merged, nil, path, tag)
+}
+func app1(_ payload: [UInt8]) -> [UInt8] {
+    let n = payload.count + 2
+    return [0xFF, 0xE1, UInt8(n >> 8), UInt8(n & 0xFF)] + payload
+}
+// 扩展 XMP：主包里记下扩展包的 MD5（xmpNote:HasExtendedXMP），扩展包放进紧跟其后
+// 的 APP1 `http://ns.adobe.com/xmp/extension/` 段：标识 + 32 位 GUID + 全长 + 偏移 + 内容。
+var extensionSegment: [UInt8] = []
+if extendedXMP {
+    let body = Array("""
+    <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
+    <rdf:Description rdf:about="" xmlns:jt="http://example.com/jpeg2heif/test/1.0/" \
+    jt:Extended="只在扩展包里的值"/></rdf:RDF></x:xmpmeta>
+    """.utf8)
+    let guid = Insecure.MD5.hash(data: body).map { String(format: "%02X", $0) }.joined()
+    let note = "http://ns.adobe.com/xmp/note/" as CFString
+    guard CGImageMetadataRegisterNamespaceForPrefix(merged, note, "xmpNote" as CFString, nil),
+          let tag = CGImageMetadataTagCreate(note, "xmpNote" as CFString, "HasExtendedXMP" as CFString,
+                                             .string, guid as CFString),
+          CGImageMetadataSetTagWithPath(merged, nil, "xmpNote:HasExtendedXMP" as CFString, tag)
+    else { die("写不进 xmpNote:HasExtendedXMP") }
+    let size = UInt32(body.count)
+    let be32 = [UInt8(size >> 24), UInt8((size >> 16) & 0xFF), UInt8((size >> 8) & 0xFF), UInt8(size & 0xFF)]
+    extensionSegment = app1(Array("http://ns.adobe.com/xmp/extension/".utf8) + [0] + Array(guid.utf8)
+                            + be32 + [0, 0, 0, 0] + body)
+}
+guard let packet = CGImageMetadataCreateXMPData(merged, nil) as Data?,
+      xmpID.count + packet.count + 2 <= 0xFFFF else { die("合并后的 XMP 包写不进一个段") }
+bytes.replaceSubrange(segment, with: app1(xmpID + [UInt8](packet)) + extensionSegment)
+do { try Data(bytes).write(to: URL(fileURLWithPath: path)) } catch { die("写入测试图失败") }
 print("已生成测试图: \(path)")

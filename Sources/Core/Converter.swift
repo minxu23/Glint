@@ -207,23 +207,9 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
     try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
     let tmp = folder.appendingPathComponent(".jpeg2heif-\(UUID().uuidString).heic")
 
-    guard let out = CGImageDestinationCreateWithURL(tmp as CFURL, UTType.heic.identifier as CFString, 1, nil) else {
-        return .failed("无法创建 HEIC 编码器")
-    }
-
     var destProps = props
     destProps[kCGImageDestinationLossyCompressionQuality] = opts.quality
-    if let xmp {
-        // 携带完整 XMP 数据包（备注、标题、版权、关键词等）。
-        destProps[kCGImageDestinationMetadata] = xmp
-        destProps[kCGImageDestinationMergeMetadata] = true
-    }
-
-    // AddImageFromSource 直接从源转码，能连带保留 ICC 色彩描述文件与像素数据，
-    // 比先解码成 CGImage 再编码丢的信息少。
-    CGImageDestinationAddImageFromSource(out, src, 0, destProps as CFDictionary)
-
-    guard CGImageDestinationFinalize(out) else {
+    guard encodeHEIF(src, properties: destProps, xmp: xmp, to: tmp) else {
         try? fm.removeItem(at: tmp)
         return .failed("HEIC 编码失败")
     }
@@ -255,6 +241,34 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
     return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: fileSize(dest),
                                       tagCount: tagCount, xattrCount: xattrs,
                                       verification: verification, note: note))
+}
+
+/// 把源图编码成 HEIF 写到 `url`，分两遍：
+///
+/// 1. AddImageFromSource 直接从源转码到内存：像素不先解码成位图，ICC 色彩描述
+///    文件跟着走，`properties`（含 UserComment 的修补）写进 EXIF 等字典。
+///    它不认 kCGImageDestinationMetadata，XMP 包里属性字典表达不了的标签
+///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
+///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
+/// 2. CopyImageSource 把第一遍的结果写到 `url`，同时把源的 XMP 合并进去。
+///    这一步只改元数据，不重新编码像素。
+func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
+                xmp: CGImageMetadata?, to url: URL) -> Bool {
+    let heic = UTType.heic.identifier as CFString
+    // 源里没有 XMP 就没有第二遍可做；CopyImageSource 不带元数据选项时直接失败。
+    guard let xmp else {
+        guard let out = CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil) else { return false }
+        CGImageDestinationAddImageFromSource(out, src, 0, properties as CFDictionary)
+        return CGImageDestinationFinalize(out)
+    }
+    let encoded = NSMutableData()
+    guard let first = CGImageDestinationCreateWithData(encoded, heic, 1, nil) else { return false }
+    CGImageDestinationAddImageFromSource(first, src, 0, properties as CFDictionary)
+    guard CGImageDestinationFinalize(first),
+          let firstPass = CGImageSourceCreateWithData(encoded, nil),
+          let out = CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil) else { return false }
+    let options = [kCGImageDestinationMetadata: xmp, kCGImageDestinationMergeMetadata: true] as CFDictionary
+    return CGImageDestinationCopyImageSource(out, firstPass, options, nil)
 }
 
 func fileSize(_ url: URL) -> Int {
