@@ -227,6 +227,9 @@ for (text, want) in [// 该认出来的
                      ("拍摄于 18:42:07+08:00", ""), // 空格前面是散文不是日期
                      ("995999+0800", ""),         // 前文的"时刻"越界
                      ("2024+0800", ""),           // 4 位无分隔不单独成时刻
+                     ("+999-09-15T18:42:07+08:00", ""),   // `Int("+999")` 是 999，
+                     // 所以字段里的前导符号必须由 isAllDigits 拦，否则这个值
+                     // 会读出 `+0800`——目标侧一松就是静默放过。
                      // 真实写法必须继续认：
                      ("184207+08:00", "+0800"),
                      ("2024-09-15T18:42:07.42+08:00", "+0800"),   // ImageIO 实际写的
@@ -262,12 +265,19 @@ expectEquivalent(timeKey, "184207Z",
 print("numericFields：三处形状解析共用的那把尺子")
 // 时刻、日期、偏移本来各写了一遍同样的 switch count，现在共用这一个。
 // 它是单点故障，所以直接钉住，而不只是透过上面那些间接验。
-let hhmmssColon = DigitShape([2, 2, 2], ":")
-let hhmmss = DigitShape([2, 2, 2])
-let ymdDash = DigitShape([4, 2, 2], "-")
-let ymdPlain = DigitShape([4, 2, 2])
-let ymdColon = DigitShape([4, 2, 2], ":")
-let hhmm = DigitShape([2, 2])
+// 用生产代码里那套命名常量，不另起一套：这样用例同时也钉住了常量本身——
+// 把 ymdDash 的分隔符改掉，下面「带连字符的日期」就会红。
+let hhmmssColon = DigitShape.hhmmssColon
+let hhmmss = DigitShape.hhmmss
+let ymdDash = DigitShape.ymdDash
+let ymdPlain = DigitShape.ymdPlain
+let ymdColon = DigitShape.ymdColon
+let hhmm = DigitShape.hhmm
+
+// length 是切片位置的来源，错一位整个锚定就偏了。
+checkRule("hhmmssColon.length", hhmmssColon.length, 8, "三个两位字段加两个分隔符")
+checkRule("hhmmss.length", hhmmss.length, 6, "无分隔符就不加")
+checkRule("ymdDash.length", ymdDash.length, 10, "4+2+2 加两个分隔符")
 
 func expectFields(_ value: String, _ shape: DigitShape, _ want: [Int]?, _ why: String) {
     let got = numericFields(Array(value), shape)
@@ -286,9 +296,9 @@ expectFields("18:42:077", hhmmssColon, nil, "长一位——末尾多出的字�
 expectFields("18-42-07", hhmmssColon, nil, "分隔符不对")
 expectFields("184207", hhmmssColon, nil, "该有分隔符却没有")
 expectFields("18:42:07", hhmmss, nil, "不该有分隔符却有")
-// 这一条守的是"全角数字不算数字"这个行为，不是守 isASCII 那一个条件：
-// numericFields 里还有 Int(String) 兜着，实测去掉 isASCII 它照样拒。
-// isASCII 真正不可或缺的地方是 isAllDigits（那里没有 Int 这道后手）。
+expectFields("+999-09-15", ymdDash, nil, "字段里不能有前导符号——Int 认 +999，isAllDigits 不认")
+// 这一条钉的是"全角数字不算数字"这个行为。isASCII 只在 isAllDigits 里有一份，
+// numericFields 现在也调它，所以不存在"哪一份是冗余的"这个问题了。
 expectFields("1８4207", hhmmss, nil, "全角数字不算数字")
 
 print("isAllDigits：IIM 前六位和小数秒只需要这一句")

@@ -23,7 +23,7 @@ ROUNDS=0
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
 EXPECTED_ASSERTIONS=60
-EXPECTED_UNIT=215
+EXPECTED_UNIT=220
 EXPECTED_GUI=37
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。

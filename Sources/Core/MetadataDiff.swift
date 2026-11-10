@@ -185,13 +185,6 @@ func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     return (String(chars[0..<6]), offset)
 }
 
-/// UTC 偏移，归一化成「符号 + HHMM」（如 `+0800`）。
-///
-/// 做成类型而不是继续传裸 `String`：它要在 splitIIMTime、offsetSurvives、
-/// equivalentCarries 之间传递，而"这个 String 已经归一化过"光看类型看不出来——
-/// `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00` 都是合法 String，只有一种
-/// 能直接拿去比较。包成类型之后，比较只可能发生在解析之后。
-///
 /// 一串固定位数的数字字段，字段之间可以有一个字面分隔符。
 ///
 /// 例：`DigitShape([2, 2, 2], ":")` 是 `hh:mm:ss`，`DigitShape([2, 2, 2])` 是
@@ -210,6 +203,23 @@ struct DigitShape {
         self.widths = widths
         self.separator = separator
     }
+
+    /// 这个形状用尽时恰好多长。由形状自己推出来，不在调用点旁边重述——上一版
+    /// 把长度和形状配成元组写在一起（`(8, DigitShape([2, 2, 2], ":"))`），
+    /// 两者没有任何东西维持同步，改了形状不改数字就会错位。
+    var length: Int {
+        widths.reduce(0, +) + (separator == nil ? 0 : widths.count - 1)
+    }
+
+    /// 本项目用到的全部形状。命名放在类型旁边，这样生产代码和测试用的是
+    /// 同一套名字，而不是生产重复匿名字面量、测试另起一套。
+    static let hhmmssColon = DigitShape([2, 2, 2], ":")
+    static let hhmmss = DigitShape([2, 2, 2])
+    static let hhmmColon = DigitShape([2, 2], ":")
+    static let hhmm = DigitShape([2, 2])
+    static let ymdDash = DigitShape([4, 2, 2], "-")
+    static let ymdPlain = DigitShape([4, 2, 2])
+    static let ymdColon = DigitShape([4, 2, 2], ":")
 }
 
 /// 按形状从 `value` 里切出各字段的数值。整个 `value` 必须被形状用尽——末尾
@@ -231,13 +241,13 @@ func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
             i += 1
         }
         guard i + width <= value.count else { return nil }
-        var digits = ""
-        for _ in 0..<width {
-            guard value[i].isASCII, value[i].isNumber else { return nil }
-            digits.append(value[i])
-            i += 1
-        }
-        guard let n = Int(digits) else { return nil }
+        let digits = Array(value[i..<(i + width)])
+        // isAllDigits 在这里是承重的，不只是 Int(String) 的前置装饰：`Int` 认
+        // 前导符号，`Int("+999")` 是 999。少了这一句，`+999-09-15` 会被当成一个
+        // 日期，于是 `+999-09-15T18:42:07+08:00` 能读出 `+0800`——目标侧读取器
+        // 一松就是静默放过。全文件只有 isAllDigits 一处定义「ASCII 数字」。
+        guard isAllDigits(digits), let n = Int(String(digits)) else { return nil }
+        i += width
         fields.append(n)
     }
     guard i == value.count else { return nil }
@@ -256,6 +266,13 @@ func isAllDigits(_ value: [Character]) -> Bool {
     !value.isEmpty && value.allSatisfy { $0.isASCII && $0.isNumber }
 }
 
+/// UTC 偏移，归一化成「符号 + HHMM」（如 `+0800`）。
+///
+/// 做成类型而不是继续传裸 `String`：它要在 splitIIMTime、offsetSurvives、
+/// equivalentCarries 之间传递，而"这个 String 已经归一化过"光看类型看不出来——
+/// `+08:00`、`+0800`、`2024-09-15T18:42:07+08:00` 都是合法 String，只有一种
+/// 能直接拿去比较。包成类型之后，比较只可能发生在解析之后。
+///
 /// 刻意不把 `+0000` 与 `-0000` 当同一个值：RFC 3339 里后者是"本地偏移未知"。
 /// 真撞上这种差异就报出来——多报一条符合本项目的方向。
 struct UTCOffset: Equatable {
@@ -327,11 +344,12 @@ struct UTCOffset: Equatable {
            isAllDigits(Array(head[(point + 1)...])) {
             head = Array(head[..<point])
         }
-        for (width, shape) in [(8, DigitShape([2, 2, 2], ":")), (6, DigitShape([2, 2, 2])),
-                               (5, DigitShape([2, 2], ":")), (4, DigitShape([2, 2]))]
-        where head.count >= width {
+        for shape in [DigitShape.hhmmssColon, .hhmmss, .hhmmColon, .hhmm]
+        where head.count >= shape.length {
+            let width = shape.length
             guard isTimeOfDay(Array(head[(head.count - width)...]), shape) else { continue }
-            // 整个值就是时刻。4 位无分隔的与年份无法区分，不收。
+            // 整个值就是时刻。4 位无分隔的与年份无法区分，不收（四种形状里只有
+            // `hhmm` 长 4，`hhmmColon` 长 5）。
             if head.count == width { return width != 4 }
             let before = Array(head[..<(head.count - width)])
             guard let separator = before.last, separator == "T" || separator == " " else { continue }
@@ -340,7 +358,7 @@ struct UTCOffset: Equatable {
         return false
     }
 
-    /// 按模板核对一个时刻并验范围。秒允许 60，那是闰秒。
+    /// 按形状核对一个时刻并验范围。秒允许 60，那是闰秒。
     private static func isTimeOfDay(_ value: [Character], _ shape: DigitShape) -> Bool {
         guard let parts = numericFields(value, shape), parts.count >= 2,
               parts[0] <= 23, parts[1] <= 59 else { return false }
@@ -350,16 +368,18 @@ struct UTCOffset: Equatable {
     /// `YYYY-MM-DD`、`YYYYMMDD` 或 `YYYY:MM:DD`，并验月日范围。不查某月到底有
     /// 几天：这里只是在判断「这段是不是一个日期」，不是在校验日历。
     ///
-    /// 冒号那一种是 **EXIF 自己的日期格式**（`{Exif}/DateTimeOriginal`、
-    /// `{TIFF}/DateTime` 实际写的就是 `2024:09:15 18:42:07`），而 README 把
-    /// `{Exif}/DateTimeOriginal` 点名为等价承载键之一。上一版只列了 ISO 8601
+    /// 冒号那一种是 **EXIF 自己的日期格式**：`{Exif}/DateTimeOriginal` 写的
+    /// 就是 `2024:09:15 18:42:07`，而 README 把它点名为等价承载键之一。
+    /// （别的键也这么写，但 README 把 `tiff:DateTime` 之类排除在搜索范围外，
+    /// 所以这里只该引那一个真正在范围内的。）上一版只列了 ISO 8601
     /// 的两种，于是 `2024:09:15 18:42:07+08:00` 读不出偏移——方向上只多报，
     /// 但它让本项目读得最多的那个格式成了读不出来的那个。
     /// 漏掉的原因是我按 ISO 8601 的全集列形状，而 EXIF 的日期不属于 ISO 8601。
     private static func isDate(_ value: [Character]) -> Bool {
-        for shape in [DigitShape([4, 2, 2], "-"), DigitShape([4, 2, 2]),
-                      DigitShape([4, 2, 2], ":")] {
-            guard let parts = numericFields(value, shape), parts.count == 3 else { continue }
+        for shape in [DigitShape.ymdDash, .ymdPlain, .ymdColon] {
+            // 不再 guard `parts.count == 3`：numericFields 保证个数恒等于
+            // `shape.widths.count`，而这三个常量都是三字段的，所以那一句恒真。
+            guard let parts = numericFields(value, shape) else { continue }
             if (1...12).contains(parts[1]), (1...31).contains(parts[2]) { return true }
         }
         return false
@@ -369,13 +389,11 @@ struct UTCOffset: Equatable {
     private static func normalizedOffset(_ token: [Character]) -> String? {
         guard let sign = token.first, sign == "+" || sign == "-" else { return nil }
         let body = Array(token.dropFirst())
-        // 宽度前提在本函数内成立，不寄托于调用方的 `for width in [5, 6]`。
-        let shape: DigitShape
-        switch body.count {
-        case 4: shape = DigitShape([2, 2])
-        case 5: shape = DigitShape([2, 2], ":")
-        default: return nil
-        }
+        // 宽度前提在本函数内成立，不寄托于调用方的 `for width in [5, 6]`：
+        // 形状由 body 自己的长度挑出来。上一版在这里又写了一遍「4 → 无分隔、
+        // 5 → 带冒号」，和 isTimestamp 里那张表是同一个映射的第二种写法。
+        guard let shape = [DigitShape.hhmm, .hhmmColon]
+            .first(where: { $0.length == body.count }) else { return nil }
         // ISO 8601 的偏移范围是 -12:00…+14:00（README「--verify」一节同此），
         // 分钟 < 60。约束的是**总偏移量**，不是时和分各自的上限：
         //   - 要求分钟为 0 会拒掉真实存在的 +05:30、+05:45、+09:30、+13:45；
@@ -383,8 +401,8 @@ struct UTCOffset: Equatable {
         //     +14:59、-12:30、-12:59 这些不存在的偏移。
         // 前两版分别踩了"不分符号"和"分符号但按分量"，都是后一种失效：
         // 目标侧读取器一宽松，offsetSurvives 就把真丢失误判成"还在"。
-        guard let parts = numericFields(body, shape), parts.count == 2,
-              parts[1] <= 59 else { return nil }
+        // 同样不 guard `parts.count == 2`：上面两个常量都是两字段的。
+        guard let parts = numericFields(body, shape), parts[1] <= 59 else { return nil }
         let total = (sign == "-" ? -1 : 1) * (parts[0] * 60 + parts[1])
         guard total >= -12 * 60, total <= 14 * 60 else { return nil }
         return "\(sign)\(twoDigits(parts[0]))\(twoDigits(parts[1]))"
