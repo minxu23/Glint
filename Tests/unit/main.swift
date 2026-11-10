@@ -319,25 +319,20 @@ for (text, time, offset) in [("184207+0800", "184207", "+0800"),
                              // 越界、垃圾尾巴一律不拆：整串拿去比，对不上就报
                              ("184207+9999", "184207+9999", ""),
                              ("184207-12345", "184207-12345", ""),
-                             // 拆不拆由三道守卫共同决定（总长、第 7 位、UTCOffset），
-                             // 下面四条各自只被其中一道拦住——少任何一道，
-                             // 多出来的字符就被悄悄丢掉，而时间部分照样"对得上"。
-                             //
-                             // 只被「总长」拦住：第 7 位是加号、前六位是数字，
-                             // 偏移也合规，唯一的毛病是中间多了一段 `+12`。
+                             // 只被「第 7 个字符」那一道拦住：UTCOffset 认得
+                             // `184207.555Z`（带小数秒的时刻 + Z），不拦就拆成
+                             // (184207, +0000)，小数秒被悄悄丢掉。
+                             ("184207.555Z", "184207.555Z", ""),
+                             ("184207,555Z", "184207,555Z", ""),
+                             // UTCOffset 解析不出偏移，不拆。
                              ("184207+12+0800", "184207+12+0800", ""),
-                             // 只被「第 7 位」拦住：12 位，和合规的 HHMMSS±HH:MM
-                             // 一样长，总长查不出来。
                              ("1842071+0800", "1842071+0800", ""),
-                             // 只被「UTCOffset」拦住：12 位、第 7 位是加号，
-                             // 但 `+1+080` 不是任何一种偏移形状。
                              ("184207+1+080", "184207+1+080", ""),
-                             // 走 Z 门的同族：第 7 位是 `+`、总长 12、Z 分支原先
-                             // 也认，于是三道守卫全过，`+0800` 被丢掉且偏移被
-                             // **改读**成 +0000——丢还能被报出来，改读成合法值
-                             // 连差异都不剩。
+                             // 走 Z 门的同族：第 7 个字符是 `+`，UTCOffset 的 Z 分支
+                             // 一松就会认，`+0800` 被丢掉且偏移被**改读**成 +0000
+                             // ——改读成合法值连差异都不剩。
                              ("184207+0800Z", "184207+0800Z", ""),
-                             // 被多道同时拦住的，留着当回归样本就好。
+                             // 回归样本。
                              ("184207123+0800", "184207123+0800", ""),
                              ("1842071Z", "1842071Z", ""),
                              ("184207", "184207", "")] {
@@ -405,6 +400,31 @@ for (key, want) in [// 未声明 → 归并
     checkRule(key, makerNoteGroup(of: key) ?? "", want,
               "\(key) → \(want.isEmpty ? "不归类" : want)")
 }
+
+print("keySpaceDiff：两个键空间 → 差异列表")
+// 主循环的每条分支各一个用例：删掉或架空任何一条分支，对应那条会红。
+check("值变化被报出", keySpaceDiff(before: ["{TIFF}/Model": "Canon"],
+                                   after: ["{TIFF}/Model": "Nikon"]),
+      ["变化 {TIFF}/Model: Canon → Nikon"])
+check("数值重编码不算变化", keySpaceDiff(before: ["{GPS}/Altitude": "-15/10"],
+                                     after: ["{GPS}/Altitude": "-3/2"]), [])
+check("普通键丢失被报出", keySpaceDiff(before: ["{GPS}/Latitude": "50.87"], after: [:]),
+      ["丢失 {GPS}/Latitude = 50.87"])
+// IIM 键在目标里没有对应容器：等价字段在、值也对上才放过；等价字段在而值不同必须报。
+let iimDate = iptcKey(kCGImagePropertyIPTCDateCreated)
+let exifShot = exifKey(kCGImagePropertyExifDateTimeOriginal)
+check("IIM 日期由等价字段同值承载，不报",
+      keySpaceDiff(before: [iimDate: "20240915"], after: [exifShot: "2024:09:15 18:42:07"]), [])
+check("IIM 日期的等价字段在、值不同，必须报",
+      keySpaceDiff(before: [iimDate: "20240915"], after: [exifShot: "2020:01:01 00:00:00"]),
+      ["丢失 \(iimDate) = 20240915"])
+check("MakerNote 派生键丢失合并成一条汇总",
+      keySpaceDiff(before: ["{MakerCanon}/x": "1"], after: [:]),
+      ["丢失 厂商私有数据 MakerNote（1 项：{MakerCanon} 1 项）"
+       + "——ImageIO 读不出原始 MakerNote，也无法把它写入 HEIF"])
+check("易变键丢失或变化都跳过",
+      keySpaceDiff(before: ["PixelWidth": "100", "{JFIF}/XDensity": "72"],
+                   after: ["{JFIF}/XDensity": "96"]), [])
 
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {

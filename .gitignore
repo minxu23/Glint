@@ -7,7 +7,7 @@
 /Tests/unit-test
 /Tests/guimodel-test
 /Tests/mangle-tool
-/Tests/.work/
+/Tests/.work*/
 
 # 真实参考照片的转换产物；.JPG 原件是不可再生的输入样本，要入库
 /test_pic/*.heic

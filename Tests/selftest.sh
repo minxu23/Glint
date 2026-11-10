@@ -4,7 +4,9 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 BIN="./jpeg2heif"
-WORK="Tests/.work"
+# 每次运行一个独立的工作目录（见下面 mktemp），并发的两次运行互不相干。
+# 成功结束时删掉；失败或提前退出时留着供诊断，并打印路径。
+WORK=""
 FAILED=0
 PASSED=0
 ROUNDS=0
@@ -22,8 +24,8 @@ ROUNDS=0
 # 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
-EXPECTED_ASSERTIONS=67
-EXPECTED_UNIT=220
+EXPECTED_ASSERTIONS=69
+EXPECTED_UNIT=229
 EXPECTED_GUI=37
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -32,9 +34,19 @@ EXPECTED_GUI=37
 # （环境没准备好，还没开始测），走 bail() 自己说清原因，不需要 trap 再补一句。
 REACHED_END=0
 on_exit() {
-    [ "$REACHED_END" -eq 1 ] && return 0
-    printf '  ✗ %s\n' "脚本没有跑到结尾（提前退出），上面的结论不可信"
-    exit 1
+    local status=$?
+    if [ "$REACHED_END" -ne 1 ]; then
+        printf '  ✗ %s\n' "脚本没有跑到结尾（提前退出），上面的结论不可信"
+        status=1
+    fi
+    if [ -n "$WORK" ] && [ -d "$WORK" ]; then
+        if [ "$status" -eq 0 ]; then
+            rm -rf "$WORK"
+        else
+            printf '工作目录保留在 %s，供诊断\n' "$WORK"
+        fi
+    fi
+    exit "$status"
 }
 trap on_exit EXIT
 bail() { printf '%s\n' "$1"; REACHED_END=1; exit 1; }
@@ -54,15 +66,30 @@ expect_count() {
 # ✓/✗ 的说明文字虚增计数、反而掩盖缩水。
 count_assertions() { printf '%s\n' "$1" | grep -cE '^ *[✓✗]'; }
 check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (期望 [$3]，实际 [$2])"; fi; }
+# 两侧都从被测对象读出来的比较用这个，不用 check：期望侧为空或是探针的
+# 哨兵值（<无>、<无法读取>）时，两侧同空、同哨兵也会"相等"，比较不说明任何事。
+check_same() {
+    case "$3" in
+        ""|"<无>"|"<无法读取>")
+            fail "$1 (期望侧是 [$3]，没有可比的值)" ;;
+        *)  check "$1" "$2" "$3" ;;
+    esac
+}
+# 否定式断言（"没有…""不该…"）：命令没成功跑完时，"没看到"不说明任何事。
+# 用法：refute 描述 退出码 条件命令...；退出码非 0 判失败，条件命令成立也判失败。
+refute() {
+    local what=$1 status=$2; shift 2
+    if [ "$status" -ne 0 ]; then
+        fail "$what (命令退出码 $status，没有成功跑完，否定式断言不成立)"
+    elif "$@"; then
+        fail "$what"
+    else
+        pass "$what"
+    fi
+}
 
 [ -x "$BIN" ] || bail "先运行 make 构建 $BIN"
 
-rm -rf "$WORK"; mkdir -p "$WORK/相册/子目录"
-# 擦干净这件事要查，不要假设。见 issues/11-16：有一次实测里 guimodel 报
-# 「续跑后全部完成（40 张）」，那是上一轮产物还在的症状，而那次失败至今没复现。
-# 前提没成立时，后面几十条断言全都在测别的东西。
-leftover=$(find "$WORK" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$leftover" -eq 0 ] || bail "工作目录没被擦干净（还剩 $leftover 个文件），后面的结论不可信"
 # 所有测试工具都由 Makefile 构建，这里只管用。
 for tool in fixture probe; do
     [ -x "Tests/$tool" ] || bail "先运行 make test（缺 Tests/$tool）"
@@ -89,9 +116,13 @@ for art in $artifacts; do
     # 缺产物在这里就停，不再 `continue`：那等于「缺了就算通过」，
     # 而这个守卫存在的全部意义就是不要静默通过。
     [ -e "$art" ] || bail "缺 $art——先运行 make test"
-    make -q "$art" >/dev/null 2>&1 \
+    # 从 make test 里调用时，外层的标志经 MAKEFLAGS/MFLAGS 传进来；`-B` 会让
+    # `make -q` 把一切都当成过期。问询只问文件本身新不新，所以清掉继承的标志。
+    env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL make -q "$art" >/dev/null 2>&1 \
         || bail "$art 不是当前源码建出来的——先运行 make test，别直接跑本脚本"
 done
+WORK=$(mktemp -d Tests/.work.XXXXXX) || bail "建不出工作目录"
+mkdir -p "$WORK/相册/子目录"
 ./Tests/fixture "$WORK/照片.jpg" >/dev/null || bail "造不出测试图，环境不对"
 xattr -w com.apple.metadata:kMDItemFinderComment "访达备注" "$WORK/照片.jpg"
 
@@ -136,16 +167,15 @@ KEYS='{Exif}/DateTimeOriginal
 while IFS= read -r key; do
     want=$(./Tests/probe "$WORK/照片.jpg" "$key")
     got=$(./Tests/probe "$WORK/照片.heic" "$key")
-    if [ "$want" = "<无>" ]; then fail "$key 源文件里就没有，夹具有问题"; continue; fi
-    check "$key" "$got" "$want"
+    check_same "$key" "$got" "$want"
 done <<< "$KEYS"
 
 round "3. 文件层元数据"
-check "修改时间一致" \
+check_same "修改时间一致" \
     "$(stat -f %m "$WORK/照片.heic")" "$(stat -f %m "$WORK/照片.jpg")"
-check "访达备注保留" \
-    "$(xattr -p com.apple.metadata:kMDItemFinderComment "$WORK/照片.heic" 2>/dev/null | head -c 4 | tr -d ' \n')" \
-    "$(xattr -p com.apple.metadata:kMDItemFinderComment "$WORK/照片.jpg" 2>/dev/null | head -c 4 | tr -d ' \n')"
+check_same "访达备注保留" \
+    "$(xattr -p com.apple.metadata:kMDItemFinderComment "$WORK/照片.heic" 2>/dev/null)" \
+    "$(xattr -p com.apple.metadata:kMDItemFinderComment "$WORK/照片.jpg" 2>/dev/null)"
 
 round "4. 指定文件夹批量转换"
 cp "$WORK/照片.jpg" "$WORK/相册/a.jpg"
@@ -158,12 +188,12 @@ echo "not an image" > "$WORK/相册/说明.txt"
 n=$("$BIN" -n -r "$WORK/相册" 2>/dev/null | grep -c '预演')
 check "从混合内容里挑出 JPEG 的张数" "$n" "3"
 
-"$BIN" -r "$WORK/相册" -o "$WORK/结果" >/dev/null 2>&1
+"$BIN" -r "$WORK/相册" -o "$WORK/结果" >/dev/null 2>&1; st=$?
 [ -f "$WORK/结果/a.heic" ] && [ -f "$WORK/结果/子目录/a.heic" ] \
     && pass "同名文件未互相覆盖" || fail "目录结构未保持"
 [ -f "$WORK/结果/大写扩展名.heic" ] && pass "大写 .JPG 也被处理" || fail "漏掉大写扩展名"
-[ ! -e "$WORK/结果/已有产物.heic" ] && [ ! -e "$WORK/结果/说明.heic" ] \
-    && pass "跳过已有 .heic 与非图片" || fail "误处理了非 JPEG 文件"
+refute "跳过已有 .heic 与非图片" "$st" \
+    test -e "$WORK/结果/已有产物.heic" -o -e "$WORK/结果/说明.heic"
 
 # 非递归时只看顶层，不下钻子目录
 n=$("$BIN" -n "$WORK/相册" 2>/dev/null | grep -c '预演')
@@ -222,8 +252,8 @@ cp "$WORK/照片.jpg" "$WORK/让位/a.jpeg"
     && pass "后缀让开磁盘上已有的文件" || fail "覆盖了已有的 a-2.heic"
 
 # 无冲突时不应改名、不应有避让警告
-out=$("$BIN" -r "$WORK/相册" -o "$WORK/无冲突" 2>&1)
-echo "$out" | grep -q "重名避让" && fail "无冲突却报了避让" || pass "无冲突时不改名"
+out=$("$BIN" -r "$WORK/相册" -o "$WORK/无冲突" 2>&1); st=$?
+refute "无冲突时不改名、不报避让" "$st" grep -q "重名避让" <<< "$out"
 
 round "5. 安全行为"
 "$BIN" "$WORK/照片.jpg" 2>&1 | grep -q "输出已存在" && pass "不覆盖已有输出" || fail "应拒绝覆盖"
@@ -280,10 +310,12 @@ cp "$WORK/照片.jpg" "$WORK/可删.jpg"
 
 # 反向：有真实丢失时必须保留源文件。这是最关键的一条。
 ./Tests/fixture --lossy "$WORK/有损.jpg" >/dev/null
-out=$("$BIN" --delete-original "$WORK/有损.jpg" 2>&1)
-[ -f "$WORK/有损.jpg" ] && pass "校验有差异时保留源文件" || fail "源文件被误删——不可逆"
+out=$("$BIN" --delete-original "$WORK/有损.jpg" 2>&1); st=$?
+refute "校验有差异时保留源文件（反例即源文件被误删，不可逆）" "$st" test ! -f "$WORK/有损.jpg"
 [ -f "$WORK/有损.heic" ] && pass "同时仍产出 .heic 供人工比对" || fail "没产出 .heic"
 echo "$out" | grep -q "保留了源文件" && pass "明确告知保留了源文件" || fail "没说明为何没删"
+# --delete-original 必须隐含校验：不加 --verify 也要比对，否则等于无校验删除
+echo "$out" | grep -q "差异" && pass "未加 --verify 也执行了校验" || fail "没做校验就动了源文件"
 
 # 那句说明是状态，不是元数据差异：它一度被塞进 issues 数组，于是差异数虚增一条，
 # 界面的橙色徽章和弹窗标题也跟着多算。加不加 --delete-original，差异条数必须一样。
@@ -291,19 +323,25 @@ echo "$out" | grep -q "保留了源文件" && pass "明确告知保留了源文�
 n1=$("$BIN" --verify "$WORK/计数.jpg" 2>&1 | grep -oE '发现 [0-9]+ 处差异')
 rm -f "$WORK/计数.heic"
 n2=$("$BIN" --delete-original "$WORK/计数.jpg" 2>&1 | grep -oE '发现 [0-9]+ 处差异')
-check "状态说明不计入差异条数" "$n2" "$n1"
-
-# --delete-original 必须隐含校验：不加 --verify 也要比对，否则等于无校验删除
-echo "$out" | grep -q "差异" && pass "未加 --verify 也执行了校验" || fail "没做校验就动了源文件"
+check_same "状态说明不计入差异条数" "$n2" "$n1"
 
 # 预演不该在磁盘上留下任何痕迹——曾经它会把输出目录先建出来
-"$BIN" -n -r "$WORK/相册" -o "$WORK/预演输出" >/dev/null 2>&1
-[ ! -e "$WORK/预演输出" ] && pass "预演不创建输出目录" || fail "预演留下了目录"
+"$BIN" -n -r "$WORK/相册" -o "$WORK/预演输出" >/dev/null 2>&1; st=$?
+refute "预演不创建输出目录" "$st" test -e "$WORK/预演输出"
 
 # 预演绝不能删任何东西
 cp "$WORK/照片.jpg" "$WORK/预演不删.jpg"
-"$BIN" -n --delete-original "$WORK/预演不删.jpg" >/dev/null 2>&1
-[ -f "$WORK/预演不删.jpg" ] && pass "预演不删源文件" || fail "预演删了源文件"
+"$BIN" -n --delete-original "$WORK/预演不删.jpg" >/dev/null 2>&1; st=$?
+refute "预演不删源文件" "$st" test ! -f "$WORK/预演不删.jpg"
+
+# 真实相机照片：MakerNote 必然丢失，校验必须报出汇总行，--delete-original 不能删源。
+# 用拷贝，test_pic/ 里的原件不可再生。
+cp test_pic/IMG_1225.JPG "$WORK/相机.jpg"
+camera_out=$("$BIN" -v --delete-original "$WORK/相机.jpg" 2>&1); st=$?
+echo "$camera_out" | grep -q "丢失 厂商私有数据 MakerNote" \
+    && pass "相机照片丢失 MakerNote 被报出" \
+    || { fail "相机照片丢失 MakerNote 却没报"; echo "$camera_out" | sed 's/^/     /'; }
+refute "相机照片丢了 MakerNote，源文件保留" "$st" test ! -f "$WORK/相机.jpg"
 
 round "7b. 偏移只靠 XMP 承载"
 # IIM 时间后缀里的偏移，在目标里的唯一承载是 ImageIO 合成的
@@ -312,26 +350,27 @@ round "7b. 偏移只靠 XMP 承载"
 # （XMP 那条腿）那一半怎么写都不影响结果：实测把它整条删掉，默认图照样"校验通过"。
 # 这一轮专门造一张只靠 XMP 承载的图，把那条腿接上。
 ./Tests/fixture --no-exif-offset "$WORK/仅XMP偏移.jpg" >/dev/null
-# 这里敢复用 out，只因为本轮排在第 7 轮那条「未加 --verify 也执行了校验」之后，
-# 而那条读的是第 7 轮自己赋的值。把本轮往上挪就会把它冲掉，那条断言随之变成
-# 假阴性（实测过）。要挪就先给这里换个名字。
-out=$("$BIN" --verify "$WORK/仅XMP偏移.jpg" 2>&1)
-echo "$out" | grep -q "元数据校验通过" \
+xmp_out=$("$BIN" --verify "$WORK/仅XMP偏移.jpg" 2>&1)
+echo "$xmp_out" | grep -q "元数据校验通过" \
     && pass "偏移只靠 XMP 承载时校验也通过" \
-    || { fail "偏移只靠 XMP 承载却报了差异"; echo "$out" | sed 's/^/     /'; }
+    || { fail "偏移只靠 XMP 承载却报了差异"; echo "$xmp_out" | sed 's/^/     /'; }
 # 非空断言：这一轮只有在源和目标都确实没有任何 OffsetTime* 时才说明问题。
 # 哪天 ImageIO 开始自己补一个，上面那条就退化成空跑，必须在这里喊出来。
 # 探的键必须是 offsetSurvives 真会去找的那一整套（utcOffsetKeys），EXIF 和
 # XMP 两侧都要——只守一半的话，另一半照样能让整轮静默退化。
+# 循环里只收集，循环后恰好发一条结论。
+present=""
 for f in "$WORK/仅XMP偏移.jpg" "$WORK/仅XMP偏移.heic"; do
     for k in OffsetTime OffsetTimeOriginal OffsetTimeDigitized; do
         for key in "{Exif}/$k" "XMP/exif:$k"; do
             v=$(./Tests/probe "$f" "$key" 2>/dev/null | tail -1)
-            [ "$v" = "<无>" ] || fail "$(basename "$f") 里有 $key=[$v]，上一条断言失去意义"
+            [ "$v" = "<无>" ] || present="$present $(basename "$f"):$key=[$v]"
         done
     done
 done
-pass "该样本里确实没有任何 OffsetTime*（上一条断言非空）"
+[ -z "$present" ] \
+    && pass "该样本里确实没有任何 OffsetTime*（上一条断言非空）" \
+    || fail "样本里有 OffsetTime*，上一条断言失去意义:$present"
 # 正面指认承载者：偏移必须真的长在目标的 XMP 时间戳里，而不是"碰巧没人追究"。
 v=$(./Tests/probe "$WORK/仅XMP偏移.heic" "XMP/photoshop:DateCreated")
 case "$v" in
@@ -371,7 +410,7 @@ Tests/uisnapshot "$WORK/界面.png" --convert "$WORK/界面" >/dev/null 2>&1
 [ -s "$WORK/界面.png" ] && pass "窗口渲染正常" || fail "窗口渲染失败"
 want=$(./Tests/probe "$WORK/界面/拖入的照片.jpg" '{GPS}/Latitude')
 got=$(./Tests/probe "$WORK/界面/拖入的照片.heic" '{GPS}/Latitude')
-check "界面产物同样保留 GPS" "$got" "$want"
+check_same "界面产物同样保留 GPS" "$got" "$want"
 
 round "10. 审查账本：引文逐字、来源可溯、记录不腐"
 # .scratch/verify-hardening 的全部价值在于「引的是审查当时的原话」。这组性质会

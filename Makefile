@@ -96,4 +96,4 @@ test: $(ARTIFACTS)
 	@Tests/selftest.sh
 
 clean:
-	rm -rf $(BIN) $(APP) Tests/fixture $(TEST_TOOLS) Tests/.work
+	rm -rf $(BIN) $(APP) Tests/fixture $(TEST_TOOLS) Tests/.work*

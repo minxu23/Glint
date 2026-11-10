@@ -152,35 +152,24 @@ let iimTimeKeys: Set<String> = Set([kCGImagePropertyIPTCTimeCreated,
                                     kCGImagePropertyIPTCDigitalCreationTime].map(iptcKey))
 
 /// 把 IIM 的时间拆成「时间」与「UTC 偏移」：`184207+0800` → (`184207`, `+0800`)。
-/// 只认 IIM 规范的确切形状——`HHMMSS`（6 位）、`HHMMSSZ`（7 位）、
-/// `HHMMSS±HHMM`（11 位）、`HHMMSS±HH:MM`（12 位），且偏移必须从第 6 位开始。
-/// 别的一律原样返回、偏移为 nil——宽松的形状判断就是上面注释里说的那个口子。
+/// 只拆 IIM 规范的确切形状——`HHMMSSZ`、`HHMMSS±HHMM`、`HHMMSS±HH:MM`；
+/// 别的（含不带偏移的 `HHMMSS`）一律原样返回、偏移为 nil。偏移的形状与范围
+/// 交给 UTCOffset，源侧与目标侧用同一把尺子。
+///
+/// 两道条件：
+///   第 7 个字符是 `+`/`-`/`Z` —— 只被它拦住的用例是 `184207.555Z`：UTCOffset 把
+///                                `184207.555` 认作带小数秒的时刻，少了这一道就拆成
+///                                (`184207`, +0000)，小数秒被悄悄丢掉
+///   UTCOffset 认整个值末尾的偏移 —— 解析不出就不拆，如 `184207+9999`、
+///                                `184207+12+0800`、`184207+1+080`
+/// 「前六位是数字」「总长 ∈ {7, 11, 12}」是这两道的推论：UTCOffset 要求偏移前面
+/// 为空或是一个完整时刻，而第 7 个字符又必须是偏移的起头，于是前文只能是 `HHMMSS`。
+///
+/// 每个漏洞都朝静默放过的方向：把源值截短总是让 carriesSameValue 更容易匹配上。
 func splitIIMTime(_ value: String) -> (time: String, offset: UTCOffset?) {
     let chars = Array(value)
-    // 不带偏移的裸 `HHMMSS` 不用单独处理：它的长度 6 本来就不在下面那组
-    // 合法总长里，会和其他不该拆的值落到同一个返回点。这里曾经有一条
-    // 「count == 6 且全是数字就原样返回」的快路径，实测去掉前后对任意
-    // 6 字符输入的结果完全一致——纯冗余，删了。
-    //
-    // `HHMMSS` 后面紧跟一个合规偏移才拆。偏移的形状与范围交给 UTCOffset 判断，
-    // 源侧与目标侧用同一把尺子——"一侧严一侧松"是上一轮漏掉的那条。
-    //
-    // 三个条件缺一不可：
-    //   总长 ∈ {7, 11, 12}  —— 否则 `184207+12+0800` 也能过：第 6 位是加号、
-    //                           尾巴那段偏移也合规，中间的 `+12` 被悄悄丢掉
-    //   第 6 位是 `+`/`-`/`Z` 之一（偏移能有的三种起头，就地写出来：曾经抽成
-    //                           UTCOffset.canBegin，但解析路径本身并不走它，
-    //                           抽出去并没有换来单一事实来源，只多一跳）
-    //                        —— 否则 `1842071+0800`（12 位，与 HHMMSS±HH:MM 同长）
-    //                           也能过，中间多出来的 `1` 被悄悄丢掉
-    //   UTCOffset 认这个偏移   —— 否则 `184207+1+080` 也能过
-    // 三个证人各自只被其中一道拦住，缺一道就有一条能溜过去。
-    // 为什么非要堵严：把源值截短**总是**让 carriesSameValue 更容易匹配上，
-    // 所以这里每一个漏洞都朝着静默放过的方向。上一轮改成按键拆，解决的是
-    // `2024-0915` 被砍成 `2024` 那一半；这是同一个失效族的另一半。
-    guard chars.count == 7 || chars.count == 11 || chars.count == 12,
-          isAllDigits(Array(chars[0..<6])),
-          chars[6] == "+" || chars[6] == "-" || chars[6] == "Z",
+    guard let seventh = chars.dropFirst(6).first,
+          seventh == "+" || seventh == "-" || seventh == "Z",
           let offset = UTCOffset(parsing: value) else { return (value, nil) }
     return (String(chars[0..<6]), offset)
 }
@@ -383,9 +372,10 @@ struct UTCOffset: Equatable {
         return false
     }
 
-    /// 按形状核对一个时刻并验范围。秒允许 60，那是闰秒。
+    /// 按形状核对一个时刻并验范围。秒允许 60，那是闰秒。`shape` 取自
+    /// timeOfDayShapes，每个都至少两个字段，所以 `parts[1]` 总在界内。
     private static func isTimeOfDay(_ value: [Character], _ shape: DigitShape) -> Bool {
-        guard let parts = numericFields(value, shape), parts.count >= 2,
+        guard let parts = numericFields(value, shape),
               parts[0] <= 23, parts[1] <= 59 else { return false }
         return parts.count == 2 || parts[2] <= 60
     }
@@ -578,9 +568,13 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
         return ["无法重新打开文件进行校验"]
     }
 
-    let before = metadataKeySpace(of: sourceImage, url: source)
-    let after = metadataKeySpace(of: destImage, url: dest)
+    return keySpaceDiff(before: metadataKeySpace(of: sourceImage, url: source),
+                        after: metadataKeySpace(of: destImage, url: dest))
+}
 
+/// 两个键空间 → 差异列表。纯函数，不碰文件：单测直接喂手搭的字典，
+/// 逐分支钉住（值变化、等价字段承载、MakerNote 汇总、易变键跳过）。
+func keySpaceDiff(before: [String: String], after: [String: String]) -> [String] {
     var issues: [String] = []
     var makerNoteLost: [String: Int] = [:]   // 伪字典名 → 丢失条目数
 
