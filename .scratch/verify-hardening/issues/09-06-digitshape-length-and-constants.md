@@ -4,11 +4,11 @@ Status: resolved
 Round: 9
 Source: Standards 基线气味（第 9 轮报告，2026-11-10T06:35Z）
 Fixed by: eac5f46
-Review: ../reviews/round-09.md
+Review: ../reviews/round-09-standards.md
 
 ## 意见原文
 
-> a shape's length is restated beside it and nothing keeps them in sync / the shape vocabulary is named only in the tests
+> **Duplicated Code / Data Clumps** — a shape's length is restated beside it and nothing keeps them in sync:
 
 ## 结论
 

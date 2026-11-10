@@ -4,7 +4,7 @@ Status: resolved
 Round: 7
 Source: Standards 4（第 7 轮报告，2026-11-10T03:43Z）
 Fixed by: cb4b42e
-Review: ../reviews/round-07.md
+Review: ../reviews/round-07-aggregate.md
 
 ## 意见原文
 

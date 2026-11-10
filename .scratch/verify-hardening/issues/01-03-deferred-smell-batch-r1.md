@@ -4,7 +4,7 @@ Status: needs-triage
 Round: 1
 Source: Standards 判断题（第 1 轮报告，2026-11-09T12:57Z）
 Fixed by: —
-Review: ../reviews/round-01.md
+Review: ../reviews/round-01-aggregate.md
 
 ## 意见原文
 

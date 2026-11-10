@@ -220,6 +220,13 @@ struct DigitShape {
     static let ymdDash = DigitShape([4, 2, 2], "-")
     static let ymdPlain = DigitShape([4, 2, 2])
     static let ymdColon = DigitShape([4, 2, 2], ":")
+
+    /// 按用途分组的清单，每张只在这里出现一次。上一版把清单写在调用点，而
+    /// `normalizedOffset(atEndOf:)` 的 `for width in [5, 6]` 更进一步，把长度也
+    /// 重述成了字面量——那正是 `length` 这个属性要消掉的东西，却漏了这一处。
+    static let timeOfDayShapes: [DigitShape] = [.hhmmssColon, .hhmmss, .hhmmColon, .hhmm]
+    static let dateShapes: [DigitShape] = [.ymdDash, .ymdPlain, .ymdColon]
+    static let offsetBodyShapes: [DigitShape] = [.hhmm, .hhmmColon]
 }
 
 /// 按形状从 `value` 里切出各字段的数值。整个 `value` 必须被形状用尽——末尾
@@ -228,10 +235,16 @@ struct DigitShape {
 ///
 /// 抽出来是因为时刻、日期、偏移三处形状解析本来各写了一遍「switch count →
 /// 查分隔符位 → 攒 digits → Int(String(...))」，连「宽度前提在本函数内成立」
-/// 那句注释都重复了三遍——不过它并没有就此只剩一处：`normalizedOffset` 里
-/// 那句「宽度前提在本函数内成立」还在，而且该在，因为那里真有一个按宽度
-/// 分支的 switch。调用点各自 guard 字段个数也是同一个道理：前提要在用它的
-/// 那一层就地立住，别寄托给别处。
+/// 那句注释都重复了三遍。
+///
+/// 那句话现在仍在 `normalizedOffset(_:)` 里，但**理由已经不是原来那个**：那里
+/// 不再有按宽度分支的 switch，而是从 `DigitShape.offsetBodyShapes` 按长度挑
+/// 形状——挑的这一步在本函数内，所以前提照样就地成立。字段个数那一半则已经
+/// 作废：调用点不再各自 guard，因为本函数保证个数恒等于 `shape.widths.count`，
+/// 而调用点用的是命名常量，字段数在常量定义处一眼可见。
+///
+/// 这段话上一版是错的——它拿「那里真有一个 switch」当留住它的理由，而删掉那个
+/// switch 的正是同一个提交。注释写成"因为 X 所以 Y"时，X 必须跟着代码一起维护。
 func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
     var fields: [Int] = []
     var i = 0
@@ -245,7 +258,9 @@ func numericFields(_ value: [Character], _ shape: DigitShape) -> [Int]? {
         // isAllDigits 在这里是承重的，不只是 Int(String) 的前置装饰：`Int` 认
         // 前导符号，`Int("+999")` 是 999。少了这一句，`+999-09-15` 会被当成一个
         // 日期，于是 `+999-09-15T18:42:07+08:00` 能读出 `+0800`——目标侧读取器
-        // 一松就是静默放过。全文件只有 isAllDigits 一处定义「ASCII 数字」。
+        // 一松就是静默放过。「ASCII 数字」这个判定只由 isAllDigits 定义；
+        // carriesSameValue 另有一处 `filter(\.isNumber)`，那是刻意更松的跨格式
+        // 比对（只会少判承载、多报丢失），不是同一个判定，别当成第二份定义。
         guard isAllDigits(digits), let n = Int(String(digits)) else { return nil }
         i += width
         fields.append(n)
@@ -312,8 +327,10 @@ struct UTCOffset: Equatable {
             // Z 本身不带数值，所以它要求前文必须是时刻（空值 `Z` 不算 UTC）。
             return isTimestamp(Array(chars.dropLast())) ? "+0000" : nil
         }
-        // `±HHMM`（宽 5）或 `±HH:MM`（宽 6）。
-        for width in [5, 6] where chars.count >= width {
+        // `±HHMM` 或 `±HH:MM`：宽度是符号加形状自己的长度，不在这里重述数字。
+        for shape in DigitShape.offsetBodyShapes {
+            let width = shape.length + 1
+            guard chars.count >= width else { continue }
             let head = Array(chars[..<(chars.count - width)])
             guard head.isEmpty || isTimestamp(head) else { continue }
             if let text = normalizedOffset(Array(chars[(chars.count - width)...])) { return text }
@@ -324,7 +341,8 @@ struct UTCOffset: Equatable {
     /// 整个 `value` 是不是一个完整的时刻。两头都锚定，不是"末尾像就算"：
     ///   `<时刻>`                 如 `184207`、`18:42`、`10:42:07`
     ///   `<日期><分隔><时刻>`      如 `2024-09-15T18:42:07`、`20240915T184207`
-    /// 日期是 `YYYY-MM-DD` 或 `YYYYMMDD`，分隔是 `T` 或空格，时刻见 isTimeOfDay。
+    /// 日期是 `YYYY-MM-DD`、`YYYYMMDD` 或 `YYYY:MM:DD`（EXIF 自己的写法，见
+    /// isDate），分隔是 `T` 或空格，时刻见 isTimeOfDay。
     ///
     /// 只凑形状、不验数值、前导只拒数字的那一版**两个方向同时错**（实测）：
     ///   松：`995999`（59 分 99 秒）、`99:99:99`、`拍摄于 18:42:07` 都算时刻
@@ -344,13 +362,14 @@ struct UTCOffset: Equatable {
            isAllDigits(Array(head[(point + 1)...])) {
             head = Array(head[..<point])
         }
-        for shape in [DigitShape.hhmmssColon, .hhmmss, .hhmmColon, .hhmm]
-        where head.count >= shape.length {
+        for shape in DigitShape.timeOfDayShapes where head.count >= shape.length {
             let width = shape.length
             guard isTimeOfDay(Array(head[(head.count - width)...]), shape) else { continue }
-            // 整个值就是时刻。4 位无分隔的与年份无法区分，不收（四种形状里只有
-            // `hhmm` 长 4，`hhmmColon` 长 5）。
-            if head.count == width { return width != 4 }
+            // 整个值就是时刻。无分隔的四位数字与年份分不开（`2024` 会被读成
+            // 20:24），不收——直接写出这个条件，不靠注释解码一个 `!= 4`。
+            if head.count == width {
+                return !(shape.separator == nil && shape.widths == [2, 2])
+            }
             let before = Array(head[..<(head.count - width)])
             guard let separator = before.last, separator == "T" || separator == " " else { continue }
             if isDate(Array(before.dropLast())) { return true }
@@ -376,7 +395,7 @@ struct UTCOffset: Equatable {
     /// 但它让本项目读得最多的那个格式成了读不出来的那个。
     /// 漏掉的原因是我按 ISO 8601 的全集列形状，而 EXIF 的日期不属于 ISO 8601。
     private static func isDate(_ value: [Character]) -> Bool {
-        for shape in [DigitShape.ymdDash, .ymdPlain, .ymdColon] {
+        for shape in DigitShape.dateShapes {
             // 不再 guard `parts.count == 3`：numericFields 保证个数恒等于
             // `shape.widths.count`，而这三个常量都是三字段的，所以那一句恒真。
             guard let parts = numericFields(value, shape) else { continue }
@@ -389,10 +408,9 @@ struct UTCOffset: Equatable {
     private static func normalizedOffset(_ token: [Character]) -> String? {
         guard let sign = token.first, sign == "+" || sign == "-" else { return nil }
         let body = Array(token.dropFirst())
-        // 宽度前提在本函数内成立，不寄托于调用方的 `for width in [5, 6]`：
-        // 形状由 body 自己的长度挑出来。上一版在这里又写了一遍「4 → 无分隔、
-        // 5 → 带冒号」，和 isTimestamp 里那张表是同一个映射的第二种写法。
-        guard let shape = [DigitShape.hhmm, .hhmmColon]
+        // 宽度前提在本函数内成立，不寄托于调用方：形状是在这里按 body 自己的
+        // 长度从 `offsetBodyShapes` 挑出来的，调用方传什么都不影响这一步。
+        guard let shape = DigitShape.offsetBodyShapes
             .first(where: { $0.length == body.count }) else { return nil }
         // ISO 8601 的偏移范围是 -12:00…+14:00（README「--verify」一节同此），
         // 分钟 < 60。约束的是**总偏移量**，不是时和分各自的上限：

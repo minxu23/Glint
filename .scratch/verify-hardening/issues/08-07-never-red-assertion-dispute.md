@@ -4,7 +4,7 @@ Status: wontfix
 Round: 8
 Source: Spec (b) 1（第 8 轮报告，2026-11-10T04:28Z）
 Fixed by: —
-Review: ../reviews/round-08.md
+Review: ../reviews/round-08-aggregate.md
 
 ## 意见原文
 

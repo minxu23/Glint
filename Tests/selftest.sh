@@ -22,7 +22,7 @@ ROUNDS=0
 # 所以整轮消失必然让条数也对不上，它没有独立覆盖。它唯一能独占抓到的是
 # 「某轮标题从 round() 改成 echo 但正文照跑」——那不破坏任何覆盖；
 # 而真该挡的「新增一轮却用 echo」它反而挡不住（ROUNDS 仍等于期望值）。
-EXPECTED_ASSERTIONS=60
+EXPECTED_ASSERTIONS=62
 EXPECTED_UNIT=220
 EXPECTED_GUI=37
 
@@ -367,6 +367,35 @@ Tests/uisnapshot "$WORK/界面.png" --convert "$WORK/界面" >/dev/null 2>&1
 want=$(./Tests/probe "$WORK/界面/拖入的照片.jpg" '{GPS}/Latitude')
 got=$(./Tests/probe "$WORK/界面/拖入的照片.heic" '{GPS}/Latitude')
 check "界面产物同样保留 GPS" "$got" "$want"
+
+round "10. 审查账本的引文逐字可核"
+# .scratch/verify-hardening 的全部价值在于「引的是审查当时的原话」。这条性质
+# 会无声腐坏：改一个字让它更顺口，账本就退回成我自己的转述，而那正是它要避免
+# 的东西（第 10 轮 Spec 轴实测 9/52 对不上，根因是 reviews/ 当时只存了聚合报告）。
+# 所以它必须有守卫，而不是靠记得。
+ledger=.scratch/verify-hardening
+unsupported=0
+checked=0
+for issue in "$ledger"/issues/*.md; do
+    [ -e "$issue" ] || break
+    quote=$(sed -n 's/^> //p' "$issue" | head -1)
+    target=$(sed -n 's|^Review: \.\./|'"$ledger"'/|p' "$issue" | head -1)
+    checked=$((checked + 1))
+    if [ -z "$quote" ] || [ -z "$target" ] || [ ! -f "$target" ]; then
+        unsupported=$((unsupported + 1)); continue
+    fi
+    # 比对前去掉 markdown 的强调记号，免得格式差异造成假阳性。
+    strip() { tr -d '`*' < "$1"; }
+    printf '%s' "$quote" | tr -d '`*' > "$WORK/quote.txt"
+    strip "$target" | grep -qF -f "$WORK/quote.txt" \
+        || unsupported=$((unsupported + 1))
+done
+[ "$checked" -gt 0 ] \
+    && pass "查了 $checked 条 issue（清单非空）" \
+    || fail "一条 issue 都没查到——账本路径对不上了"
+[ "$unsupported" -eq 0 ] \
+    && pass "每条意见原文都在它 Review: 指名的那份报告里逐字存在" \
+    || fail "$unsupported 条引文在所指报告里找不到（引文必须逐字，不能转述或删节）"
 
 echo
 # 数的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」。

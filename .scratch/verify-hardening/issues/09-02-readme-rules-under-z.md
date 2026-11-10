@@ -4,11 +4,11 @@ Status: resolved
 Round: 9
 Source: Standards 1 + Spec (c) 3（第 9 轮报告，2026-11-10T06:35Z）
 Fixed by: eac5f46
-Review: ../reviews/round-09.md
+Review: ../reviews/round-09-standards.md
 
 ## 意见原文
 
-> 冒号日期和「且时分秒各自验范围（秒允许 60）」都写在「`…Z` 那一种另有一条规则」这一段里面，但 isTimestamp 是 normalizedOffset(atEndOf:) 两条分支共用的
+> `## --verify 到底比什么` is the normative description of what `--verify` compares. The new clause is nested **inside the Z-only rule**:
 
 ## 结论
 

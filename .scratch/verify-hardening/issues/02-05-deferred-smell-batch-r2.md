@@ -4,7 +4,7 @@ Status: needs-triage
 Round: 2
 Source: Standards 判断题 + Spec 5（第 2 轮报告，2026-11-09T13:48Z）
 Fixed by: —
-Review: ../reviews/round-02.md
+Review: ../reviews/round-02-aggregate.md
 
 ## 意见原文
 

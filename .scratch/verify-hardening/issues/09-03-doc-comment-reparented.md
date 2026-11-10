@@ -4,11 +4,11 @@ Status: resolved
 Round: 9
 Source: Standards 2 + Spec (c) 1（第 9 轮报告，2026-11-10T06:35Z）
 Fixed by: eac5f46
-Review: ../reviews/round-09.md
+Review: ../reviews/round-09-spec.md
 
 ## 意见原文
 
-> One contiguous `///` block opening `/// UTC 偏移…` is attached to `struct DigitShape`
+> One contiguous `///` block opening `/// UTC 偏移，归一化成「符号 + HHMM」…做成类型而不是继续传裸 String` is attached to `struct DigitShape` (line 205).
 
 ## 结论
 

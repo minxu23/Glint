@@ -4,7 +4,7 @@ Status: resolved
 Round: 9
 Source: Spec (a)（第 9 轮报告，2026-11-10T06:35Z）
 Fixed by: eac5f46
-Review: ../reviews/round-09.md
+Review: ../reviews/round-09-spec.md
 
 ## 意见原文
 

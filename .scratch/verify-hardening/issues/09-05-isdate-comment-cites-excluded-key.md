@@ -4,11 +4,11 @@ Status: resolved
 Round: 9
 Source: Standards 3（第 9 轮报告，2026-11-10T06:35Z）
 Fixed by: eac5f46
-Review: ../reviews/round-09.md
+Review: ../reviews/round-09-standards.md
 
 ## 意见原文
 
-> `isDate` 的论据说 `{TIFF}/DateTime` 实际写的就是 `2024:09:15 18:42:07`，而 README 说 `别的时间戳（xmp:ModifyDate、tiff:DateTime 之类）不算`
+> `isDate`'s justification says `{TIFF}/DateTime` 实际写的就是 `2024:09:15 18:42:07`, but README says `别的时间戳（xmp:ModifyDate、tiff:DateTime 之类）不算`. Cite only `{Exif}/DateTimeOriginal`.
 
 ## 结论
 

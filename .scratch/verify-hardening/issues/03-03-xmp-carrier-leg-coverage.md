@@ -4,7 +4,7 @@ Status: resolved
 Round: 3
 Source: Spec (a)（第 3 轮报告，2026-11-09T14:22Z）
 Fixed by: (git init 之前)
-Review: ../reviews/round-03.md
+Review: ../reviews/round-03-aggregate.md
 
 ## 意见原文
 
