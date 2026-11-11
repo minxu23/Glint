@@ -15,7 +15,8 @@ GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间�
                            默认输出到源文件同一目录
   -r, --recursive          递归处理目录中的所有 JPEG
   -f, --overwrite          覆盖已存在的输出文件
-      --delete-original    删除源 JPEG（会自动先做 --verify，只有完全无损才删）
+      --delete-original    删除源 JPEG（会自动先做 --verify，只有完全无损、
+                           且 HEIF 不比原图大才删）
       --verify             转换后逐条比对元数据，报告任何丢失或变化的条目
   -n, --dry-run            只打印将要做什么，不实际写文件
   -j, --jobs <n>           并发任务数，默认 \(ProcessInfo.processInfo.activeProcessorCount)
@@ -81,7 +82,7 @@ let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result 
         let prefix = opts.dryRun ? "[预演] " : ""
         var line = "\(prefix)\(input.lastPathComponent) → \(displayName(r.dest))"
         if !opts.dryRun, let pct = r.savingPercent {
-            line += "  \(humanSize(r.inBytes)) → \(humanSize(r.outBytes)) (省 \(pct)%)"
+            line += "  \(humanSize(r.inBytes)) → \(humanSize(r.outBytes)) (\(pct >= 0 ? "省 \(pct)" : "大 \(-pct)")%)"
         }
         print(line)
         if opts.verbose {

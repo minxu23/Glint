@@ -8,8 +8,8 @@ import Foundation
 
 // MARK: - TIFF/EXIF 结构
 
-/// JPEG 里 APP1 `Exif\0\0` 段内的 TIFF 结构。偏移都相对 TIFF 头，与 EXIF 内部的
-/// 偏移体系一致；越界的读取一律返回 nil。
+/// 一段 EXIF 数据里的 TIFF 结构（JPEG 的 APP1 `Exif\0\0` 段，或 HEIF 的 Exif 项）。
+/// 偏移都相对 TIFF 头，与 EXIF 内部的偏移体系一致；越界的读取一律返回 nil。
 struct TIFFStructure {
     let bytes: [UInt8]
     /// TIFF 头在 `bytes` 里的起点。
@@ -26,8 +26,12 @@ struct TIFFStructure {
               let app1 = layout.segments.first(where: { $0.marker == 0xE1 && $0.begins(with: exifID, in: bytes) })
         else { return nil }
         let base = app1.payload.lowerBound + exifID.count
-        let length = app1.payload.upperBound - base
-        guard length > 8 else { return nil }
+        self.init(bytes, base: base, length: app1.payload.upperBound - base)
+    }
+
+    /// `bytes[base..<base+length]` 是一段以 TIFF 头开头的数据；头不合法或范围越界就是 nil。
+    init?(_ bytes: [UInt8], base: Int, length: Int) {
+        guard base >= 0, length > 8, base <= bytes.count - length else { return nil }
         switch (bytes[base], bytes[base + 1]) {
         case (0x4D, 0x4D): bigEndian = true
         case (0x49, 0x49): bigEndian = false
@@ -66,18 +70,22 @@ struct TIFFStructure {
     struct Entry {
         let tag: Int
         let type: Int
+        /// 条目里写的值个数（不是字节数）。
+        let count: Int
         let field: (offset: Int, size: Int)?
     }
 
+    /// TIFF 类型码 → 每个值的字节数；不认识的类型是 0。13 是 IFD（4 字节偏移）。
+    static let unitSize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4]
+
     /// 某个 IFD 的全部条目，按表里的顺序。条目头本身越界就停在那里。
     func entries(_ ifd: Int) -> [Entry] {
-        let unitSize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8]
         guard let count = u16(ifd), count > 0, count < 4096 else { return [] }
         var result: [Entry] = []
         for k in 0..<count {
             let entry = ifd + 2 + k * 12
             guard let tag = u16(entry), let type = u16(entry + 2), let n = u32(entry + 4) else { break }
-            let unit = type < unitSize.count ? unitSize[type] : 0
+            let unit = type < TIFFStructure.unitSize.count ? TIFFStructure.unitSize[type] : 0
             var field: (offset: Int, size: Int)?
             if unit > 0, n > 0, n < length {
                 let size = unit * n
@@ -85,7 +93,7 @@ struct TIFFStructure {
                 let offset = size > 4 ? (u32(entry + 8) ?? -1) : entry + 8
                 if offset >= 0, offset + size <= length { field = (offset, size) }
             }
-            result.append(Entry(tag: tag, type: type, field: field))
+            result.append(Entry(tag: tag, type: type, count: n, field: field))
         }
         return result
     }

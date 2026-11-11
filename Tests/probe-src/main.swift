@@ -22,6 +22,8 @@ let usage = """
           probe --aux-tags <文件> <辅助图类型>       辅助图附带的元数据标签，一行一个
           probe --aux-diff <源> <产物> <辅助图类型>  两边辅助图数据的最大差（8 位级数）
           probe --headroom <文件>                    按 HDR 解码的内容余量
+          probe --hdr-peak <文件>                    按 HDR 解码后最亮的线性亮度
+          probe --aux-items <文件.heic>              HEIF 里辅助图项的个数（iref 的 auxl 条数）
     辅助图类型是 kCGImageAuxiliaryDataType 后面那一截，如 HDRGainMap、Depth。
     """
 func die(_ message: String) -> Never {
@@ -29,9 +31,24 @@ func die(_ message: String) -> Never {
     exit(2)
 }
 
+// HEIF 里有几个辅助图项：数 meta → iref 里的 auxl 引用（每个辅助图项一条，指向主图）。
+// ImageIO 的视图每种辅助图只给一份，同一张增益图写了两份在那里看不出来，只能数盒子。
+if args.first == "--aux-items", args.count == 2 {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+          case .success(let children) = heifMetaChildren([UInt8](data)) else { print("<无法读取>"); exit(1) }
+    let bytes = [UInt8](data)
+    guard let iref = children.first(where: { $0.type == "iref" }) else { print(0); exit(0) }
+    // iref 是 FullBox：1 字节版本、3 字节标志，之后是一串引用盒子。
+    guard iref.content.count >= 4,
+          let references = heifBoxes(bytes, in: (iref.content.lowerBound + 4)..<iref.content.upperBound)
+    else { print("<无法读取>"); exit(1) }
+    print(references.filter { $0.type == "auxl" }.count)
+    exit(0)
+}
+
 // 辅助图与 HDR 的几种问法。读不出来一律打印哨兵（<无> 或 <无法读取>），selftest 的
 // check_same 拒绝拿哨兵当期望值。
-if let mode = args.first, ["--aux", "--aux-tags", "--aux-diff", "--headroom"].contains(mode) {
+if let mode = args.first, ["--aux", "--aux-tags", "--aux-diff", "--headroom", "--hdr-peak"].contains(mode) {
     let operands = Array(args.dropFirst())
     func source(_ path: String) -> CGImageSource {
         guard let s = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
@@ -101,6 +118,32 @@ if let mode = args.first, ["--aux", "--aux-tags", "--aux-diff", "--headroom"].co
                                                           [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary)
         else { print("<无法读取>"); exit(1) }
         print(String(format: "%.2f", image.contentHeadroom))
+    case ("--hdr-peak", 1):
+        // 内容余量只是增益图元数据里写的数，增益图本身坏了它照样是那个数；按 HDR 解码
+        // 出来的像素才说明增益图真的在起作用。画进扩展范围的线性 Display P3，取最亮
+        // 像素的亮度（Rec. 709 系数），单位是 SDR 白的倍数，打印成百分数的整数。
+        guard #available(macOS 15.0, *),
+              let image = CGImageSourceCreateImageAtIndex(source(operands[0]), 0,
+                                                          [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary),
+              let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        else { print("<无法读取>"); exit(1) }
+        let w = image.width, h = image.height
+        var pixels = [Float](repeating: 0, count: w * h * 4)
+        let drawn = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 32, bytesPerRow: w * 16,
+                                      space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                                          | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+            else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { print("<无法读取>"); exit(1) }
+        var peak: Float = 0
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            peak = max(peak, 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2])
+        }
+        print(Int((peak * 100).rounded()))
     default:
         die(usage)
     }

@@ -17,9 +17,9 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=153
-EXPECTED_UNIT=338
-EXPECTED_GUI=41
+EXPECTED_ASSERTIONS=197
+EXPECTED_UNIT=413
+EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -536,6 +536,9 @@ while IFS='|' read -r what type flags; do
         || fail "$what：数据与源的最大差是 [$diff]，上界 $AUX_MAX_DIFF"
     check_same "$what：附带元数据的标签与源相同" \
         "$(./Tests/probe --aux-tags "$heic" "$type")" "$(./Tests/probe --aux-tags "$ref" "$type")"
+    # ImageIO 的视图每种辅助图只给一份；同一张图写了两份（增益图既随主图带、又单独加一次）
+    # 只能数 HEIF 里的辅助图项。
+    check "$what：产物里只有 1 个辅助图项" "$(./Tests/probe --aux-items "$heic")" "1"
 done <<'EOF'
 深度图|Depth|--aux depth
 视差图|Disparity|--aux disparity
@@ -571,13 +574,143 @@ expect_reported "EOI 之后是预览图" "$WORK/辅助图/带预览图.jpg" \
 ./Tests/fixture --aux gainmap "$WORK/辅助图/辅助图加尾巴.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --append "$WORK/辅助图/辅助图加尾巴.jpg" "动态照片的视频放在这里"
 expect_reported "辅助图后面另有数据" "$WORK/辅助图/辅助图加尾巴.jpg" "丢失 EOI 之后的 33 字节（尾部共 "
+# 增益图随主图一起写（排在别的辅助图前面），别的辅助图逐个加，产物里的先后与源不同。
+# 校验按辅助图类型对齐，不能因为换了顺序报一串变化。
+./Tests/fixture --aux depth --aux matte --aux gainmap "$WORK/辅助图/三种.jpg" >/dev/null
+out=$("$BIN" --verify "$WORK/辅助图/三种.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "深度图、蒙版、增益图同在：校验通过" \
+    || { fail "深度图、蒙版、增益图同在却报了差异"; sed 's/^/     /' <<< "$out"; }
+
+round "7f. 3 通道的 ISO 增益图"
+# 手机 HDR 照片的增益图可以是 3 通道的（像素格式 '420f'）。ImageIO 取出的字典里没有
+# 数据键，交给 AddAuxiliaryDataInfo 时收尾照样成功、产物里却没有增益图；要靠
+# PreserveGainMap 带过去。单通道的 ISO 增益图同一条路，一并验。
+mkdir -p "$WORK/ISO增益图/源副本"
+./Tests/fixture --iso-gainmap "$WORK/ISO增益图/单通道.jpg" >/dev/null || fail "造不出带 ISO 增益图的样本"
+cp "$WORK/ISO增益图/单通道.jpg" "$WORK/ISO增益图/彩色.jpg"
+make_sample ./Tests/mangle-tool --color-gainmap "$WORK/ISO增益图/彩色.jpg"
+check "前提：彩色那张的增益图像素格式是 420f（875704422）" \
+    "$(./Tests/probe --aux "$WORK/ISO增益图/彩色.jpg" ISOGainMap)" "600x450 875704422"
+check "前提：单通道那张的增益图像素格式是 L008（1278226488）" \
+    "$(./Tests/probe --aux "$WORK/ISO增益图/单通道.jpg" ISOGainMap)" "600x450 1278226488"
+for what in 彩色 单通道; do
+    f="$WORK/ISO增益图/$what.jpg" ref="$WORK/ISO增益图/源副本/$what.jpg"
+    cp "$f" "$ref"
+    check "$what：前提，源按 HDR 解码的内容余量" "$(./Tests/probe --headroom "$ref")" "4.00"
+    # 校验通过同时说明主图里的 ISO 21496 版本标记段不再报成丢失。
+    out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过（含 ISO 21496 版本标记段不报）" \
+        || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    refute "$what：校验通过后删了源" "$st" test -e "$f"
+    heic="${f%.jpg}.heic"
+    check_same "$what：产物里有 ISO 增益图，尺寸与像素格式相同" \
+        "$(./Tests/probe --aux "$heic" ISOGainMap)" "$(./Tests/probe --aux "$ref" ISOGainMap)"
+    check_same "$what：产物按 HDR 解码的内容余量与源相同" \
+        "$(./Tests/probe --headroom "$heic")" "$(./Tests/probe --headroom "$ref")"
+    # 余量只是元数据里的数；按 HDR 解码出来的最亮像素才说明增益图在起作用。
+    # 单位是 SDR 白的百分之一；没有增益图时只剩 SDR 的亮度（这张图上约 80）。
+    peak_src=$(./Tests/probe --hdr-peak "$ref") peak_dst=$(./Tests/probe --hdr-peak "$heic")
+    if [[ "$peak_src" =~ ^[0-9]+$ && "$peak_dst" =~ ^[0-9]+$ ]] && [ "$peak_src" -gt 200 ] \
+        && [ $(( (peak_dst - peak_src) * (peak_dst - peak_src) * 100 )) -le $(( peak_src * peak_src )) ]; then
+        pass "$what：按 HDR 解码的最亮值与源相差不到 10%（$peak_src → $peak_dst）"
+    else
+        fail "$what：按 HDR 解码的最亮值 [$peak_src] → [$peak_dst]，源要明显高于 SDR、两边相差不到 10%"
+    fi
+done
+# 版本标记段只在产物里真有 ISO 增益图时才算带过去。截掉增益图（EOI 之后），只剩主图里
+# 孤立的标记段——真实照片里也有这样的——必须照报。
+cp "$WORK/ISO增益图/源副本/单通道.jpg" "$WORK/ISO增益图/只有标记段.jpg"
+make_sample ./Tests/mangle-tool --strip-trailer "$WORK/ISO增益图/只有标记段.jpg"
+check "前提：截掉之后源里没有增益图" "$(./Tests/probe --aux "$WORK/ISO增益图/只有标记段.jpg" ISOGainMap)" "<无>"
+expect_reported "只有 ISO 21496 标记段、没有增益图" "$WORK/ISO增益图/只有标记段.jpg" \
+    "丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，32 字节）"
+
+round "7g. ImageIO 读不出的 EXIF 标签"
+# 两边都走 ImageIO 视图时，ImageIO 在源一侧就读不出的标签两边都看不见。原始清点直接
+# 读两边的 TIFF 结构。必须报：ASCII 类型的 GPSProcessingMethod、LONG 类型的 LightSource、
+# 不认识的私有标签、放在 Exif 子 IFD 里的 DocumentName（实测 ImageIO 不读它，也不会把它
+# 挪到 IFD0）、重复三次的短 MakerNote（合成一行）。
+./Tests/fixture "$WORK/读不出的标签.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$WORK/读不出的标签.jpg" 'gps:001B:ascii=CELLID' 'exif:9208:long=0' \
+    'exif:C000:ascii=私有串' 'exif:010D:ascii=放错位置的文档名' \
+    'exif:927C:undef=J' 'exif:927C:undef=##**N4206_vivi' 'exif:927C:undef=Auto'
+expect_reported "ImageIO 读不出的 EXIF 标签" "$WORK/读不出的标签.jpg" \
+    '丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELLID"）——类型不合规范' \
+    '丢失 EXIF 标签 LightSource（ExifIFD 0x9208，LONG，0）——类型不合规范' \
+    '丢失 EXIF 标签 未知标签（ExifIFD 0xC000，ASCII，"私有串"）' \
+    '丢失 EXIF 标签 DocumentName（ExifIFD 0x010D，ASCII，"放错位置的文档名"）——放错了 IFD' \
+    '丢失 EXIF 标签 MakerNote（ExifIFD 0x927C，UNDEFINED，"J"、"##**N4206_vivi"、"Auto"，同号条目 3 个）'
+# 必须不报：没有数据的条目（长度 0 的 DocumentName、类型 0 长度 0 的空条目、8 字节全 0
+# 字符集头加 248 个空格的 UserComment）。同一张图里另放一个必须报的 LightSource，差异
+# 恰好一处——证明清点确实跑了，只是把空条目滤掉了。
+./Tests/fixture "$WORK/空条目.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$WORK/空条目.jpg" 'exif:010D:ascii=' 'exif:0000:none=' \
+    "exif:9286:undef=$(printf '\\0%.0s' 1 2 3 4 5 6 7 8)$(printf '%248s' '')" 'exif:9208:long=0'
+out=$("$BIN" --verify "$WORK/空条目.jpg" 2>&1)
+grep -q "发现 1 处差异" <<< "$out" && grep -qF "LightSource（ExifIFD 0x9208" <<< "$out" \
+    && pass "没有数据的条目不报，同一张图里该报的照报（恰好 1 处）" \
+    || { fail "空条目被报了，或该报的没报"; sed 's/^/     /' <<< "$out"; }
+
+round "7h. GPS 按原始分数比"
+# 源的秒存成分母 1000000 的分数，HEIF 写入器存成分母 100。ImageIO 视图里的经度只在截断
+# 跨过它的舍入档时才变——这一张的 XMP/exif:GPSLongitude 恰好会变，用来证明同一处变化
+# 只报原始分数那一行。
+./Tests/fixture "$WORK/GPS精度.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$WORK/GPS精度.jpg" 'gps:0004:rational=120/1,8/1,55304567/1000000'
+cp "$WORK/GPS精度.jpg" "$WORK/GPS精度副本.jpg"
+out=$("$BIN" --verify "$WORK/GPS精度.jpg" 2>&1); st=$?
+grep -qF "变化 GPS 经度：120°8′55.304567″ → 120°8′55.3″（HEIF 写入器只保留到 1/100 秒）" <<< "$out" \
+    && pass "GPS 经度按原始分数报出截断" \
+    || { fail "GPS 经度的截断没报出来"; sed 's/^/     /' <<< "$out"; }
+v_src=$(./Tests/probe "$WORK/GPS精度副本.jpg" 'XMP/exif:GPSLongitude')
+v_dst=$(./Tests/probe "$WORK/GPS精度.heic" 'XMP/exif:GPSLongitude')
+[ -n "$v_src" ] && [ "$v_src" != "<无>" ] && [ "$v_src" != "$v_dst" ] \
+    && pass "前提：ImageIO 视图里同一处也变了（$v_src → $v_dst）" \
+    || fail "前提不成立：视图里的经度没变（[$v_src] → [$v_dst]），去重那条测不到"
+refute "同一处变化不在视图那边重复报" "$st" grep -qE "GPSLongitude|\{GPS\}/Longitude" <<< "$out"
+grep -q "发现 1 处差异" <<< "$out" && pass "这张图恰好 1 处差异" || { fail "差异条数不是 1"; sed 's/^/     /' <<< "$out"; }
+# 秒本来就是分母 100 的源：写入器原样写下，不报。
+./Tests/fixture "$WORK/GPS百分秒.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$WORK/GPS百分秒.jpg" 'gps:0002:rational=30/1,14/1,3251/100'
+out=$("$BIN" --verify "$WORK/GPS百分秒.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "秒是分母 100 的 GPS 不报" || { fail "分母 100 的 GPS 报了差异"; sed 's/^/     /' <<< "$out"; }
+
+round "7i. 产物比原图大"
+# 噪声图按质量 0.2 存的 JPEG，转出来稳定地变大（--noise 夹具）。提示要出现；
+# --delete-original 下校验通过也不删源，并说明原因；批量汇总单列变大的个数。
+./Tests/fixture --noise "$WORK/变大.jpg" >/dev/null
+out=$("$BIN" --delete-original "$WORK/变大.jpg" 2>&1); st=$?
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "前提：变大的那张校验通过（不删只因为变大）" || { fail "变大的那张校验没通过"; sed 's/^/     /' <<< "$out"; }
+grep -qE "HEIF 比原图大 [0-9]+%" <<< "$out" && pass "提示 HEIF 比原图大" || { fail "没提示变大"; sed 's/^/     /' <<< "$out"; }
+grep -qF "因产物比原图大，保留了源文件" <<< "$out" && pass "说明为什么没删源" || fail "没说明为什么没删源"
+refute "变大时不删源" "$st" test ! -f "$WORK/变大.jpg"
+grep -qF "1 个比原图大" <<< "$out" && pass "汇总单列变大的个数" || fail "汇总里没有变大的个数"
+
+round "7j. 带辅助图的 4:2:2 照片"
+# 带辅助图的 JPEG 才有 {FileContents}；4:2:2 的源转成 HEIF 是 4:2:0，这是编码参数，
+# 不报。ImageIO 重新编码 JPEG 只会出 4:2:0 或 4:4:4，所以拿 4:2:2 的相机照片，原样接上
+# 夹具的深度图。
+./Tests/fixture --aux depth "$WORK/深度图供体.jpg" >/dev/null
+cp test_pic/P1130939.JPG "$WORK/四二二.jpg"
+make_sample ./Tests/mangle-tool --graft-aux "$WORK/四二二.jpg" "$WORK/深度图供体.jpg"
+check "前提：源是 4:2:2" "$(./Tests/probe "$WORK/四二二.jpg" '{FileContents}/Images[0]/ChromaSubsampling')" "4:2:2"
+check "前提：源里接上了深度图" "$(./Tests/probe --aux "$WORK/四二二.jpg" Depth)" "150x120 1717855600"
+out=$("$BIN" --verify "$WORK/四二二.jpg" 2>&1); st=$?
+check "前提：产物是 4:2:0" "$(./Tests/probe "$WORK/四二二.heic" '{FileContents}/Images[0]/ChromaSubsampling')" "4:2:0"
+refute "色度抽样不报" "$st" grep -qF "ChromaSubsampling" <<< "$out"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，
 # 模态面板没法自动化，而 ConversionModel 覆盖的是同一套逻辑。
 mkdir -p "$WORK/界面模型/源" "$WORK/界面模型/取消" "$WORK/界面模型/中途取消" \
-         "$WORK/界面模型/递归/子目录" "$WORK/界面模型/未校验"
+         "$WORK/界面模型/递归/子目录" "$WORK/界面模型/未校验" "$WORK/界面模型/变大"
 ./Tests/fixture "$WORK/界面模型/源/一.jpg" >/dev/null
+# 转出来必然变大的那张：校验通过、勾着删源也不能删
+./Tests/fixture --noise "$WORK/界面模型/变大/噪声.jpg" >/dev/null
 # 关掉校验时必然丢数据的那张，不能显示「校验无差异」
 ./Tests/fixture --lossy "$WORK/界面模型/未校验/有损.jpg" >/dev/null
 ./Tests/fixture "$WORK/界面模型/源/二.jpg" >/dev/null

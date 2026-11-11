@@ -33,8 +33,8 @@ struct FileRow {
     var outBytes = 0
     var dest: URL?
     var verification: Verification = .notVerified
-    /// 转换成功、但有一句与元数据差异无关的说明（目前只有"校验未通过所以
-    /// 没删源文件"）。跳过/失败的原因不在这里，在 status 里。
+    /// 转换成功、但有与元数据差异无关的说明（产物比原图大、没删源文件的原因，
+    /// 即 ConversionReport.note）。跳过/失败的原因不在这里，在 status 里。
     var note = ""
     var tagCount = 0
     var xattrCount = 0

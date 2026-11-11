@@ -428,7 +428,7 @@ final class MainViewController: NSViewController {
         guard model.options.deleteOriginal else { model.start(); return }
         let alert = NSAlert()
         alert.messageText = "转换后删除源 JPEG？"
-        alert.informativeText = "每张图会先逐条比对元数据，只有确认完全无损才删除对应的源文件；有任何差异的会被保留。"
+        alert.informativeText = "每张图会先逐条比对元数据，只有确认完全无损才删除对应的源文件；有任何差异的会被保留，转出来比原图大的也会被保留。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "删除源文件")
         alert.addButton(withTitle: "取消")

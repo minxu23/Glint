@@ -321,6 +321,7 @@ struct BatchTally {
     var skipped = 0
     var failed = 0
     var flagged = 0          // 转换成功但元数据有差异
+    var grew = 0             // 转换成功但产物比原图大（判据见 growthPercent）
     var inBytes = 0
     var outBytes = 0
 
@@ -342,6 +343,7 @@ struct BatchTally {
         inBytes += bytes
         outBytes += out
         if hasIssues { flagged += 1 }
+        if growthPercent(inBytes: bytes, outBytes: out) != nil { grew += 1 }
     }
 
     /// - Parameter unit: 量词。命令行说"个"，界面说"张"。
@@ -350,8 +352,9 @@ struct BatchTally {
         if skipped > 0 { parts.append("跳过 \(skipped) \(unit)") }
         if failed > 0 { parts.append("失败 \(failed) \(unit)") }
         if flagged > 0 { parts.append("\(flagged) \(unit)有元数据差异") }
+        if grew > 0 { parts.append("\(grew) \(unit)比原图大") }
         if let pct = percentSaved(inBytes: inBytes, outBytes: outBytes) {
-            parts.append("总计 \(humanSize(inBytes)) → \(humanSize(outBytes))，节省 \(pct)%")
+            parts.append("总计 \(humanSize(inBytes)) → \(humanSize(outBytes))，" + (pct >= 0 ? "节省 \(pct)%" : "增大 \(-pct)%"))
         }
         return parts.joined(separator: "，")
     }

@@ -249,4 +249,27 @@ if unverified.count == 1 {
     fail("「未校验」目录里应当恰好有一张 --lossy 夹具（实际 \(unverified.count) 张）")
 }
 
+// MARK: - 8. 产物比原图大
+
+// 一张转出来必然变大的图（--noise 夹具），勾着「校验无损后删除源文件」：校验通过，
+// 副标题要说出变大了、没删源，源文件要还在，汇总里单列变大的张数。
+print("界面模型：产物比原图大")
+let growing = files(in: work.appendingPathComponent("变大"), ext: "jpg")
+if growing.count == 1 {
+    let m8 = ConversionModel()
+    m8.updateOptions { $0.deleteOriginal = true }
+    m8.add(urls: growing)
+    m8.start()
+    check(wait(until: { !m8.isRunning }), "变大的那一张走完了流程")
+    let row = m8.rows.first
+    check("校验通过（不删源只因为变大）", row?.verification, .passed)
+    check(row.map { $0.outBytes > $0.inBytes } == true, "前提：产物确实比原图大")
+    check(row?.detailText.contains("HEIF 比原图大") == true, "副标题说出产物比原图大（\(row?.detailText ?? "")）")
+    check(row?.detailText.contains("因产物比原图大，保留了源文件") == true, "副标题说明为什么没删源")
+    check(fm.fileExists(atPath: growing[0].path), "源文件还在")
+    check(m8.summary.contains("1 张比原图大"), "汇总单列变大的张数（\(m8.summary)）")
+} else {
+    fail("「变大」目录里应当恰好有一张 --noise 夹具（实际 \(growing.count) 张）")
+}
+
 finish("界面模型测试")

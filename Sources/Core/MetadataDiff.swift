@@ -143,6 +143,19 @@ func isThumbnailKey(_ key: String) -> Bool {
     thumbnailKeys.contains(strippingAllArrayIndices(key))
 }
 
+/// `{FileContents}` 里描述主图编码方式的键，同样去掉每一层的数组下标后按完整键路径比对，
+/// 理由同 volatileKeys。带辅助图的 JPEG 在 `{FileContents}/Images[n]/` 下列出的键实测有
+/// ImageIndex、Width、Height、Orientation、NamedColorSpace、ChromaSubsampling、FlexRange
+/// （以及 AuxiliaryData、DerivationDetails、ThumbnailImages 三组）。只收 ChromaSubsampling：
+/// 4:2:2 的源转成 HEIF 后是 4:2:0，这是编码参数，和 Compression 同类。宽高、方向、色彩
+/// 空间描述的是照片怎么显示，照常比；FlexRange 的含义 SDK 里没有说明，各样本两边也都
+/// 相同，不忽略。
+let fileContentsEncodingKeys: Set<String> = ["{FileContents}/Images/ChromaSubsampling"]
+
+func isFileContentsEncodingKey(_ key: String) -> Bool {
+    fileContentsEncodingKeys.contains(strippingAllArrayIndices(key))
+}
+
 /// JPEG 的 IPTC-IIM 段在 HEIF 里没有对应容器，但同样的信息由 XMP 或 EXIF 承载：
 /// IIM 键 → 目标里可能承载它的那几个键。判据见 equivalentCarries。
 let equivalentKeys: [String: [String]] = {
@@ -575,10 +588,45 @@ func metadataKeySpace(of image: CGImageSource, url: URL,
                       repairing: Bool = true) -> [String: String] {
     var flat: [String: String] = [:]
     flatten(repairing ? repairedProperties(image, url: url) : imageProperties(image), into: &flat)
+    flat = keyingAuxiliaryDataByType(flat)
     if let m = CGImageSourceCopyMetadataAtIndex(image, 0, nil) {
         flat.merge(xmpTags(m)) { a, _ in a }
     }
     return flat
+}
+
+/// `{FileContents}/Images[n]/AuxiliaryData[i]/…` 里的 `[i]` 换成这张辅助图的类型：
+/// `{FileContents}/Images[0]/AuxiliaryData[Depth]/Width`。辅助图在产物里的先后不由源决定
+/// （增益图随主图一起写，排在别的辅助图前面），按下标比，同一组辅助图换个顺序就会被报成
+/// 一串「变化」。每种类型至多一张；读不出类型、或同一张图里类型重复时那一组照旧用下标。
+func keyingAuxiliaryDataByType(_ flat: [String: String]) -> [String: String] {
+    let marker = "/AuxiliaryData["
+    func split(_ key: String) -> (head: String, index: String, tail: String)? {
+        guard key.hasPrefix("{FileContents}/Images["), let m = key.range(of: marker),
+              let close = key[m.upperBound...].firstIndex(of: "]") else { return nil }
+        let index = String(key[m.upperBound..<close])
+        guard isAllDigits(Array(index)) else { return nil }
+        return (String(key[..<m.lowerBound]), index, String(key[key.index(after: close)...]))
+    }
+    var names: [String: String] = [:]          // head + 下标 → 类型名
+    var seen: [String: Set<String>] = [:]      // head → 已出现的类型名
+    var duplicated = Set<String>()
+    for (key, value) in flat {
+        guard let (head, index, tail) = split(key), tail == "/AuxiliaryDataType" else { continue }
+        let name = value.hasPrefix("kCGImageAuxiliaryDataType") ? String(value.dropFirst(25)) : value
+        if seen[head, default: []].insert(name).inserted == false { duplicated.insert(head) }
+        names[head + "#" + index] = name
+    }
+    var result: [String: String] = [:]
+    for (key, value) in flat {
+        if let (head, index, tail) = split(key), !duplicated.contains(head),
+           let name = names[head + "#" + index], !name.isEmpty {
+            result[head + marker + name + "]" + tail] = value
+        } else {
+            result[key] = value
+        }
+    }
+    return result
 }
 
 /// 比对源与目标的元数据，返回丢失/变化的条目描述。
@@ -590,16 +638,33 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     guard let data = try? Data(contentsOf: source, options: .mappedIfSafe) else {
         return ["无法重新读取源文件进行校验"]
     }
+    guard let destData = try? Data(contentsOf: dest, options: .mappedIfSafe) else {
+        return ["无法重新读取产物进行校验"]
+    }
     let bytes = [UInt8](data)
     // 源侧的时间字段以原始字节为准，覆盖属性视图里被调和过的值（见 RawTimes.swift）。
     let before = metadataKeySpace(of: sourceImage, url: source)
         .merging(rawTimeFields(of: bytes)) { _, raw in raw }
     let after = metadataKeySpace(of: destImage, url: dest)
-    // 后三项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
-    return keySpaceDiff(before: before, after: after)
+    // 原始 EXIF 清点先做：它报出的 GPS 分数变化，键空间比对里同一处的视图键不再重复报；
+    // 键空间比对已经报了丢失的标签，它也不再重复报。
+    let raw = rawExifDiff(source: bytes, dest: [UInt8](destData),
+                          viewLosses: keySpaceLosses(before: before, after: after),
+                          makerNoteReported: makerNoteLost(before: before, after: after))
+    // 后几项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
+    return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
+        + raw.issues
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after)
-        + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage))
+        + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
+                             isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
         + unportablePhotoshopResources(in: bytes)
+}
+
+/// 源和产物里都有 ISO 增益图。系统低于 macOS 15 时 ImageIO 不认这一类，一律是 false。
+func isoGainMapInBoth(source: CGImageSource, dest: CGImageSource) -> Bool {
+    guard #available(macOS 15.0, *) else { return false }
+    return CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil
+        && CGImageSourceCopyAuxiliaryDataInfoAtIndex(dest, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil
 }
 
 /// 源和产物里都有的辅助图的宽高：同一类型、宽高与像素格式都相同才算。尾部记账
@@ -628,22 +693,53 @@ func xmpTimeCarried(key: String, _ source: String, _ target: String) -> Bool {
     return s.isCarried(by: t)
 }
 
+/// 键空间比对怎么处置源里的一个键。keySpaceDiff 和下面两个问询共用这一处判定，
+/// 原始 EXIF 清点据此知道哪些丢失已经报过，不会和键空间比对各说一套。
+private enum KeyFate {
+    case skipped, carried, makerNote(String), lost, compared
+}
+
+private func fate(of k: String, _ v: String, after: [String: String]) -> KeyFate {
+    if isVolatile(k) || isThumbnailKey(k) || isFileContentsEncodingKey(k) { return .skipped }
+    guard after[k] == nil else { return .compared }
+    if equivalentCarries(key: k, value: v, in: after) { return .carried }
+    if let group = makerNoteGroup(of: k) { return .makerNote(group) }
+    return .lost
+}
+
+/// keySpaceDiff 会逐条报成「丢失」的键，去掉了数组下标。
+func keySpaceLosses(before: [String: String], after: [String: String]) -> Set<String> {
+    Set(before.filter { k, v in if case .lost = fate(of: k, v, after: after) { return true }; return false }
+        .keys.map(strippingAllArrayIndices))
+}
+
+/// keySpaceDiff 会出 MakerNote 汇总行。
+func makerNoteLost(before: [String: String], after: [String: String]) -> Bool {
+    before.contains { k, v in if case .makerNote = fate(of: k, v, after: after) { return true }; return false }
+}
+
 /// 两个键空间 → 差异列表。纯函数，不碰文件：单测直接喂手搭的字典，
 /// 逐分支钉住（值变化、等价字段承载、MakerNote 汇总、易变键跳过）。
-func keySpaceDiff(before: [String: String], after: [String: String]) -> [String] {
+///
+/// `covered`：原始 EXIF 清点已经报过的视图键（去掉数组下标后比），这里不再报，
+/// 一处变化只出一行。
+func keySpaceDiff(before: [String: String], after: [String: String],
+                  covered: Set<String> = []) -> [String] {
     var issues: [String] = []
     var makerNoteLost: [String: Int] = [:]   // 伪字典名 → 丢失条目数
 
-    for (k, v) in before.sorted(by: { $0.key < $1.key }) where !isVolatile(k) && !isThumbnailKey(k) {
-        if after[k] == nil {
-            if equivalentCarries(key: k, value: v, in: after) { continue }
-            if let group = makerNoteGroup(of: k) {
-                makerNoteLost[group, default: 0] += 1
-                continue
-            }
+    for (k, v) in before.sorted(by: { $0.key < $1.key }) where !covered.contains(strippingAllArrayIndices(k)) {
+        switch fate(of: k, v, after: after) {
+        case .skipped, .carried:
+            continue
+        case .makerNote(let group):
+            makerNoteLost[group, default: 0] += 1
+        case .lost:
             issues.append("丢失 \(k) = \(truncate(v))")
-        } else if !valuesMatch(v, after[k]!) && !xmpTimeCarried(key: k, v, after[k]!) {
-            issues.append("变化 \(k): \(truncate(v)) → \(truncate(after[k]!))")
+        case .compared:
+            if !valuesMatch(v, after[k]!) && !xmpTimeCarried(key: k, v, after[k]!) {
+                issues.append("变化 \(k): \(truncate(v)) → \(truncate(after[k]!))")
+            }
         }
     }
 

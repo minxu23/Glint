@@ -91,6 +91,14 @@ private let portableAppSegments: [(marker: UInt8, id: [UInt8])] = [
 ]
 private let mpfID: [UInt8] = Array("MPF".utf8) + [0]
 
+/// 带 ISO 增益图的 JPEG 主图里的 ISO 21496-1 版本标记段：APP2，内容是标识
+/// `urn:iso:std:iso:ts:21496:-1\0` 加 4 字节（最低版本、写入方版本各 2 字节），
+/// 一共 32 字节。多出任何字节都不算——那就不只是版本号了。
+func isISOGainMapVersionSegment(_ s: JPEGSegment, in bytes: [UInt8]) -> Bool {
+    let id: [UInt8] = Array("urn:iso:std:iso:ts:21496:-1".utf8) + [0]
+    return s.marker == 0xE2 && s.payload.count == id.count + 4 && s.begins(with: id, in: bytes)
+}
+
 // MARK: - MPF 多图索引与尾部记账
 
 /// MPF 索引里登记的一张附加图像。
@@ -199,7 +207,13 @@ func carriedTrailerRanges(in bytes: [UInt8], _ layout: JPEGLayout,
 ///
 /// EOI 之后的数据里，已经随辅助图搬进产物的那几段（判据见 carriedTrailerRanges）
 /// 不计入；剩下的字节只要有一个不是填充，就报剩下的字节数。
-func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, height: Int)]) -> [String] {
+///
+/// `isoGainMapCarried`：源和产物里都有 ISO 增益图。只有这时 ISO 21496 版本标记段
+/// （见 isISOGainMapVersionSegment）才算已带过去——它只登记增益图元数据的版本，
+/// 增益图本身连同元数据在产物里了，它就没有别的信息；产物里没有 ISO 增益图，或源里
+/// 只有这个孤立的段、没有增益图，就照报。
+func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, height: Int)],
+                        isoGainMapCarried: Bool = false) -> [String] {
     guard let layout = JPEGLayout(bytes) else { return [] }
     var issues: [String] = []
     for s in layout.segments {
@@ -208,6 +222,8 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
             let text = String(bytes: content, encoding: .utf8)
                 ?? String(bytes: content, encoding: .isoLatin1) ?? ""
             issues.append("丢失 JPEG 注释段（COM）= \(truncate(trimPadding(text)))")
+        } else if isoGainMapCarried, isISOGainMapVersionSegment(s, in: bytes) {
+            continue
         } else if (0xE0...0xEF).contains(s.marker),
                   !portableAppSegments.contains(where: { $0.marker == s.marker && s.begins(with: $0.id, in: bytes) }) {
             let id = String(decoding: content.prefix { $0 >= 0x20 && $0 < 0x7F }.prefix(32), as: UTF8.self)

@@ -730,6 +730,228 @@ check("纯 ASCII 的备注原样交给写入器（连尾部 NUL 也不动）",
 check("没有 EXIF 字典时原样交给写入器",
       propertiesForHEIFWriter([kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFModel: "X"]]).count, 1)
 
+print("原始 EXIF 清点：源里有、产物里没有的标签报丢失，没有数据的和结构标签不报")
+/// 一个小端条目；个数按类型的单位长度从值的字节数推出来，`count` 给了就用它。
+func rawEntry(_ space: ExifSpace, _ ifd: String, _ tag: Int, _ type: Int, _ value: [UInt8]?, count: Int? = nil) -> RawExifEntry {
+    let unit = type < TIFFStructure.unitSize.count ? max(TIFFStructure.unitSize[type], 1) : 1
+    return RawExifEntry(space: space, ifd: ifd, tag: tag, type: type, count: count ?? (value?.count ?? 0) / unit,
+                        value: value, bigEndian: false)
+}
+func rationalBytes(_ parts: [(Int, Int)]) -> [UInt8] { parts.flatMap { le32($0.0) + le32($0.1) } }
+func rawIssues(_ source: [RawExifEntry], _ dest: [RawExifEntry]?, viewLosses: Set<String> = [],
+               makerNote: Bool = false) -> [String] {
+    compareRawExif(source: source, dest: dest, viewLosses: viewLosses, makerNoteReported: makerNote).issues
+}
+let lightSourceLong = rawEntry(.main, "ExifIFD", 0x9208, 4, le32(0))
+let lostLightSource = "丢失 EXIF 标签 LightSource（ExifIFD 0x9208，LONG，0）——类型不合规范（规范是 SHORT），ImageIO 读不出这种写法"
+check("产物里没有的标签报丢失，数值 0 也算数据", rawIssues([lightSourceLong], []), [lostLightSource])
+check("产物里有同号标签（类型不同也算）就不报",
+      rawIssues([lightSourceLong], [rawEntry(.main, "ExifIFD", 0x9208, 3, le16(0) + [0, 0])]), [])
+check("IFD0 与 Exif 子 IFD 是同一个命名空间：放错 IFD 的标签在产物的规范位置就不报",
+      rawIssues([rawEntry(.main, "ExifIFD", 0x010D, 2, Array("文档".utf8) + [0])],
+                [rawEntry(.main, "IFD0", 0x010D, 2, Array("文档".utf8) + [0])]), [])
+check("放错 IFD 的标签产物里没有：报，并说明放错了",
+      rawIssues([rawEntry(.main, "ExifIFD", 0x010D, 2, Array("doc".utf8) + [0])], []),
+      ["丢失 EXIF 标签 DocumentName（ExifIFD 0x010D，ASCII，\"doc\"）——放错了 IFD（规范在 IFD0），ImageIO 读不出"])
+check("GPS 是另一个命名空间：主命名空间里的同号标签不算",
+      rawIssues([rawEntry(.gps, "GPS", 0x001B, 2, Array("CELLID".utf8) + [0])],
+                [rawEntry(.main, "IFD0", 0x001B, 2, Array("x".utf8) + [0])]),
+      ["丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，\"CELLID\"）——类型不合规范（规范是 UNDEFINED），ImageIO 读不出这种写法"])
+check("不认识的私有标签照报",
+      rawIssues([rawEntry(.main, "ExifIFD", 0xC000, 7, Array("abc".utf8))], []),
+      ["丢失 EXIF 标签 未知标签（ExifIFD 0xC000，UNDEFINED，\"abc\"）——ImageIO 不认识这个标签，不搬"])
+let blankComment = [UInt8](repeating: 0, count: 8) + [UInt8](repeating: 0x20, count: 248)
+for (e, why) in [
+    (rawEntry(.main, "ExifIFD", 0x010D, 2, nil, count: 0), "长度 0"),
+    (rawEntry(.main, "ExifIFD", 0, 0, nil, count: 0), "标签 0、类型 0、长度 0 的空条目"),
+    (rawEntry(.main, "IFD0", 0x8298, 2, [0]), "只有一个 NUL 的 ASCII"),
+    (rawEntry(.main, "ExifIFD", 0xC000, 7, [0x20, 0, 0x20]), "只有空格和 NUL 的 UNDEFINED"),
+    (rawEntry(.main, "ExifIFD", 0x9286, 7, blankComment), "全 0 字符集头加 248 个空格的 UserComment"),
+    (rawEntry(.main, "ExifIFD", 0x9286, 7, Array("ASCII\0\0\0".utf8) + [0x20, 0x20]), "ASCII 字符集头加空格的 UserComment"),
+] {
+    check("没有数据的条目不报：\(why)", rawIssues([e], []), [])
+}
+check("没有字符集头的 UserComment 不去掉前 8 字节（裸文本也是数据）",
+      rawIssues([rawEntry(.main, "ExifIFD", 0x9286, 7, Array("ab".utf8))], []).count, 1)
+check("值读不出（类型不认识）的条目算有数据，照报",
+      rawIssues([rawEntry(.main, "ExifIFD", 0xC001, 99, nil, count: 3)], []),
+      ["丢失 EXIF 标签 未知标签（ExifIFD 0xC001，类型 99，值读不出）——ImageIO 不认识这个标签，不搬"])
+for (e, why) in [
+    (rawEntry(.main, "IFD0", 0x0100, 3, le16(1200)), "ImageWidth"),
+    (rawEntry(.main, "ExifIFD", 0xA002, 4, le32(1200)), "PixelXDimension"),
+    (rawEntry(.main, "IFD0", 0x0213, 3, le16(1)), "YCbCrPositioning"),
+    (rawEntry(.main, "ExifIFD", 0xA005, 4, le32(100)), "Interop 指针"),
+    (rawEntry(.interop, "Interop", 0x0001, 2, Array("R98".utf8) + [0]), "InteroperabilityIndex"),
+    (rawEntry(.main, "IFD0", 0xEA1C, 7, [0x1C, 0xEA, 0, 0]), "Windows 的 Padding"),
+    (rawEntry(.main, "IFD0", 0x9C9D, 1, [0x41, 0, 0, 0]), "XPAuthor（由 Windows 标签规则管）"),
+    (rawEntry(.main, "ExifIFD", 0x9003, 2, Array("2024:09:15 18:42:07".utf8) + [0]), "DateTimeOriginal（由原始时间规则管）"),
+] {
+    check("不报：\(why)", rawIssues([e], []), [])
+}
+check("Interop 里不认识的标签照报",
+      rawIssues([rawEntry(.interop, "Interop", 0x1234, 2, Array("x".utf8) + [0])], []).count, 1)
+let shortMakerNotes = ["J", "##**N4206_vivi", "Auto"].map { rawEntry(.main, "ExifIFD", 0x927C, 7, Array($0.utf8)) }
+check("重复出现的同号标签合成一行，注明个数", rawIssues(shortMakerNotes, []),
+      ["丢失 EXIF 标签 MakerNote（ExifIFD 0x927C，UNDEFINED，\"J\"、\"##**N4206_vivi\"、\"Auto\"，同号条目 3 个）——ImageIO 没有把它写进产物"])
+check("MakerNote 已经由视图那条汇总行报过：不再报 0x927C", rawIssues(shortMakerNotes, [], makerNote: true), [])
+check("视图已经报了同一个字段的丢失：不再重复",
+      rawIssues([rawEntry(.main, "ExifIFD", 0x9208, 3, le16(1) + [0, 0])], [], viewLosses: ["{Exif}/LightSource"]), [])
+check("视图报的是别的字段：照报",
+      rawIssues([rawEntry(.main, "ExifIFD", 0x9208, 3, le16(1) + [0, 0])], [], viewLosses: ["{Exif}/Flash"]).count, 1)
+check("产物的 EXIF 读不出：报一行无法核对，不当作没有差异", rawIssues([lightSourceLong], nil),
+      ["无法核对原始 EXIF 标签：产物里的 EXIF 读不出，源里有 1 个标签没法确认带过去了"])
+check("源里没有要核对的标签时，产物读不出也不出声",
+      rawIssues([rawEntry(.main, "IFD0", 0x0100, 3, le16(1))], nil), [])
+
+print("GPS 按原始分数比：值不等就报，不加容差")
+let srcLatitude = rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(22, 1), (38, 1), (53743286, 1000000)]))
+let gps = compareRawExif(source: [srcLatitude],
+                         dest: [rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(22, 1), (38, 1), (5374, 100)]))],
+                         viewLosses: [], makerNoteReported: false)
+check("秒被截到 1/100：报一行，注明原因", gps.issues,
+      ["变化 GPS 纬度：22°38′53.743286″ → 22°38′53.74″（HEIF 写入器只保留到 1/100 秒）"])
+check("同一处的视图键交给键空间比对跳过", gps.coveredViewKeys, ["{GPS}/Latitude", "XMP/exif:GPSLatitude"])
+check("约分程度不同、值相同：不报",
+      rawIssues([rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(30, 1), (14, 1), (3250, 100)]))],
+                [rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(30, 1), (14, 1), (65, 2)]))]), [])
+check("海拔重新逼近、相对误差只有 2e-9 也报",
+      rawIssues([rawEntry(.gps, "GPS", 0x0006, 5, rationalBytes([(1250001, 100000)]))],
+                [rawEntry(.gps, "GPS", 0x0006, 5, rationalBytes([(624988, 49999)]))]),
+      ["变化 GPS 海拔：12.50001 → 624988/49999（≈12.5000100002）"])
+check("时间戳按时:分:秒显示",
+      rawIssues([rawEntry(.gps, "GPS", 0x0007, 5, rationalBytes([(10, 1), (42, 1), (75, 10)]))],
+                [rawEntry(.gps, "GPS", 0x0007, 5, rationalBytes([(10, 1), (42, 1), (7, 1)]))]),
+      ["变化 GPS 时间戳：10:42:7.5 → 10:42:7"])
+check("keySpaceDiff 跳过已由原始分数报过的键（含数组下标）",
+      keySpaceDiff(before: ["{GPS}/Latitude": "22.6", "XMP/exif:GPSLatitude[0]": "a", "{GPS}/Altitude": "1"],
+                   after: ["{GPS}/Latitude": "22.7", "XMP/exif:GPSLatitude[0]": "b", "{GPS}/Altitude": "2"],
+                   covered: gps.coveredViewKeys),
+      ["变化 {GPS}/Altitude: 1 → 2"])
+for (n, d, want) in [(53743286, 1000000, "53.743286"), (5374, 100, "53.74"), (22, 1, "22"), (5, 2, "2.5"),
+                     (-3, 4, "-0.75"), (1, 3, "1/3（≈0.333333333333）"), (7, 0, "7/0")] {
+    checkRule("\(n)/\(d)", describeRational(n, d), want, "分数显示：\(n)/\(d)")
+}
+
+print("原始 TIFF 条目：IFD 互相指向、指针越界都不卡住、不崩")
+// IFD0 里的 Exif 指针指回 IFD0 自己：每个 IFD 只读一次。
+let cyclic = jpegWithExif(tiffLE([(0x8769, 4, 1, le32(8)), (0x0110, 2, 4, Array("ab\0\0".utf8))]))
+if let tiff = TIFFStructure(jpeg: cyclic) {
+    check("Exif 指针指回 IFD0：条目各列一次", rawExifEntries(tiff).map(\.tag), [0x8769, 0x0110])
+} else { fail("造不出循环指针的 TIFF") }
+let wild = jpegWithExif(tiffLE([(0x8769, 4, 1, le32(0x7FFF_FFF0)), (0x8825, 4, 1, le32(9999))]))
+if let tiff = TIFFStructure(jpeg: wild) {
+    check("指针越界：只列读得到的", rawExifEntries(tiff).map(\.ifd), ["IFD0", "IFD0"])
+} else { fail("造不出越界指针的 TIFF") }
+let lyingTIFF = jpegWithExif([0x49, 0x49, 42, 0] + le32(8) + le16(4000) + le16(0x9208) + le16(4) + le32(1) + le32(0))
+check("条目数比实际多：读到哪算哪", TIFFStructure(jpeg: lyingTIFF).map { rawExifEntries($0).map(\.tag) }, [0x9208])
+let tiffCuts = (0..<cyclic.count).map { TIFFStructure(jpeg: Array(cyclic.prefix($0))).map(rawExifEntries)?.count ?? 0 }
+check("逐字节截短的 TIFF 都不崩", tiffCuts.count, cyclic.count)
+
+print("HEIF 的 Exif 项：只认 ImageIO 写出来的形态，读不出就照实说")
+if let jpegSource = tinyJPEGSource() {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-unit-\(UUID().uuidString).heic")
+    let props = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifLensModel: "RF50mm"],
+                 kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 30.5, kCGImagePropertyGPSLatitudeRef: "N"]]
+        as [CFString: Any]
+    if encodeHEIF(jpegSource, properties: props, xmp: nil, to: url), let heic = try? [UInt8](Data(contentsOf: url)) {
+        if case .tiff(let tiff) = heifExif(heic) {
+            let entries = rawExifEntries(tiff)
+            check(entries.contains { $0.space == .main && $0.tag == 0xA434 }, "读出 ImageIO 写进 HEIC 的 LensModel")
+            check(entries.contains { $0.space == .gps && $0.tag == 0x0002 }, "读出 GPS IFD 里的纬度")
+        } else {
+            fail("ImageIO 写的 HEIC 里读不出 Exif 项"); fail("（同上，GPS 那条没测到）")
+        }
+        // 逐字节截短：每一种都不崩，结果只能是「读得出」或「读不出」——截掉了 Exif 项
+        // 所在的数据还说「没有 Exif 项」就是把丢失当成了没有。
+        var absentCuts: [Int] = []
+        for cut in stride(from: 0, to: heic.count, by: max(1, heic.count / 400)) {
+            if case .absent = heifExif(Array(heic.prefix(cut))) { absentCuts.append(cut) }
+        }
+        check("截短的 HEIC 不崩，也不被说成没有 Exif 项", absentCuts, [])
+        // 逐字节改成 0xFF（前 2 KB，盒子头和 meta 都在里面）：不崩。
+        var survived = 0
+        for i in 0..<min(heic.count, 2048) {
+            var bad = heic
+            bad[i] = 0xFF
+            _ = heifExif(bad)
+            survived += 1
+        }
+        check("前 2 KB 任一字节改坏都不崩", survived, min(heic.count, 2048))
+    } else {
+        fail("写不出作为 heifExif 输入的 HEIC"); fail("（同上）"); fail("（同上）"); fail("（同上）")
+    }
+    try? FileManager.default.removeItem(at: url)
+} else {
+    fail("造不出作为 encodeHEIF 源的 JPEG"); fail("（同上）"); fail("（同上）"); fail("（同上）")
+}
+for (bytes, why) in [([UInt8](), "空文件"), (Array("not a heif file at all".utf8), "垃圾"),
+                     ([0, 0, 0, 1] + Array("ftyp".utf8) + [UInt8](repeating: 0xFF, count: 8), "64 位盒子长度离谱"),
+                     ([0, 0, 0, 0x10] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 0x30], "meta 里的子盒子越界")] {
+    if case .unreadable = heifExif(bytes) { pass("读不出：\(why)") } else { fail("\(why) 没被判成读不出") }
+}
+
+print("{FileContents} 里的编码参数：按去掉下标后的完整键路径认")
+check(isFileContentsEncodingKey("{FileContents}/Images[0]/ChromaSubsampling"), "主图的色度抽样忽略")
+check(isFileContentsEncodingKey("{FileContents}/Images[12]/ChromaSubsampling"), "任何一张主图的色度抽样都忽略")
+for (key, why) in [("{FileContents}/Images[0]/FlexRange", "FlexRange 照报"),
+                   ("{FileContents}/Images[0]/AuxiliaryData[0]/ChromaSubsampling", "辅助图下面的同名键照报"),
+                   ("{FileContents}/Images[0]/ChromaSubsamplingX", "名字里含它不算"),
+                   ("{Exif}/ChromaSubsampling", "别的字典里同名的键不算")] {
+    checkRule(key, isFileContentsEncodingKey(key), false, why)
+}
+check("keySpaceDiff 跳过色度抽样、照报宽",
+      keySpaceDiff(before: ["{FileContents}/Images[0]/ChromaSubsampling": "4:2:2", "{FileContents}/Images[0]/Width": "8"],
+                   after: ["{FileContents}/Images[0]/ChromaSubsampling": "4:2:0", "{FileContents}/Images[0]/Width": "9"]),
+      ["变化 {FileContents}/Images[0]/Width: 8 → 9"])
+
+print("辅助图按类型对齐：产物里换了顺序不算变化")
+let auxSource = ["{FileContents}/Images[0]/AuxiliaryData[0]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeDepth",
+                 "{FileContents}/Images[0]/AuxiliaryData[0]/Width": "150",
+                 "{FileContents}/Images[0]/AuxiliaryData[1]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeHDRGainMap",
+                 "{FileContents}/Images[0]/AuxiliaryData[1]/HDRHeadroom": "3.5"]
+let auxReordered = ["{FileContents}/Images[0]/AuxiliaryData[1]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeDepth",
+                    "{FileContents}/Images[0]/AuxiliaryData[1]/Width": "150",
+                    "{FileContents}/Images[0]/AuxiliaryData[0]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeHDRGainMap",
+                    "{FileContents}/Images[0]/AuxiliaryData[0]/HDRHeadroom": "3.5"]
+check("换了顺序的两组键对齐后完全相同", keyingAuxiliaryDataByType(auxSource), keyingAuxiliaryDataByType(auxReordered))
+check("键里写的是类型", keyingAuxiliaryDataByType(auxSource)["{FileContents}/Images[0]/AuxiliaryData[HDRGainMap]/HDRHeadroom"],
+      "3.5")
+check("对齐后少了一张照报丢失",
+      keySpaceDiff(before: keyingAuxiliaryDataByType(auxSource),
+                   after: keyingAuxiliaryDataByType(auxSource.filter { !$0.key.contains("AuxiliaryData[1]") })),
+      ["丢失 {FileContents}/Images[0]/AuxiliaryData[HDRGainMap]/AuxiliaryDataType = kCGImageAuxiliaryDataTypeHDRGainMap",
+       "丢失 {FileContents}/Images[0]/AuxiliaryData[HDRGainMap]/HDRHeadroom = 3.5"])
+let twinTypes = ["{FileContents}/Images[0]/AuxiliaryData[0]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeDepth",
+                 "{FileContents}/Images[0]/AuxiliaryData[1]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeDepth"]
+check("同一张图里类型重复：照旧用下标", keyingAuxiliaryDataByType(twinTypes), twinTypes)
+
+print("ISO 21496 版本标记段：产物里有 ISO 增益图才算带过去")
+let isoMarker = jpegSegment(0xE2, Array("urn:iso:std:iso:ts:21496:-1".utf8) + [0, 0, 0, 0, 0])
+let isoJPEG = [0xFF, 0xD8] + isoMarker + [0xFF, 0xD9]
+let lostMarker = "丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，32 字节）"
+check("产物里有 ISO 增益图：不报", unportableSegments(in: isoJPEG, carriedAuxiliary: [], isoGainMapCarried: true), [])
+check("产物里没有 ISO 增益图：照报", unportableSegments(in: isoJPEG, carriedAuxiliary: [], isoGainMapCarried: false),
+      [lostMarker])
+let longerMarker = [0xFF, 0xD8] + jpegSegment(0xE2, Array("urn:iso:std:iso:ts:21496:-1".utf8) + [0, 0, 0, 0, 0, 7])
+    + [0xFF, 0xD9]
+check("标识对、但不只版本号（多 1 字节）：照报",
+      unportableSegments(in: longerMarker, carriedAuxiliary: [], isoGainMapCarried: true),
+      ["丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，33 字节）"])
+
+print("产物比原图大")
+check("大 33%", growthPercent(inBytes: 300, outBytes: 400), "33%")
+check("一样大不算变大", growthPercent(inBytes: 300, outBytes: 300), nil)
+check("变小不算", growthPercent(inBytes: 300, outBytes: 100), nil)
+check("大不到 1% 不写成 0%", growthPercent(inBytes: 1000, outBytes: 1001), "不到 1%")
+check("缺体积数据不算", growthPercent(inBytes: 0, outBytes: 100), nil)
+var grownTally = BatchTally()
+grownTally.recordConverted(inBytes: 300, outBytes: 400, hasIssues: false)
+grownTally.recordConverted(inBytes: 300, outBytes: 100, hasIssues: false)
+check("汇总单列变大的个数", grownTally.summary(unit: "个"), "完成 2 个，1 个比原图大，总计 600 B → 500 B，节省 17%")
+var allGrown = BatchTally()
+allGrown.recordConverted(inBytes: 300, outBytes: 400, hasIssues: false)
+check("总体变大时写增大而不是负的节省", allGrown.summary(unit: "个"), "完成 1 个，1 个比原图大，总计 300 B → 400 B，增大 33%")
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args) else { return nil }

@@ -158,8 +158,8 @@ struct ConversionReport {
     /// 元数据校验的结果：没校验、通过、有差异，三者在类型上分开。
     let verification: Verification
 
-    /// 与元数据差异无关的一句状态说明，目前只有一种：请求了删除源文件但
-    /// 因校验未通过而没删。没有要说的就是 nil。
+    /// 与元数据差异无关的状态说明：产物比原图大，以及请求了删除源文件却没删的原因
+    /// （校验未通过、产物比原图大）。几句用「；」连成一行。没有要说的就是 nil。
     let note: String?
 
     var savingPercent: Int? { percentSaved(inBytes: inBytes, outBytes: outBytes) }
@@ -251,20 +251,35 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
 
     let verification = opts.verifyEnabled
         ? Verification(comparing: metadataDiff(source: input, dest: dest)) : .notVerified
+    let outBytes = fileSize(dest)
 
-    // 删源文件的前提是逐条比对确认无损；有差异就留着，并说明为什么留。
-    var note: String?
+    // 删源文件的前提是逐条比对确认无损，而且产物不比原图大——换成更大的文件不是
+    // 用户要的结果。不删就说明为什么。
+    var notes: [String] = []
+    let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
+    if let growth { notes.append("HEIF 比原图大 \(growth)") }
     if opts.deleteOriginal {
-        if verification == .passed {
-            try? fm.removeItem(at: input)
+        if verification != .passed {
+            notes.append("因元数据校验未通过，保留了源文件")
+        } else if growth != nil {
+            notes.append("因产物比原图大，保留了源文件")
         } else {
-            note = "因元数据校验未通过，保留了源文件"
+            try? fm.removeItem(at: input)
         }
     }
 
-    return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: fileSize(dest),
+    return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: outBytes,
                                       tagCount: tagCount, xattrCount: xattrs,
-                                      verification: verification, note: note))
+                                      verification: verification,
+                                      note: notes.isEmpty ? nil : notes.joined(separator: "；")))
+}
+
+/// 产物比源大多少，写成「33%」；不比源大（或缺体积数据）是 nil。不到 1% 的写「不到 1%」，
+/// 免得出现「大 0%」。命令行、界面和批量汇总的「变大」都以这里为准。
+func growthPercent(inBytes: Int, outBytes: Int) -> String? {
+    guard inBytes > 0, outBytes > inBytes else { return nil }
+    let pct = Int((Double(outBytes - inBytes) / Double(inBytes) * 100).rounded())
+    return pct >= 1 ? "\(pct)%" : "不到 1%"
 }
 
 /// ImageIO 定义的全部辅助图类型（`kCGImageAuxiliaryDataType*` 的每一个成员）。
@@ -284,6 +299,13 @@ let auxiliaryDataTypes: [CFString] = {
     return types
 }()
 
+/// 增益图的两种类型。它们不走 AddAuxiliaryDataInfo，见 encodeFirstPass。
+let gainMapTypes: [CFString] = {
+    var types = [kCGImageAuxiliaryDataTypeHDRGainMap]
+    if #available(macOS 15.0, *) { types.append(kCGImageAuxiliaryDataTypeISOGainMap) }
+    return types
+}()
+
 /// 源图第 0 张的辅助图，按 auxiliaryDataTypes 的顺序，每种至多一份。
 func auxiliaryImages(of src: CGImageSource) -> [(type: CFString, info: CFDictionary)] {
     auxiliaryDataTypes.compactMap { type in
@@ -291,15 +313,27 @@ func auxiliaryImages(of src: CGImageSource) -> [(type: CFString, info: CFDiction
     }
 }
 
-/// 第一遍：从源转码进 `dest`，把源里的辅助图逐个加在主图后面，然后收尾。
-/// 带辅助图收尾失败时，换一个新目标、不带辅助图再编一次：辅助图搬不过去不该让
-/// 整次转换失败，校验会把没搬过去的辅助图逐项报成丢失。
+/// 第一遍：从源转码进 `dest`，把源里的辅助图加在主图后面，然后收尾。
+///
+/// 增益图由 AddImageFromSource 的 kCGImageDestinationPreserveGainMap 带过去，不走
+/// AddAuxiliaryDataInfo：3 通道的 ISO 增益图（手机 HDR 照片里有，像素格式 `420f`）
+/// 取出来的字典里没有 kCGImageAuxiliaryDataInfoData，交给 AddAuxiliaryDataInfo 时
+/// 收尾照样成功、产物里却没有增益图；PreserveGainMap 能搬它。单通道增益图两条路的
+/// 产物逐字节相同；两条路一起走，苹果增益图会写两份，ISO 增益图会收尾失败。
+/// 深度图、视差图、蒙版照旧走 AddAuxiliaryDataInfo。
+///
+/// 带辅助图收尾失败时，换一个新目标、连 PreserveGainMap 一起去掉再编一次：辅助图
+/// 搬不过去不该让整次转换失败，校验会把没搬过去的辅助图逐项报成丢失。
 private func encodeFirstPass(_ src: CGImageSource, properties: [CFString: Any],
                              makeDestination: () -> CGImageDestination?) -> Bool {
-    let auxiliary = auxiliaryImages(of: src)
-    for carry in auxiliary.isEmpty ? [false] : [true, false] {
+    let present = auxiliaryImages(of: src)
+    let hasGainMap = present.contains { item in gainMapTypes.contains { $0 == item.type } }
+    let auxiliary = present.filter { item in !gainMapTypes.contains { $0 == item.type } }
+    var carrying = properties
+    if hasGainMap { carrying[kCGImageDestinationPreserveGainMap] = true }
+    for carry in present.isEmpty ? [false] : [true, false] {
         guard let dest = makeDestination() else { return false }
-        CGImageDestinationAddImageFromSource(dest, src, 0, properties as CFDictionary)
+        CGImageDestinationAddImageFromSource(dest, src, 0, (carry ? carrying : properties) as CFDictionary)
         if carry {
             for (type, info) in auxiliary { CGImageDestinationAddAuxiliaryDataInfo(dest, type, info) }
         }

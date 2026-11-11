@@ -39,6 +39,14 @@
 //            加辅助图要用 ImageIO 从头写一遍 JPEG，那一遍不带上面并进 XMP 包的标签。
 //   --thumbnail
 //            内嵌一张缩略图（kCGImageDestinationEmbedThumbnail）。
+//   --noise  像素换成固定种子的随机噪声，按质量 0.2 编码。这样的 JPEG 转成 HEIF（默认
+//            -q 0.8）稳定地变大：64–256 像素见方的噪声图量到大 10%–26%，这里的
+//            1200×900 更大。用来测「产物比原图大」的提示和不删源。
+//   --iso-gainmap
+//            画一张扩展范围的浮点图（内容余量 4），用 kCGImageDestinationEncodeToISOGainmap
+//            编成带 ISO 增益图的 JPEG：增益图放在 MPF 登记的第二张 JPEG 里，单通道，
+//            主图带 ISO 21496-1 版本标记段（APP2）。属性字典照常写进去，XMP 包不另外合并。
+//            要 3 通道的增益图，再用 mangle-tool --color-gainmap 改写。
 
 import CoreGraphics
 import CryptoKit
@@ -55,12 +63,14 @@ let extendedXMP = args.contains("--extended-xmp")
 let msRating = args.contains("--ms-rating")
 let noText = args.contains("--no-text")
 let thumbnail = args.contains("--thumbnail")
+let noise = args.contains("--noise")
+let isoGainMap = args.contains("--iso-gainmap")
 args.removeAll {
     ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp", "--ms-rating", "--no-text",
-     "--thumbnail"].contains($0)
+     "--thumbnail", "--noise", "--iso-gainmap"].contains($0)
 }
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
-    + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] <输出.jpg>"
+    + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap] <输出.jpg>"
 var auxKinds: [String] = []
 while let at = args.firstIndex(of: "--aux") {
     guard at + 1 < args.count else {
@@ -86,6 +96,16 @@ for i in 0..<30 {
         ctx.setFillColor(red: t, green: 0.45, blue: 1 - t, alpha: 1)
     }
     ctx.fill(CGRect(x: i * (w / 30), y: 0, width: w / 30, height: h))
+}
+if noise, let pixels = ctx.data?.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * h) {
+    // 线性同余发生器，种子固定：每次生成的字节一样，体积也一样。
+    var state: UInt64 = 7
+    for y in 0..<h {
+        for x in 0..<(w * 4) where x % 4 != 3 {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            pixels[y * ctx.bytesPerRow + x] = UInt8(truncatingIfNeeded: state >> 56)
+        }
+    }
 }
 
 var props: [CFString: Any] = [
@@ -215,6 +235,40 @@ let xmpPacket = """
 func die(_ message: String) -> Never {
     FileHandle.standardError.write(Data("\(message)\n".utf8))
     exit(1)
+}
+
+if noise { props[kCGImageDestinationLossyCompressionQuality] = 0.2 }
+
+// ISO 增益图只能由编码器从扩展范围的图里算出来：画一张线性 Display P3 的浮点图，
+// 亮度从左上角的 0.2 渐变到右下角的 4（三个通道的比例也随位置变，增益图才不是常数），
+// 标上内容余量 4，交给 EncodeToISOGainmap。这条路不合并 XMP 包、不加别的辅助图。
+if isoGainMap {
+    guard #available(macOS 15.0, *), auxKinds.isEmpty, !thumbnail else { die("--iso-gainmap 要 macOS 15，且不能和 --aux、--thumbnail 同用") }
+    let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
+    var hdr = [Float](repeating: 1, count: w * h * 4)
+    for y in 0..<h {
+        for x in 0..<w {
+            let i = (y * w + x) * 4, t = Float(x) / Float(w), u = Float(y) / Float(h)
+            let peak = 0.2 + 3.8 * t * u
+            hdr[i] = peak; hdr[i + 1] = peak * (0.6 + 0.4 * u); hdr[i + 2] = peak * (1 - 0.5 * t)
+        }
+    }
+    let image = hdr.withUnsafeMutableBytes { raw in
+        CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 32, bytesPerRow: w * 16, space: space,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.floatComponents.rawValue
+                      | CGBitmapInfo.byteOrder32Little.rawValue)?.makeImage()
+    }
+    guard let image, let tagged = CGImageCreateCopyWithContentHeadroom(4, image) else { die("画不出 HDR 测试图") }
+    let out = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else {
+        die("无法创建 JPEG 编码器")
+    }
+    props[kCGImageDestinationEncodeRequest] = kCGImageDestinationEncodeToISOGainmap
+    CGImageDestinationAddImage(dest, tagged, props as CFDictionary)
+    guard CGImageDestinationFinalize(dest) else { die("写入带 ISO 增益图的测试图失败") }
+    do { try (out as Data).write(to: URL(fileURLWithPath: path)) } catch { die("写入测试图失败") }
+    print("已生成测试图: \(path)")
+    exit(0)
 }
 
 // 先按属性字典编码到内存，再只替换 XMP 那一个 APP1 段：把上面的标签并进 ImageIO
