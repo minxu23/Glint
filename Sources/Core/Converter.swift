@@ -75,14 +75,36 @@ func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
     return props
 }
 
-/// ImageIO 在源里读不出（视图里没有，或去掉填充后为空）、自己解析解得出（`raw`，即
-/// rawExifUserComment 的结果）的 UserComment 文本；不是这种情形是 nil。`props` 是 ImageIO 的
-/// 视图（imageProperties）。转换时的修补（repairedProperties）、照搬时的备注改写
-/// （carryRawExif）、校验认这种改写（carriedExifIssues）用的都是这一个判断。
+/// 源里的 UserComment，两种读法：ImageIO 视图里的值，和自己解析（rawExifUserComment）解出的文本。
+struct SourceUserComment: Equatable {
+    var seenByImageIO: String?
+    var decoded: String?
+
+    /// 由 ImageIO 的视图（imageProperties）和自己解析的结果构造。
+    init(_ props: [CFString: Any], decoded: String?) {
+        let exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        self.init(seenByImageIO: exif[kCGImagePropertyExifUserComment] as? String, decoded: decoded)
+    }
+
+    init(seenByImageIO: String?, decoded: String?) {
+        self.seenByImageIO = seenByImageIO
+        self.decoded = decoded
+    }
+
+    /// ImageIO 读不出：视图里没有，或去掉填充后为空。
+    static func imageIOMisses(_ seen: String?) -> Bool { trimPadding(seen ?? "").isEmpty }
+
+    /// ImageIO 读不出、自己解得出时是解出的文本；否则 nil。转换时的修补（repairedProperties）、
+    /// 照搬时的备注改写（carryRawExif）、校验认这种改写（carriedTIFFMatches）都以它为准。
+    var toRepair: String? { SourceUserComment.imageIOMisses(seenByImageIO) ? decoded : nil }
+}
+
+/// SourceUserComment.toRepair，`raw`（自己解析）只在 ImageIO 读不出时才算。`props` 是 ImageIO
+/// 的视图（imageProperties）。
 func userCommentImageIOMisses(_ props: [CFString: Any], raw: @autoclosure () -> String?) -> String? {
-    let exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-    guard trimPadding((exif[kCGImagePropertyExifUserComment] as? String) ?? "").isEmpty else { return nil }
-    return raw()
+    let seen = SourceUserComment(props, decoded: nil).seenByImageIO
+    guard SourceUserComment.imageIOMisses(seen) else { return nil }
+    return SourceUserComment(seenByImageIO: seen, decoded: raw()).toRepair
 }
 
 /// 要写进产物的属性：在 repairedProperties 的结果上补回 ImageIO 读不出的 ImageUniqueID

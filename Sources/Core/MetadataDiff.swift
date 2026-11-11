@@ -664,8 +664,7 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
         + raw.issues
         + carriedExifIssues(source: bytes, dest: destBytes,
-                            unreadComment: userCommentImageIOMisses(imageProperties(sourceImage),
-                                                                    raw: rawExifUserComment(in: bytes)))
+                            comment: SourceUserComment(imageProperties(sourceImage), decoded: rawExifUserComment(in: bytes)))
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
         + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
                              isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
@@ -678,28 +677,28 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
 /// 视图和清点都看不见。这一条不看标签语义，只看结构：产物的 Exif 项结束在文件末尾
 /// （heifExifEndsAtFileEnd；ImageIO 自己写的产物里它在 mdat 靠前的位置，永远不在末尾）就是
 /// 照搬过的产物，它的 TIFF 字节（P）与源 EXIF 段（TIFFStructure(jpeg:) 认的那一段，S）之间
-/// 只认两种关系：P 与 S 逐字节相同；或者 `unreadComment` 不是 nil（ImageIO 读不出源的备注、
-/// 自己解析解得出这段文本，见 userCommentImageIOMisses），且 P 是 S 按这段文本做的备注改写
-/// （isUserCommentRewrite）。源的备注 ImageIO 读得出时 `unreadComment` 是 nil，改写过就照报。
+/// 只认两种关系（carriedTIFFMatches）：P 与 S 逐字节相同；或者 P 是 S 的备注改写。
 /// 源里没有 EXIF 段时按 0 字节比。K 从 1 数起。
-func carriedExifIssues(source: [UInt8], dest: [UInt8], unreadComment: String?) -> [String] {
+func carriedExifIssues(source: [UInt8], dest: [UInt8], comment: SourceUserComment) -> [String] {
     guard heifExifEndsAtFileEnd(dest) else { return [] }
     let s = TIFFStructure(jpeg: source).map { Array($0.bytes[$0.base..<($0.base + $0.length)]) } ?? []
     guard case .tiff(let t) = heifExif(dest) else {
         return ["变化 EXIF 数据块：照搬过来的 EXIF 读不出（源 \(s.count) 字节）"]
     }
     let d = Array(t.bytes[t.base..<(t.base + t.length)])
-    guard !carriedTIFFMatches(source: s, product: d, unreadComment: unreadComment) else { return [] }
+    guard !carriedTIFFMatches(source: s, product: d, comment: comment) else { return [] }
     let k = (0..<min(s.count, d.count)).first { s[$0] != d[$0] } ?? min(s.count, d.count)
     return ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(s.count) 字节 → \(d.count) 字节，第 \(k + 1) 个字节起不同）"]
 }
 
 /// carriedExifIssues 认的两种关系：源 TIFF `source` 与产物 TIFF `product` 逐字节相同；或者
-/// `unreadComment` 不是 nil 且 `product` 是 `source` 按它做的备注改写（isUserCommentRewrite）。
-func carriedTIFFMatches(source: [UInt8], product: [UInt8], unreadComment: String?) -> Bool {
+/// 源满足改写条件（`comment.toRepair` 不是 nil：ImageIO 读不出源的备注、自己解析解得出），
+/// 且 `product` 是 `source` 按解出的文本做的备注改写（isUserCommentRewrite）。源的备注 ImageIO
+/// 读得出却被改写了，不认。
+func carriedTIFFMatches(source: [UInt8], product: [UInt8], comment: SourceUserComment) -> Bool {
     if source == product { return true }
-    guard let unreadComment else { return false }
-    return isUserCommentRewrite(source: source, product: product, text: unreadComment)
+    guard let text = comment.toRepair else { return false }
+    return isUserCommentRewrite(source: source, product: product, text: text)
 }
 
 /// 源和产物里都有 ISO 增益图。系统低于 macOS 15 时 ImageIO 不认这一类，一律是 false。

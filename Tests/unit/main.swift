@@ -1248,20 +1248,20 @@ if let jpegSource = tinyJPEGSource() {
 
 print("照搬过的产物：Exif 项结束在文件末尾，TIFF 必须与源逐字节相同")
 let carriedSample = try! carryingExif(carryTIFF, into: buildHEIF(HEIFSpec()).bytes).get()
-check("照搬过、与源相同：不报", carriedExifIssues(source: jpegWithExif(carryTIFF), dest: carriedSample, unreadComment: nil), [])
+check("照搬过、与源相同：不报", carriedExifIssues(source: jpegWithExif(carryTIFF), dest: carriedSample, comment: noComment), [])
 var alteredTIFF = carryTIFF
 alteredTIFF[alteredTIFF.count - 1] ^= 0x01
 check("照搬过、最后一个字节不同：报出长度与位置",
-      carriedExifIssues(source: jpegWithExif(alteredTIFF), dest: carriedSample, unreadComment: nil),
+      carriedExifIssues(source: jpegWithExif(alteredTIFF), dest: carriedSample, comment: noComment),
       ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(carryTIFF.count) 字节 → \(carryTIFF.count) 字节，第 \(carryTIFF.count) 个字节起不同）"])
 check("照搬过、源比产物多几个字节：从产物结束处算起不同",
-      carriedExifIssues(source: jpegWithExif(carryTIFF + [1, 2, 3]), dest: carriedSample, unreadComment: nil),
+      carriedExifIssues(source: jpegWithExif(carryTIFF + [1, 2, 3]), dest: carriedSample, comment: noComment),
       ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(carryTIFF.count + 3) 字节 → \(carryTIFF.count) 字节，第 \(carryTIFF.count + 1) 个字节起不同）"])
 check("照搬过、源里没有 EXIF 段：按 0 字节比，照报",
-      carriedExifIssues(source: [0xFF, 0xD8, 0xFF, 0xD9], dest: carriedSample, unreadComment: nil),
+      carriedExifIssues(source: [0xFF, 0xD8, 0xFF, 0xD9], dest: carriedSample, comment: noComment),
       ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（0 字节 → \(carryTIFF.count) 字节，第 1 个字节起不同）"])
 check("ImageIO 那种布局（Exif 项在 mdat 靠前）：不管与源同不同都不报",
-      carriedExifIssues(source: jpegWithExif(carryTIFF), dest: buildHEIF(HEIFSpec()).bytes, unreadComment: nil), [])
+      carriedExifIssues(source: jpegWithExif(carryTIFF), dest: buildHEIF(HEIFSpec()).bytes, comment: noComment), [])
 check("Exif 项结束在文件末尾的判定：照搬过的是，ImageIO 那种布局不是",
       [heifExifEndsAtFileEnd(carriedSample), heifExifEndsAtFileEnd(buildHEIF(HEIFSpec()).bytes)], [true, false])
 
@@ -1338,25 +1338,34 @@ check("不改写：ExifIFD 指针越出块",
 check("不改写：文本是空的", rewritingUserComment(mmSource, text: ""), nil)
 
 print("照搬过的产物认备注改写：P 与 S 逐字节相同，或恰好是 S 按源侧文本做的备注改写")
+/// 源侧：ImageIO 读不出、自己解出了 `text`。
+func unread(_ text: String) -> SourceUserComment { SourceUserComment(seenByImageIO: nil, decoded: text) }
+let noComment = SourceUserComment(seenByImageIO: nil, decoded: nil)
 let mmRewrite = expectedRewrite(mmSource, bigEndian: true, value: mmEmojiValue)
 let iiRewrite = expectedRewrite(iiSource, bigEndian: false, value: iiEmojiValue)
 let mmAsciiRewrite = expectedRewrite(mmSource, bigEndian: true, value: asciiHead + Array("Leuven".utf8))
 let iiAsciiRewrite = expectedRewrite(iiSource, bigEndian: false, value: asciiHead + Array("Leuven".utf8))
-check("接受：逐字节相同（源侧没有要修补的备注）", carriedTIFFMatches(source: mmSource, product: mmSource, unreadComment: nil), true)
+check("接受：逐字节相同（源侧没有要修补的备注）", carriedTIFFMatches(source: mmSource, product: mmSource, comment: noComment), true)
+check("源侧条件：ImageIO 读不出（没有、只有填充）才修补，读得出的不算",
+      [SourceUserComment(seenByImageIO: nil, decoded: "x").toRepair, SourceUserComment(seenByImageIO: "\0\0 ", decoded: "x").toRepair,
+       SourceUserComment(seenByImageIO: "备注", decoded: "x").toRepair, SourceUserComment(seenByImageIO: nil, decoded: nil).toRepair],
+      ["x", "x", nil, nil])
 check("接受：逐字节相同（源侧有要修补的备注，照原样照搬的）",
-      carriedTIFFMatches(source: mmSource, product: mmSource, unreadComment: emojiText), true)
+      carriedTIFFMatches(source: mmSource, product: mmSource, comment: unread(emojiText)), true)
 check("接受：标准的改写，MM、II、ASCII、非 ASCII",
-      [carriedTIFFMatches(source: mmSource, product: mmRewrite, unreadComment: emojiText),
-       carriedTIFFMatches(source: iiSource, product: iiRewrite, unreadComment: emojiText),
-       carriedTIFFMatches(source: mmSource, product: mmAsciiRewrite, unreadComment: "Leuven"),
-       carriedTIFFMatches(source: iiSource, product: iiAsciiRewrite, unreadComment: "Leuven")], [true, true, true, true])
+      [carriedTIFFMatches(source: mmSource, product: mmRewrite, comment: unread(emojiText)),
+       carriedTIFFMatches(source: iiSource, product: iiRewrite, comment: unread(emojiText)),
+       carriedTIFFMatches(source: mmSource, product: mmAsciiRewrite, comment: unread("Leuven")),
+       carriedTIFFMatches(source: iiSource, product: iiAsciiRewrite, comment: unread("Leuven"))], [true, true, true, true])
 check("接受：改写函数自己的输出（MM、II）",
-      [carriedTIFFMatches(source: mmSource, product: rewritingUserComment(mmSource, text: emojiText)!, unreadComment: emojiText),
-       carriedTIFFMatches(source: iiSource, product: rewritingUserComment(iiSource, text: "Leuven")!, unreadComment: "Leuven")],
+      [carriedTIFFMatches(source: mmSource, product: rewritingUserComment(mmSource, text: emojiText)!, comment: unread(emojiText)),
+       carriedTIFFMatches(source: iiSource, product: rewritingUserComment(iiSource, text: "Leuven")!, comment: unread("Leuven"))],
       [true, true])
 /// 改写结果上再动一处，期望被拒。
-func rejected(_ product: [UInt8], source: [UInt8] = mmSource, text: String? = emojiText) -> Bool {
-    !carriedTIFFMatches(source: source, product: product, unreadComment: text)
+func rejected(_ product: [UInt8], source: [UInt8] = mmSource, text: String = emojiText,
+              seenByImageIO: String? = nil) -> Bool {
+    !carriedTIFFMatches(source: source, product: product,
+                        comment: SourceUserComment(seenByImageIO: seenByImageIO, decoded: text))
 }
 var extraByte = mmRewrite
 extraByte[13] ^= 0x01   // IFD0 那一条的类型
@@ -1381,7 +1390,7 @@ check("报出：尾部多一个字节", rejected(mmRewrite + [0]), true)
 var badPadding = mmRewrite
 badPadding[mmSource.count] = 0xAA
 check("报出：补齐字节不是 0", rejected(badPadding), true)
-check("报出：源的备注 ImageIO 读得出却被改写", rejected(mmRewrite, text: nil), true)
+check("报出：源的备注 ImageIO 读得出却被改写", rejected(mmRewrite, seenByImageIO: emojiText), true)
 var notUndefined = mmRewrite
 notUndefined.replaceSubrange(30..<32, with: be(2, 2))
 check("报出：type 不是 7", rejected(notUndefined), true)
@@ -1390,10 +1399,10 @@ check("报出：源里两个 0x9286 时不认改写",
 check("carriedExifIssues 接上这条规则：改写过的不报，源侧备注读得出时照报",
       [carriedExifIssues(source: jpegWithExif(mmSource),
                          dest: try! carryingExif(mmRewrite, into: buildHEIF(HEIFSpec()).bytes).get(),
-                         unreadComment: emojiText).count,
+                         comment: unread(emojiText)).count,
        carriedExifIssues(source: jpegWithExif(mmSource),
                          dest: try! carryingExif(mmRewrite, into: buildHEIF(HEIFSpec()).bytes).get(),
-                         unreadComment: nil).count], [0, 1])
+                         comment: noComment).count], [0, 1])
 
 print("备注改写：任意字节不崩、不越界")
 var rewriteCrashes = 0
@@ -1404,15 +1413,15 @@ for sample in [mmSource, iiSource, inlineSource, twoEntries] {
             var mutated = sample
             mutated[i] = value
             if let out = rewritingUserComment(mutated, text: emojiText),
-               !carriedTIFFMatches(source: mutated, product: out, unreadComment: emojiText) { rewriteCrashes += 1 }
+               !carriedTIFFMatches(source: mutated, product: out, comment: unread(emojiText)) { rewriteCrashes += 1 }
         }
     }
 }
 for _ in 0..<5000 {
     var bad = mmRewrite
     for _ in 0...carryRandom(4) { bad[carryRandom(bad.count)] = UInt8(carryRandom(256)) }
-    _ = carriedTIFFMatches(source: mmSource, product: bad, unreadComment: emojiText)
-    _ = carriedTIFFMatches(source: bad, product: mmRewrite, unreadComment: emojiText)
+    _ = carriedTIFFMatches(source: mmSource, product: bad, comment: unread(emojiText))
+    _ = carriedTIFFMatches(source: bad, product: mmRewrite, comment: unread(emojiText))
     _ = rewritingUserComment(bad, text: emojiText)
 }
 check("截断到每个长度、每个字节改成 00/FF/翻最高位都不崩，改写了的都认得出；随机改坏 5000 次不崩",
