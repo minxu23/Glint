@@ -531,6 +531,89 @@ expectResources(resource(0x0404, [1, 2]) + Array("PHUT".utf8) + [0, 1, 0, 0], [0
                 "不是 8BIM 开头的旧式资源算解析不了")
 expectResources(Array(resource(0x0404, [1, 2]).prefix(11)), [], 6, "不到一个资源头长")
 
+print("UserComment：经 encodeHEIF 写进 HEIC，读回与原文一致、字段里没有多余内容")
+// 这一组真的走 ImageIO 的 HEIC 写入器：userCommentForHEIFWriter 依据的是量出来的
+// 写入规则，只断言它自己的输出证明不了产物对。夹具的字段只有 48 字节，长备注
+// 端到端造不出来，在这里测。两条分支（有无 XMP）各写一遍。
+func tinyJPEGSource() -> CGImageSource? {
+    guard let ctx = CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    ctx.setFillColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1)
+    ctx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+    let jpeg = NSMutableData()
+    guard let image = ctx.makeImage(),
+          let out = CGImageDestinationCreateWithData(jpeg, "public.jpeg" as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(out, image, nil)
+    return CGImageDestinationFinalize(out) ? CGImageSourceCreateWithData(jpeg, nil) : nil
+}
+/// HEIC 里 UserComment 字段的原始字节和 TIFF 字节序：找到 `Exif\0\0` 后的 TIFF 头，
+/// 包成 JPEG 交给 exifUserCommentRange，不另写一份 TIFF 解析。
+func heicUserCommentField(_ heic: [UInt8]) -> (bytes: [UInt8], bigEndian: Bool)? {
+    let marker = Array("Exif".utf8) + [0, 0]
+    for i in 0..<max(0, heic.count - marker.count) where Array(heic[i..<(i + marker.count)]) == marker {
+        let jpeg = jpegWithExif(Array(heic[(i + marker.count)...].prefix(0xFFF0)))
+        if let tiff = TIFFStructure(jpeg: jpeg), let r = exifUserCommentRange(in: Data(jpeg)) {
+            return (Array(jpeg[r]), tiff.bigEndian)
+        }
+    }
+    return nil
+}
+func withoutTrailingNUL(_ s: String) -> String {
+    var scalars = Array(s.unicodeScalars)
+    while scalars.last == "\0" { scalars.removeLast() }
+    return String(String.UnicodeScalarView(scalars))
+}
+let commentSamples: [(String, String)] = [
+    ("420 个汉字的长备注", String(repeating: "长备注的内容，", count: 60)),
+    ("ASCII 打头、混排汉字与 emoji 的长备注", String(repeating: "abc中文🎉", count: 50)),
+    ("BMP 之外的字符打头（旗帜、组合字符）", "🇧🇪比利时 e\u{301}"),
+    ("ASCII 打头的中英混排", "Leuven 鲁汶 City Hall 市政厅"),
+    ("ImageIO 从源读出来就带着尾部 NUL", "备注：这是拍摄当时写下的\0\0\0\0\0"),
+    ("纯 ASCII", "Plain ASCII comment, 42 chars long......."),
+]
+let xmpForSecondPass = CGImageMetadataCreateMutable()
+CGImageMetadataSetValueWithPath(xmpForSecondPass, nil, "xmp:Label" as CFString, "第二遍" as CFString)
+if let jpegSource = tinyJPEGSource() {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-unit-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    for (label, comment) in commentSamples {
+        let text = withoutTrailingNUL(comment)
+        let ascii = text.utf16.allSatisfy { $0 <= 0x7F }
+        // 产物字段应是：前缀 + 文本（ASCII 打头的非 ASCII 文本前面加 BOM）的编码，后面只有 NUL。
+        let units = (!ascii && text.utf16.first! <= 0x7F ? [0xFEFF] : []) + Array(text.utf16)
+        for (branch, xmp) in [("单遍", nil), ("两遍", xmpForSecondPass)] as [(String, CGImageMetadata?)] {
+            let url = dir.appendingPathComponent("\(label)-\(branch).heic")
+            let props = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: comment]] as [CFString: Any]
+            guard encodeHEIF(jpegSource, properties: props, xmp: xmp, to: url),
+                  let heic = try? [UInt8](Data(contentsOf: url)),
+                  let back = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let field = heicUserCommentField(heic) else {
+                fail("\(label)（\(branch)）：写不出或读不回 HEIC 的 UserComment"); continue
+            }
+            let exif = (CGImageSourceCopyPropertiesAtIndex(back, 0, nil) as? [CFString: Any])?[kCGImagePropertyExifDictionary]
+            let read = ((exif as? [CFString: Any])?[kCGImagePropertyExifUserComment] as? String) ?? "<无>"
+            check("\(label)（\(branch)）：读回去掉尾部 NUL 后等于原文", withoutTrailingNUL(read), text)
+            let body = ascii ? Array(text.utf8) : units.flatMap { (u: UInt16) -> [UInt8] in
+                field.bigEndian ? [UInt8(u >> 8), UInt8(u & 0xFF)] : [UInt8(u & 0xFF), UInt8(u >> 8)]
+            }
+            let expected = Array((ascii ? "ASCII\0\0\0" : "UNICODE\0").utf8) + body
+            let rest = field.bytes.dropFirst(expected.count)
+            check(field.bytes.starts(with: expected) && rest.allSatisfy { $0 == 0 },
+                  "\(label)（\(branch)）：原始字段是前缀加完整文本，其后只有 NUL（\(field.bytes.count) 字节）")
+        }
+    }
+    try? FileManager.default.removeItem(at: dir)
+} else {
+    fail("造不出作为 encodeHEIF 源的 JPEG")
+}
+let asciiProps = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: "ASCII\0\0"]] as [CFString: Any]
+check("纯 ASCII 的备注原样交给写入器（连尾部 NUL 也不动）",
+      (propertiesForHEIFWriter(asciiProps)[kCGImagePropertyExifDictionary] as? [CFString: Any])?[
+          kCGImagePropertyExifUserComment] as? String, "ASCII\0\0")
+check("没有 EXIF 字典时原样交给写入器",
+      propertiesForHEIFWriter([kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFModel: "X"]]).count, 1)
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args) else { return nil }

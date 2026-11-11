@@ -11,6 +11,9 @@
 //       EB 是 APP11），内容是 <内容> 的 UTF-8 字节。
 //   mangle --append <文件.jpg> <内容>
 //       在文件末尾（EOI 之后）追加 <内容> 的 UTF-8 字节。
+//   mangle --unicode-comment <文件.jpg> <备注文本>
+//       把 EXIF UserComment 原地改写成 `UNICODE\0` 前缀加 <备注文本> 的 UTF-16
+//       （字节序随 TIFF 头），剩下的字节补 NUL。字段长度不变；放不下就失败。
 //   mangle --strip-trailer <文件.jpg>
 //       截掉 EOI 之后的全部字节。
 //   mangle --ifd0 <文件.jpg> <标签十六进制>=<值>...
@@ -28,6 +31,7 @@ let usage = """
       mangle --replace <文件.jpg> <旧文本> <新文本>
       mangle --segment <文件.jpg> <标记十六进制> <内容>
       mangle --append <文件.jpg> <内容>
+      mangle --unicode-comment <文件.jpg> <备注文本>
       mangle --strip-trailer <文件.jpg>
       mangle --ifd0 <文件.jpg> <标签十六进制>=<值>...
       mangle --8bim <文件.jpg> <资源号十六进制> <内容>
@@ -42,7 +46,7 @@ let args = Array(CommandLine.arguments.dropFirst())
 guard let first = args.first else { die(usage, 2) }
 let mode = first.hasPrefix("--") ? first : ""
 let rest = mode.isEmpty ? args : Array(args.dropFirst())
-let expected = ["": 2, "--replace": 3, "--segment": 3, "--append": 2, "--strip-trailer": 1, "--8bim": 3]
+let expected = ["": 2, "--replace": 3, "--segment": 3, "--append": 2, "--unicode-comment": 2, "--strip-trailer": 1, "--8bim": 3]
 if mode == "--ifd0" {
     guard rest.count >= 2 else { die(usage, 2) }
 } else {
@@ -183,6 +187,17 @@ case "--segment":
 case "--append":
     bytes.append(contentsOf: Array(rest[1].utf8))
     print("追加了 \(rest[1].utf8.count) 字节")
+case "--unicode-comment":
+    guard let tiff = TIFFStructure(jpeg: bytes), let range = exifUserCommentRange(in: original) else {
+        die("这张图里没有 UserComment 字段")
+    }
+    let body = rest[1].utf16.flatMap { (u: UInt16) -> [UInt8] in
+        tiff.bigEndian ? [UInt8(u >> 8), UInt8(u & 0xFF)] : [UInt8(u & 0xFF), UInt8(u >> 8)]
+    }
+    let field = Array("UNICODE\0".utf8) + body
+    guard field.count <= range.count else { die("备注太长，放不进原字段（\(range.count) 字节）") }
+    bytes.replaceSubrange(range, with: field + [UInt8](repeating: 0, count: range.count - field.count))
+    print("已改写 UserComment 为 UNICODE 前缀（正文 \(body.count) 字节，字段 \(range.count) 字节）")
 case "--strip-trailer":
     guard let eoi = JPEGLayout(bytes)?.eoi else { die("找不到 EOI") }
     let dropped = bytes.count - (eoi + 2)

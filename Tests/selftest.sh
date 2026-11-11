@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=103
-EXPECTED_UNIT=277
+EXPECTED_ASSERTIONS=118
+EXPECTED_UNIT=303
 EXPECTED_GUI=41
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -318,6 +318,33 @@ if Tests/mangle-tool "$WORK/无前缀.jpg" "$NOTE" >/dev/null 2>&1; then
 else
     fail "无法构造测试样本"
 fi
+
+round "6b. 带 UNICODE 前缀的非 ASCII UserComment，字段里填充不够"
+# 字段长度沿用夹具的 48 字节正文区，文本原地写进去：B 型剩 2 字节 NUL，D 型正好
+# 占满。ImageIO 的 HEIC 写入器只写进传给它的 UTF-16 单元数的一半，ASCII 打头的
+# 文本还会被当成 ASCII 写、汉字变成「?」（规则见 userCommentForHEIFWriter）。
+# 比的是产物与写进去的原文，不是与源的探针值：两边同样读错时探针值也相等。
+i=0
+while IFS='|' read -r what text; do
+    i=$((i + 1))
+    f="$WORK/UNICODE备注$i.jpg"
+    cp "$WORK/照片.jpg" "$f"
+    make_sample ./Tests/mangle-tool --unicode-comment "$f" "$text"
+    check "$what：前提，ImageIO 从源里读得出全文" \
+        "$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')" "$text"
+    out=$("$BIN" --verify -v "$f" 2>&1)
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过" \
+        || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    check "$what：产物里的备注与原文逐字相同" \
+        "$(./Tests/probe "${f%.jpg}.heic" '{Exif}/UserComment')" "$text"
+done <<'EOF'
+B 型（23 个字，剩 2 字节填充）|备注：这是拍摄当时写下的一段说明文字，用于测试
+D 型（24 个字，零填充）|备注：这是拍摄当时写下的一段说明文字，用于测试啊
+含 emoji（代理对）|🎉拍照😀好看👍今天天气很好适合出门啊啊
+ASCII 打头的中英混排|Leuven 鲁汶 City Hall 市政厅
+汉字打头的中英混排|鲁汶市政厅 City Hall 2024
+EOF
 
 round "7. --delete-original 的安全边界"
 # 全套功能里唯一会删除用户文件的一条，它的安全性完全依赖「校验不通过就不删」。

@@ -64,18 +64,45 @@ func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
     let seenByImageIO = trimPadding((exif[kCGImagePropertyExifUserComment] as? String) ?? "")
     guard seenByImageIO.isEmpty, let recovered = rawExifUserComment(of: url) else { return props }
-
-    // ImageIO 的写入器把字符数当字节数算，非 ASCII 文本会被截掉一半；
-    // 补上等长的 NUL 正好抵消。若哪天 Apple 修了这个缺陷，多出来的 NUL
-    // 属于 EXIF 定长字段的正常填充，读取方会自行忽略，两种情况都安全。
-    // 纯 ASCII 不受这个缺陷影响（很多机型往这个字段塞的是整段调试信息），
-    // 就不必额外补齐。
-    let needsPadding = recovered.unicodeScalars.contains { $0.value > 127 }
-    exif[kCGImagePropertyExifUserComment] = needsPadding
-        ? recovered + String(repeating: "\0", count: recovered.count + 8)
-        : recovered
+    // 这里放的是备注本身。为 HEIC 写入器做的改写只在 encodeHEIF 里做一次，
+    // 这个函数的结果同时是 --verify 源侧的视图，不能掺进写入用的填充。
+    exif[kCGImagePropertyExifUserComment] = recovered
     props[kCGImagePropertyExifDictionary] = exif
     return props
+}
+
+/// 把 UserComment 改写成 ImageIO 的 HEIC 写入器能完整写下的形式。
+///
+/// 写入器的行为（实测，L 为传入字符串的 UTF-16 单元数，含其中的 NUL）：
+/// - 首个 UTF-16 单元是 ASCII：用 `ASCII\0\0\0` 前缀写 L 字节，每个非 ASCII
+///   单元都换成 `?`。
+/// - 否则：用 `UNICODE\0` 前缀，字段留 2×(L+1) 字节，只写进前 ⌊L/2⌋ 个
+///   UTF-16 单元，其余是 NUL。
+/// 读取时 ImageIO 去掉开头的 BOM，尾部 NUL 原样返回。
+///
+/// 所以含非 ASCII 的备注：去掉已有的尾部 NUL；首单元是 ASCII 就在前面加 BOM，
+/// 让写入器选 UNICODE；再补上与此时单元数相等的 NUL，写进去的前 ⌊2L/2⌋ = L 个
+/// 单元正好是完整文本，字段尾部剩 L+1 个 NUL 单元（写入器总会留下的那一个，加上
+/// 本该装文本的后一半）。纯 ASCII 的备注原样返回。
+func userCommentForHEIFWriter(_ comment: String) -> String {
+    var units = Array(comment.utf16)
+    guard units.contains(where: { $0 > 0x7F }) else { return comment }
+    while units.last == 0 { units.removeLast() }
+    if units[0] <= 0x7F { units.insert(0xFEFF, at: 0) }
+    return String(decoding: units + [UInt16](repeating: 0, count: units.count), as: UTF16.self)
+}
+
+/// 写 HEIC 前对属性字典做的唯一一处改写：UserComment 换成
+/// `userCommentForHEIFWriter` 的结果。不需要改写时原样返回同一个字典。
+func propertiesForHEIFWriter(_ properties: [CFString: Any]) -> [CFString: Any] {
+    guard var exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
+          let comment = exif[kCGImagePropertyExifUserComment] as? String else { return properties }
+    let written = userCommentForHEIFWriter(comment)
+    guard written != comment else { return properties }
+    exif[kCGImagePropertyExifUserComment] = written
+    var result = properties
+    result[kCGImagePropertyExifDictionary] = exif
+    return result
 }
 
 // MARK: - 文件层元数据（时间戳 / 权限 / 扩展属性）
@@ -244,6 +271,8 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
 ///
 /// 1. AddImageFromSource 直接从源转码到内存：像素不先解码成位图，ICC 色彩描述
 ///    文件跟着走，`properties`（含 UserComment 的修补）写进 EXIF 等字典。
+///    写之前先过 propertiesForHEIFWriter：源属性直通的备注和修补出来的备注都走
+///    这一处，不在别处另做改写。
 ///    它不认 kCGImageDestinationMetadata，XMP 包里属性字典表达不了的标签
 ///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
 ///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
@@ -253,6 +282,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
 ///    只能靠第一遍写进去。
 func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
                 xmp: CGImageMetadata?, to url: URL) -> Bool {
+    let properties = propertiesForHEIFWriter(properties)
     let heic = UTType.heic.identifier as CFString
     // 源里没有 XMP 就没有第二遍可做；CopyImageSource 不带元数据选项时直接失败。
     guard let xmp else {
