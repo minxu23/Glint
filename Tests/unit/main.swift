@@ -802,6 +802,14 @@ check("产物的 EXIF 读不出：报一行无法核对，不当作没有差异"
       ["无法核对原始 EXIF 标签：产物里的 EXIF 读不出，源里有 1 个标签没法确认带过去了"])
 check("源里没有要核对的标签时，产物读不出也不出声",
       rawIssues([rawEntry(.main, "IFD0", 0x0100, 3, le16(1))], nil), [])
+// 接到文件上的那一层：产物的字节读不通时同样是「无法核对」，没有 Exif 项时源里的标签全算丢失。
+let sourceWithLightSource = jpegWithExif(tiffLE([(0x8769, 4, 1, le32(afterOneEntry))],
+                                                tail: le16(1) + le16(0x9208) + le16(4) + le32(1) + le32(0) + le32(0)))
+check("前提：手搭的源里读得出 Exif 子 IFD 的 LightSource",
+      TIFFStructure(jpeg: sourceWithLightSource).map { rawExifEntries($0).map(\.tag) }, [0x8769, 0x9208])
+check("产物不是读得通的 HEIF：报无法核对",
+      rawExifDiff(source: sourceWithLightSource, dest: Array("garbage".utf8), viewLosses: [], makerNoteReported: false).issues,
+      ["无法核对原始 EXIF 标签：产物里的 EXIF 读不出，源里有 1 个标签没法确认带过去了"])
 
 print("GPS 按原始分数比：值不等就报，不加容差")
 let srcLatitude = rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(22, 1), (38, 1), (53743286, 1000000)]))

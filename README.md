@@ -40,7 +40,7 @@ sudo make install
 - **输出位置**可以选源文件旁边或指定文件夹；递归转换整个相册时，输出目录会
   镜像原有的子目录结构，同名文件不会互相覆盖。
 - 勾选「校验无损后删除源文件」时会先弹窗确认，且只有逐条比对确认完全无损的
-  那些文件才会被删除。
+  那些文件才会被删除。转出来比原图大的也不删，副标题会写「HEIF 比原图大 N%」。
 - 转换在后台并发进行，随时可以取消。
 
 ## 命令行
@@ -66,7 +66,7 @@ jpeg2heif -r ~/Pictures/2024 -o ~/Pictures/2024-heic
 | `-r, --recursive` | 递归处理目录下所有 JPEG，并在输出目录中镜像原有的子目录结构 |
 | `-f, --overwrite` | 覆盖已存在的输出文件（默认跳过，不覆盖） |
 | `--verify` | 转换后逐条比对元数据，报告任何丢失或变化 |
-| `--delete-original` | 删除源 JPEG。会自动先做 `--verify`，只有完全无损才删 |
+| `--delete-original` | 删除源 JPEG。会自动先做 `--verify`，只有完全无损、且 HEIF 不比原图大才删 |
 | `-n, --dry-run` | 只打印将要做什么，完全不碰磁盘（连输出目录也不建） |
 | `-j, --jobs <n>` | 并发数，默认为 CPU 核心数 |
 | `-v, --verbose` | 打印每张图保留的元数据条目数 |
@@ -96,19 +96,26 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
 ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：产物会变成 RGB、
 描述文件变成 sRGB，`--verify` 会把这两项报出来。
 
-**辅助图像**也搬进产物：HDR 增益图（苹果格式与 ISO 格式）、深度图、视差图、人像
-蒙版和各种语义分割蒙版（皮肤、头发、牙齿、眼镜、天空），即 ImageIO 的
-`kCGImageAuxiliaryDataType*` 全部成员。每张辅助图附带的元数据跟着走，例如苹果增益图的
-`HDRGainMap:HDRGainMapVersion`、`HDRGainMap:HDRGainMapHeadroom`，ISO 增益图的
-`HDRToneMap:*`，所以带增益图的照片转换后按 HDR 显示的亮度余量不变。辅助图的像素是
-重新有损编码的，见「已知限制」。
+**辅助图像**也搬进产物：HDR 增益图（苹果格式与 ISO 格式，ISO 增益图单通道、3 通道
+都算——手机 HDR 照片里常见 3 通道的）、深度图、视差图、人像蒙版和各种语义分割蒙版
+（皮肤、头发、牙齿、眼镜、天空），即 ImageIO 的 `kCGImageAuxiliaryDataType*` 全部成员。
+每张辅助图附带的元数据跟着走，例如苹果增益图的 `HDRGainMap:HDRGainMapVersion`、
+`HDRGainMap:HDRGainMapHeadroom`，ISO 增益图的 `HDRToneMap:*`，所以带增益图的照片转换后
+按 HDR 显示的亮度余量不变。辅助图的像素是重新有损编码的，见「已知限制」。
 
 转换分两遍。第一遍走 `CGImageDestinationAddImageFromSource`，直接从源转码而不是
 先解码成位图再编码，ICC 跟着走，EXIF 等属性字典（含本工具修补过的 `UserComment`）
-写进去，源里的辅助图用 `CGImageDestinationAddAuxiliaryDataInfo` 逐个加在主图后面；
-但它不接受 XMP 包。第二遍用 `CGImageDestinationCopyImageSource` 把第一遍的结果连同
-源的 XMP 一起写出，这一步只合并元数据、不重新编码像素，辅助图原样留在产物里。写入
-采用「先写临时文件、成功后再原子替换」，中断不会留下半个文件。
+写进去；增益图由这一步的 `kCGImageDestinationPreserveGainMap` 带过去，深度图、视差图、
+蒙版用 `CGImageDestinationAddAuxiliaryDataInfo` 逐个加在主图后面。增益图不走后一条路：
+3 通道的 ISO 增益图从源里取出来没有像素数据，交给 `AddAuxiliaryDataInfo` 时写入照样
+成功、产物里却没有增益图；单通道增益图两条路写出的产物逐字节相同，两条一起走则苹果
+增益图会写两份、ISO 增益图会写入失败。这一遍不接受 XMP 包。第二遍用
+`CGImageDestinationCopyImageSource` 把第一遍的结果连同源的 XMP 一起写出，这一步只合并
+元数据、不重新编码像素，辅助图原样留在产物里。写入采用「先写临时文件、成功后再原子
+替换」，中断不会留下半个文件。
+
+转出来的 HEIF 比原图大时（已经压得很小的 JPEG 会这样），命令行和界面都会提示
+「HEIF 比原图大 N%」，批量汇总里单列变大的个数，`--delete-original` 也不删这样的源。
 
 ## `--verify` 到底比什么
 
@@ -131,7 +138,11 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 
 - `COM` 注释段；
 - ImageIO 不认识的 `APPn` 段（如 C2PA 用的 APP11）。认识的是 JFIF/JFXX、EXIF、
-  XMP 主包与扩展 XMP、ICC、MPF、Photoshop（IPTC）和 Adobe 这几种；
+  XMP 主包与扩展 XMP、ICC、MPF、Photoshop（IPTC）和 Adobe 这几种。带 ISO 增益图的
+  JPEG 主图里还有一个 32 字节的 ISO 21496-1 版本标记段（APP2
+  `urn:iso:std:iso:ts:21496:-1`，只有版本号）：源和产物里都有 ISO 增益图时它算带过去了，
+  否则（产物里没有 ISO 增益图，或源里只有这个孤立的段）照报；段里多出版本号以外的
+  字节也照报；
 - `EOI` 之后的数据（安卓动态照片的视频、MPF 多图格式的附加图像等）。全是
   `0x00`/`0xFF` 填充的不算。JPEG 的辅助图就存放在这里、由 APP2 的 MPF 索引登记，
   已经搬进产物的那几段不计入，剩下的字节照报。一个 MPF 条目算作已搬走，要同时满足：
@@ -144,10 +155,53 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   一个条目都没认下时报整段，和没有辅助图时一样。
 
 **辅助图本身由键空间比对管着。** ImageIO 在容器级属性的 `{FileContents}` 里给每张
-辅助图列一组键（`{FileContents}/Images[0]/AuxiliaryData[0]/AuxiliaryDataType`、宽、高、
-像素格式、增益图的 `HDRHeadroom`，ISO 增益图还有 `DerivationDetails[…]` 下的色调映射
-参数）。搬过去了这些键就在产物里，没搬过去就逐条报丢失。辅助图的像素数据不比——它们
-和主图一样是有损重新编码的。
+辅助图列一组键（类型、宽、高、像素格式、增益图的 `HDRHeadroom`，ISO 增益图还有
+`DerivationDetails[…]` 下的色调映射参数）。ImageIO 按数组下标列它们，但辅助图在产物里
+的先后不由源决定（增益图随主图一起写，排在别的辅助图前面），所以比对前把下标换成辅助
+图的类型：`{FileContents}/Images[0]/AuxiliaryData[Depth]/Width`。同一张图里类型重复时
+那一组照旧用下标。搬过去了这些键就在产物里，没搬过去就逐条报丢失。辅助图的像素数据
+不比——它们和主图一样是有损重新编码的。
+
+**EXIF 标签在原始字节层再清点一遍。** 上面的比对两边都走 ImageIO 的视图，ImageIO 在
+源一侧就读不出的标签，产物里当然也没有，两边都看不见，于是一声不响。真实照片里这样的
+标签不少：类型存成 ASCII 的 `GPSProcessingMethod`（规范是 UNDEFINED）、类型存成 LONG 的
+`LightSource`（规范是 SHORT）、放错 IFD 的标签（实测 ImageIO 既不读 Exif 子 IFD 里的
+`DocumentName`、`Artist`，也不读 IFD0 里的 `LensMake`，不会把它们挪到规范位置）、
+不认识的私有标签、国产机型写的几字节 MakerNote、相机写的 `PrintImageMatching`。所以
+另外直接读源 JPEG 和产物 HEIF 的 TIFF 结构（产物一侧从 HEIF 的 Exif 项里取），源里有、
+产物里没有的标签报丢失，例如
+`丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELLID"）——类型不合规范（规范是 UNDEFINED），ImageIO 读不出这种写法`。
+
+- 按标签号比。IFD0 和 Exif 子 IFD 合成一个命名空间（源里放错 IFD 的标签，写入方挪到
+  规范位置时不算丢失）；GPS、Interop 各自一个；IFD1（缩略图）整个不比，与下面的缩略图
+  策略一致。
+- 同号的标签出现几次都合成一行，注明个数。键空间比对已经为同一个字段报了丢失的、
+  已经出了 MakerNote 汇总行（佳能、松下那种被 ImageIO 解析成 `{MakerCanon}` 等伪字典的）
+  的，这里不再重复。
+- 产物里的 EXIF 读不出时报一行「无法核对原始 EXIF 标签」，不当作没有差异。
+- 不报的有三类：
+  - **描述文件结构或编码方式的标签**：`ImageWidth`、`ImageLength`、`PixelXDimension`、
+    `PixelYDimension`（像素尺寸由编码结果决定）；`BitsPerSample`、`Compression`、
+    `PhotometricInterpretation`、`SamplesPerPixel`、`PlanarConfiguration`（像素的存储
+    方式）；`YCbCrCoefficients`、`YCbCrSubSampling`、`YCbCrPositioning`、
+    `ComponentsConfiguration`（JPEG 的色度编码参数）；Exif、GPS、Interop 三个 IFD 指针
+    （结构本身）；Interop 里的 `InteroperabilityIndex`、`InteroperabilityVersion`（说明
+    EXIF 按哪套互通规则存放，HEIF 产物里 ImageIO 不写 Interop IFD）；Windows 写的
+    `Padding`（`0xEA1C`）和 `OffsetSchema`（`0xEA1D`，为日后原地改写 EXIF 留的填充块与
+    偏移修正值）。清单写在 [`structuralExifTags`](Sources/Core/RawExifTags.swift)。
+  - **没有数据的条目**：长度 0；ASCII/UNDEFINED 的值只含 NUL 和空格；`UserComment` 带着
+    合规的 8 字节字符集头、去掉头之后只含 NUL 和空格。数值型的 0 算数据（`LightSource`
+    0 是「未知光源」，照报）。
+  - **已经由别的规则负责的标签**：Windows XP 标签和评级（见下面「等价字段」那条），
+    时间字段（源侧以原始字节为准那条）。
+
+**GPS 的分数按原始值比。** 源文件常把坐标的「秒」存成分母 1000000 的分数，ImageIO
+写 HEIF 时一律存成分母 100。ImageIO 视图里的 `{GPS}/Latitude` 在源一侧就已经按 XMP 的
+`度,分.分` 形式四舍五入过，只有截断恰好跨过它的舍入档时才看得出来。所以 GPS IFD 里的
+分数字段（纬度、经度、海拔、时间戳、方向、速度等）两边都在时逐个比原始分数，约分后
+相等才算没变，不加容差，例如
+`变化 GPS 纬度：22°38′53.743286″ → 22°38′53.74″（HEIF 写入器只保留到 1/100 秒）`。报了这一行，
+ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不再另报。
 
 **认识的段里还有两类 ImageIO 不读的数据，同样直接从源文件字节里读。**
 
@@ -189,6 +243,9 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   子串匹配会让 `{MakerCanon}/FocusDepth`、`XMP/crs:DepthMapInfo` 这类真实字段
   被整条跳过且悄无声息。色彩描述文件名（`ProfileName`）和色彩模型
   （`ColorModel`）**不**在其中：它们决定像素怎么解读，CMYK 被转成 sRGB 会报出来。
+  带辅助图的 JPEG 在 `{FileContents}/Images[n]/` 下还列出主图的 `ChromaSubsampling`
+  （4:2:2 的源转出来是 4:2:0），按同样的办法忽略：去掉每一层的数组下标后按完整键路径
+  比对。同一组里的宽、高、方向、`NamedColorSpace`、`FlexRange` 照常比。
 - 缩略图：EXIF IFD1 里的缩略图，以及 Photoshop 资源里的缩略图（8BIM `0x0409`、
   `0x040C`）。缩略图是从像素派生的预览，不是照片内容，和文件体积、压缩方式同类。
   产物里不带内嵌缩略图，而几乎所有相机直出的 JPEG 都带一个（`test_pic/` 里两张
@@ -204,7 +261,7 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   `8192000/1419` 会被写成 `3769821/653`，相对误差约 `2e-10`——物理上是同一个值。
   所以数值型的值按相对误差比较（容差 `1e-8`），非数值仍逐字符比较。容差比实测
   噪声宽一个数量级，又远小于任何有意义的改动：GPS 纬度差 `1e-8` 只相当于几厘米，
-  照样会报出来。
+  照样会报出来。GPS IFD 里的分数另有原始分数那条规则（见上），不吃这个容差。
 - JPEG 的 IPTC-IIM 日期字段（`DateCreated` / `TimeCreated` 等）。HEIF 没有 IIM
   容器，同样的信息由 `XMP/photoshop:DateCreated` 和 `{Exif}/DateTimeOriginal`
   承载。判据是等价字段**确实带着同一个值**，不是"等价字段存在"——这几种格式
@@ -265,7 +322,9 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   机身序列号这类只有厂商软件看得懂的信息。ImageIO **既不把原始 MakerNote 作为属性
   暴露出来，写入时传 `kCGImagePropertyExifMakerNote` 也会被静默忽略**（实测过），
   所以这块必然丢失。`--verify` 会把它报成一条而不是上百条——ImageIO 解析出的
-  `{PictureStyle}`、`{MakerCanon}` 等伪字典都只是这一个块的不同视图。
+  `{PictureStyle}`、`{MakerCanon}` 等伪字典都只是这一个块的不同视图。ImageIO 不解析的
+  MakerNote（不少国产机型只写几个字节的私有串）没有伪字典可看，由原始 EXIF 清点报成
+  一行 `丢失 EXIF 标签 MakerNote（…）`。
   拍摄时间、GPS、光圈快门 ISO、镜头型号这些标准字段不受影响。
 
   归并的判据不是字典前缀：`{ExifAux}` 是混的。ImageIO 正式声明过的那几个键
@@ -283,8 +342,21 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   取值范围量化成 8 位存的，按同一把尺子算），四张真实 HDR 照片的增益图上最大差 5–8 级。
   `-q` 不影响辅助图的编码。读回时每行字节数可能变大（多了对齐填充），数据本身不受影响。
 - **辅助图加不进产物时，转换照常完成，辅助图丢失**。带辅助图的那一遍编码失败时，
-  本工具不带辅助图再编一次；`--verify` 会把没搬过去的辅助图逐项报出来（`{FileContents}/…/AuxiliaryData…`
-  几条，外加 EOI 之后的数据），`--delete-original` 不会删源。
+  本工具不带辅助图（连增益图一起）再编一次；`--verify` 会把没搬过去的辅助图逐项报出来
+  （`{FileContents}/…/AuxiliaryData…` 几条，外加 EOI 之后的数据），`--delete-original`
+  不会删源。
+- **ImageIO 读不出的 EXIF 标签不会保留**：类型写错的（ASCII 的 `GPSProcessingMethod`、
+  LONG 的 `LightSource`）、放错 IFD 的、ImageIO 不认识的私有标签、`PrintImageMatching`、
+  不被 ImageIO 解析的短 MakerNote。属性字典里补上、XMP 里补上都写不进产物（实测过），
+  所以只做检测：`--verify` 逐个报出（见「`--verify` 到底比什么」的原始标签清点），
+  `--delete-original` 不会删源。
+- **GPS 坐标的秒只保留到 1/100**。ImageIO 写 HEIF 时不管给多精确的值，秒都存成分母 100，
+  误差最多约 15 厘米；海拔这类分数也会被换成别的近似分数（如 `1250001/100000` →
+  `624988/49999`）。写不回去，只能如实报：秒的精度高于 1/100 的照片（很多手机都是）
+  `--verify` 一律报 GPS 变化，`--delete-original` 不会删它们。
+- **转出来可能比原图大**。已经压得很小的 JPEG（低质量导出、聊天软件转存的图）转成
+  HEIF 可能反而变大。工具照样写出产物并提示「HEIF 比原图大 N%」，`--delete-original`
+  不删这样的源。
 - **APP13 里 IPTC 以外的 Photoshop 资源不会保留**。只有 8BIM `0x0404`（IPTC-IIM）
   会被 ImageIO 读出并搬走，其它资源随段一起消失。`--verify` 把它们报成一条
   （见「`--verify` 到底比什么」），所以 `--delete-original` 不会删这样的源文件。
@@ -295,7 +367,7 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   `--verify` 逐个报出，`--delete-original` 不会删源。
 - **EXIF 的 IFD1 缩略图和 Photoshop 资源里的缩略图不会保留，`--verify` 有意不报**：
   它们是从像素派生的预览（见「`--verify` 到底比什么」的有意忽略），`{FileContents}`
-  里的 `ThumbnailImages` 那组键同样不报。
+  里的 `ThumbnailImages` 那组键同样不报。原始 EXIF 清点也不比 IFD1。
 - **界面用 AppKit 而非 SwiftUI**。SwiftUI 的 `@State` 等属性包装器现在是宏，
   宏插件只随完整版 Xcode 分发；用 AppKit 才能只靠命令行工具构建。
 - **应用是本地临时签名的**，没有开发者证书。自己构建自己用没问题，拷给别人
@@ -350,6 +422,8 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
 | `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：捞回 ImageIO 读不出的 `UserComment`，按标签读原始值 |
+| `Sources/Core/HEIFExif.swift` | 从 HEIF 的 `meta` 盒子里取出 Exif 项的原始 TIFF，供原始 EXIF 清点读产物一侧 |
+| `Sources/Core/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）与 GPS 原始分数比对，含不报清单 |
 | `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）、MPF 索引与尾部记账、APP13 里的 Photoshop 资源 |
 | `Sources/Core/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
 | `Sources/Core/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
