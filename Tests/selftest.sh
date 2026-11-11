@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=298
-EXPECTED_UNIT=497
+EXPECTED_ASSERTIONS=306
+EXPECTED_UNIT=507
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -475,10 +475,13 @@ expect_reported "CMYK 被转成 RGB" "$WORK/CMYK.jpg" \
 round "7d. ImageIO 不读的 Windows 标签与 Photoshop 资源"
 # Windows 资源管理器写在 IFD0 的 XP 标签和评级，ImageIO 不读也不搬。目标里有等价字段
 # 带着同一个值才算承载。三张样本：没有等价字段、等价字段同值、等价字段不同值。
+# 默认路径整块照搬，XP 标签原样在产物的 IFD0 里，同值就算承载；下面「必须报」的是 EXIF 交给
+# 系统重写的那条路。
 ./Tests/fixture --no-text "$WORK/只有XP.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --ifd0 "$WORK/只有XP.jpg" '9C9B=XP标题' '9C9C=XP备注' \
     '9C9D=作者甲;作者乙' '9C9E=关键词一;关键词二' '9C9F=XP主题' '4746=4' '4749=75'
-expect_reported "只有 Windows 标签" "$WORK/只有XP.jpg" \
+expect_carried "只有 Windows 标签" "$WORK/只有XP.jpg"
+XFLAGS=--no-raw-exif expect_reported "只有 Windows 标签" "$WORK/只有XP.jpg" \
     "丢失 Windows 标题 XPTitle（IFD0 0x9C9B） = XP标题" \
     "丢失 Windows 备注 XPComment（IFD0 0x9C9C） = XP备注" \
     "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = 作者甲;作者乙" \
@@ -503,7 +506,8 @@ esac
 ./Tests/fixture --ms-rating "$WORK/XP不同值.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP不同值.jpg" '9C9B=另一个标题' '9C9C=另一段备注' \
     '9C9D=另一个作者' '9C9E=sunset;另一个关键词' '4746=2' '4749=25'
-expect_reported "Windows 标签与等价字段不同值" "$WORK/XP不同值.jpg" \
+expect_carried "Windows 标签与等价字段不同值" "$WORK/XP不同值.jpg"
+XFLAGS=--no-raw-exif expect_reported "Windows 标签与等价字段不同值" "$WORK/XP不同值.jpg" \
     "丢失 Windows 标题 XPTitle（IFD0 0x9C9B） = 另一个标题" \
     "丢失 Windows 备注 XPComment（IFD0 0x9C9C） = 另一段备注" \
     "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = 另一个作者" \
@@ -517,7 +521,8 @@ out=$("$BIN" --verify "$WORK/XP作者.jpg" 2>&1); st=$?
 refute "IMG_1225 的 XPAuthor 由同值的 Artist 承载，不报" "$st" grep -qF "XPAuthor" <<< "$out"
 cp test_pic/IMG_1225.JPG "$WORK/XP作者改.jpg"
 make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP作者改.jpg" '013B=Someone Else'
-expect_reported "IMG_1225 改掉 Artist" "$WORK/XP作者改.jpg" \
+expect_carried "IMG_1225 改掉 Artist" "$WORK/XP作者改.jpg"
+XFLAGS=--no-raw-exif expect_reported "IMG_1225 改掉 Artist" "$WORK/XP作者改.jpg" \
     "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = Zhang San;Li Si"
 # APP13 里 IPTC 以外的资源：默认夹具本来就有 0x0404 和 0x0425，第 1 轮守着它们不报；
 # 追加一个 0x0BB7 就必须报出汇总行。
@@ -815,6 +820,9 @@ check "整块照搬：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --e
 # 7. 没有死数据：源 EXIF 里那个 24 字节的 ImageUniqueID 在产物里恰好出现一次（旧内容清零了）。
 check "整块照搬：产物里 ImageUniqueID 的字节串恰好出现一次" \
     "$(LC_ALL=C grep -aoF "$UID24" "${f%.jpg}.heic" | wc -l | tr -d ' ')" "1"
+# 校验靠「Exif 项在文件末尾」认出照搬过的产物（见 carriedExifIssues），前提是 ImageIO 自己写的
+# 产物里它不在末尾。
+check "整块照搬：照搬过的产物 Exif 项在文件末尾" "$(./Tests/probe --exif-at-end "${f%.jpg}.heic")" "末尾"
 XFLAGS=--no-raw-exif expect_reported "整块照搬（--no-raw-exif）" "$rw" \
     '丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELLID"）——类型不合规范' \
     '丢失 EXIF 标签 LightSource（ExifIFD 0x9208，LONG，0）——类型不合规范' \
@@ -824,6 +832,7 @@ XFLAGS=--no-raw-exif expect_reported "整块照搬（--no-raw-exif）" "$rw" \
     "变化 GPS 经度：120°8′55.304567″ → 120°8′55.3″（HEIF 写入器只保留到 1/100 秒）"
 # 照搬了的产物比 ImageIO 重写的恰好大「4 字节偏移 + Exif\0\0 + 源的 TIFF」。
 n=$(grep -oE "EXIF 整块照搬（[0-9]+ 字节）" <<< "$out" | grep -oE "[0-9]+")
+check "整块照搬：前提，ImageIO 写的产物 Exif 项不在文件末尾" "$(./Tests/probe --exif-at-end "${rw%.jpg}.heic")" "不在末尾"
 check_same "整块照搬：产物比 --no-raw-exif 的恰好大 10 + 源 TIFF 的字节数" \
     "$(( $(stat -f %z "${f%.jpg}.heic") - $(stat -f %z "${rw%.jpg}.heic") ))" "$(( 10 + ${n:-0} ))"
 

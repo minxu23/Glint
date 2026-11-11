@@ -466,6 +466,15 @@ expectWindows([0x4746: "5"], ["{IPTC}/StarRating": "5"], [lostRating + "5"], "IP
 expectWindows([0x4749: "99"], ["XMP/MicrosoftPhoto:Rating": "99"], [], "RatingPercent 由 MicrosoftPhoto:Rating 承载")
 expectWindows([0x9C9C: String?.none], ["{Exif}/UserComment": "备注"],
               ["丢失 Windows 备注 XPComment（IFD0 0x9C9C）：值读不出（越界或类型不对）"], "值读不出的照样报")
+check("产物原始 IFD0 里同一个标签、同值：算承载",
+      windowsTagLosses([0x9C9B: "西湖", 0x4746: "5"], after: [:], destRaw: [0x9C9B: "西湖", 0x4746: "5"]), [])
+check("产物原始 IFD0 里同一个标签、值不同：照报",
+      windowsTagLosses([0x9C9B: "西湖"], after: [:], destRaw: [0x9C9B: "别的"]), [lostTitle + "西湖"])
+check("产物原始 IFD0 里是别的标签：照报",
+      windowsTagLosses([0x9C9B: "西湖"], after: [:], destRaw: [0x9C9F: "西湖"]), [lostTitle + "西湖"])
+check("源里值读不出，产物里同样读不出：照报，不靠原始 IFD0 放过",
+      windowsTagLosses([0x9C9C: String?.none], after: [:], destRaw: [0x9C9C: String?.none]),
+      ["丢失 Windows 备注 XPComment（IFD0 0x9C9C）：值读不出（越界或类型不对）"])
 check("承载字段的下标按数字排", carrierValues("XMP/dc:subject",
       in: ["XMP/dc:subject[10]": "k", "XMP/dc:subject[2]": "c", "XMP/dc:subject[0]": "a"]), ["a", "c", "k"])
 check("嵌套的子字段不算这个字段的值", carrierValues("XMP/dc:subject",
@@ -1233,6 +1242,25 @@ if let jpegSource = tinyJPEGSource() {
 } else {
     fail("造不出作为 encodeHEIF 源的 JPEG"); fail("（同上）"); fail("（同上）"); fail("（同上）")
 }
+
+print("照搬过的产物：Exif 项结束在文件末尾，TIFF 必须与源逐字节相同")
+let carriedSample = try! carryingExif(carryTIFF, into: buildHEIF(HEIFSpec()).bytes).get()
+check("照搬过、与源相同：不报", carriedExifIssues(source: jpegWithExif(carryTIFF), dest: carriedSample), [])
+var alteredTIFF = carryTIFF
+alteredTIFF[alteredTIFF.count - 1] ^= 0x01
+check("照搬过、最后一个字节不同：报出长度与位置",
+      carriedExifIssues(source: jpegWithExif(alteredTIFF), dest: carriedSample),
+      ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(carryTIFF.count) 字节 → \(carryTIFF.count) 字节，第 \(carryTIFF.count) 个字节起不同）"])
+check("照搬过、源比产物多几个字节：从产物结束处算起不同",
+      carriedExifIssues(source: jpegWithExif(carryTIFF + [1, 2, 3]), dest: carriedSample),
+      ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(carryTIFF.count + 3) 字节 → \(carryTIFF.count) 字节，第 \(carryTIFF.count + 1) 个字节起不同）"])
+check("照搬过、源里没有 EXIF 段：按 0 字节比，照报",
+      carriedExifIssues(source: [0xFF, 0xD8, 0xFF, 0xD9], dest: carriedSample),
+      ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（0 字节 → \(carryTIFF.count) 字节，第 1 个字节起不同）"])
+check("ImageIO 那种布局（Exif 项在 mdat 靠前）：不管与源同不同都不报",
+      carriedExifIssues(source: jpegWithExif(carryTIFF), dest: buildHEIF(HEIFSpec()).bytes), [])
+check("Exif 项结束在文件末尾的判定：照搬过的是，ImageIO 那种布局不是",
+      [heifExifEndsAtFileEnd(carriedSample), heifExifEndsAtFileEnd(buildHEIF(HEIFSpec()).bytes)], [true, false])
 
 print("不一致键集合：照搬 EXIF 的自检与 keySpaceDiff 用同一把尺子")
 let sourceView = ["{TIFF}/Model": "Canon", "{Exif}/UserComment": "备注", "{IPTC}/DateCreated": "20240915"]

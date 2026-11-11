@@ -1,9 +1,11 @@
 // Windows 资源管理器写在 EXIF IFD0 里的标题、备注、作者、关键词、主题和评级。
 //
-// ImageIO 不读这几个标签：它们不在属性视图里，也不会写进产物。所以 --verify 直接从
-// 源文件的原始字节读，再到目标里找能承载它的标准字段。Windows 写这些标签时通常
-// 同时写一份标准字段（如 XPAuthor 与 Artist），标准字段会被搬走，所以判据和 IIM
-// 日期一样：等价字段**带着同一个值**才算承载，等价字段存在不算。
+// ImageIO 不读这几个标签：它们不在属性视图里，ImageIO 重写 EXIF 时也不会写进产物。所以
+// --verify 直接从源文件的原始字节读，再到目标里找承载它的地方：产物原始 EXIF 的 IFD0 里
+// 有同一个标签、解出来的值相同（EXIF 整块照搬过的产物就是这样），或者能承载它的标准字段
+// 带着同一个值。Windows 写这些标签时通常同时写一份标准字段（如 XPAuthor 与 Artist），
+// 标准字段会被搬走，所以判据和 IIM 日期一样：等价字段**带着同一个值**才算承载，等价字段
+// 存在不算。
 
 import Foundation
 import ImageIO
@@ -51,7 +53,13 @@ let windowsTags: [WindowsTag] = [
 /// 源文件 IFD0 里出现的 Windows 标签：标签号 → 解出的值。条目在、值读不出（越界、
 /// 类型不对）时值是 nil，照样列出来——读不出不等于不存在。空文本不列。
 func rawWindowsTags(of bytes: [UInt8]) -> [Int: String?] {
-    guard let tiff = TIFFStructure(jpeg: bytes), let ifd0 = tiff.ifd0 else { return [:] }
+    guard let tiff = TIFFStructure(jpeg: bytes) else { return [:] }
+    return rawWindowsTags(tiff)
+}
+
+/// 一段 TIFF 结构的 IFD0 里出现的 Windows 标签，规则同上。产物一侧用它读 HEIF 的 Exif 项。
+func rawWindowsTags(_ tiff: TIFFStructure) -> [Int: String?] {
+    guard let ifd0 = tiff.ifd0 else { return [:] }
     let kinds = Dictionary(windowsTags.map { ($0.tag, $0.kind) }) { a, _ in a }
     var found: [Int: String?] = [:]
     for entry in tiff.entries(ifd0) {
@@ -138,8 +146,12 @@ func carriesWindowsValue(_ value: String, _ kind: WindowsTag.Kind, _ values: [St
     }
 }
 
-/// 源里的 Windows 标签在目标里没被等价字段承载的，每个一条差异。纯函数，单测直接喂字典。
-func windowsTagLosses(_ raw: [Int: String?], after: [String: String]) -> [String] {
+/// 源里的 Windows 标签在目标里没被承载的，每个一条差异。纯函数，单测直接喂字典。
+///
+/// `destRaw`：产物原始 EXIF 的 IFD0 里的 Windows 标签（rawWindowsTags）。同一个标签、解出来的值
+/// 相同就算承载；源里值读不出的不靠它放过（两边都读不出，说明不了值带过去了）。
+func windowsTagLosses(_ raw: [Int: String?], after: [String: String],
+                      destRaw: [Int: String?] = [:]) -> [String] {
     var issues: [String] = []
     for spec in windowsTags {
         guard let found = raw[spec.tag] else { continue }
@@ -148,6 +160,7 @@ func windowsTagLosses(_ raw: [Int: String?], after: [String: String]) -> [String
             issues.append("丢失 \(label)：值读不出（越界或类型不对）")
             continue
         }
+        if case .some(.some(let carried)) = destRaw[spec.tag], carried == value { continue }
         if spec.carriers.contains(where: { carriesWindowsValue(value, spec.kind, carrierValues($0, in: after)) }) {
             continue
         }

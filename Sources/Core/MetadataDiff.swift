@@ -650,20 +650,43 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     let bytes = [UInt8](data)
     let before = sourceKeySpace(of: sourceImage, url: source, bytes: bytes)
     let after = metadataKeySpace(of: destImage, url: dest)
+    let destBytes = [UInt8](destData)
+    var destWindowsTags: [Int: String?] = [:]
+    if case .tiff(let tiff) = heifExif(destBytes) { destWindowsTags = rawWindowsTags(tiff) }
     // 原始 EXIF 清点先做：它报出的 GPS 分数变化，键空间比对里同一处的视图键不再重复报；
     // 键空间比对已经报了丢失的标签，它也不再重复报。源视图里没有的 ImageUniqueID 由它按
     // 原始字节比值。
-    let raw = rawExifDiff(source: bytes, dest: [UInt8](destData),
+    let raw = rawExifDiff(source: bytes, dest: destBytes,
                           viewLosses: keySpaceLosses(before: before, after: after),
                           makerNoteReported: makerNoteLost(before: before, after: after),
                           sourceViewHasImageUniqueID: before[exifKey(kCGImagePropertyExifImageUniqueID)] != nil)
     // 后几项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
     return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
         + raw.issues
-        + windowsTagLosses(rawWindowsTags(of: bytes), after: after)
+        + carriedExifIssues(source: bytes, dest: destBytes)
+        + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
         + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
                              isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
         + unportablePhotoshopResources(in: bytes)
+}
+
+/// 照搬过的产物，EXIF 必须与源逐字节相同。
+///
+/// 原始清点对非 GPS 标签只看在不在、不比值；照搬过来的 MakerNote、私有标签的字节对不对，
+/// 视图和清点都看不见。这一条不看标签语义，只看结构：产物的 Exif 项结束在文件末尾
+/// （heifExifEndsAtFileEnd；ImageIO 自己写的产物里它在 mdat 靠前的位置，永远不在末尾）就是
+/// 照搬过的产物，它的 TIFF 字节必须与源 EXIF 段（TIFFStructure(jpeg:) 认的那一段）的逐字节相同。
+/// 源里没有 EXIF 段时按 0 字节比。K 从 1 数起。
+func carriedExifIssues(source: [UInt8], dest: [UInt8]) -> [String] {
+    guard heifExifEndsAtFileEnd(dest) else { return [] }
+    let s = TIFFStructure(jpeg: source).map { Array($0.bytes[$0.base..<($0.base + $0.length)]) } ?? []
+    guard case .tiff(let t) = heifExif(dest) else {
+        return ["变化 EXIF 数据块：照搬过来的 EXIF 读不出（源 \(s.count) 字节）"]
+    }
+    let d = Array(t.bytes[t.base..<(t.base + t.length)])
+    guard s != d else { return [] }
+    let k = (0..<min(s.count, d.count)).first { s[$0] != d[$0] } ?? min(s.count, d.count)
+    return ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(s.count) 字节 → \(d.count) 字节，第 \(k + 1) 个字节起不同）"]
 }
 
 /// 源和产物里都有 ISO 增益图。系统低于 macOS 15 时 ImageIO 不认这一类，一律是 false。
