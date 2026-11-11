@@ -8,6 +8,10 @@
 // GPS 的坐标同理：源的「秒」常存成分母 1000000 的分数，HEIF 写入器一律存成分母 100；
 // ImageIO 的视图在源一侧就已经按 XMP 的 `度,分.分` 形式四舍五入过，只有截断恰好跨过
 // 视图的舍入档时才看得见。所以 GPS IFD 里的分数按原始值逐个比。
+//
+// ImageUniqueID 也按原始值比：ImageIO 只读长度恰好 33 字节的写法，别的长度两边视图里都
+// 没有，转换时从源的原始字节补写进产物（见 restorableImageUniqueID），值写对没有只能在
+// 这一层核对。
 
 import Foundation
 import ImageIO
@@ -251,6 +255,50 @@ func exifEntryHasData(_ e: RawExifEntry) -> Bool {
     return body.contains { $0 != 0 && $0 != 0x20 }
 }
 
+// MARK: - ImageUniqueID
+
+/// ImageUniqueID（ExifIFD 0xA420）。规范是定长 ASCII，33 字节（32 个字符加 NUL）。ImageIO 只认
+/// 恰好 33 字节的写法，与内容无关：别的长度在源一侧读不出，产物一侧同样读不出。HEIC 写入器
+/// 却什么长度都照写（值的 UTF-8 字节加一个 NUL），所以转换时补写，校验时按原始字节核对。
+let imageUniqueIDTag = 0xA420
+
+/// ImageUniqueID 条目的值：取到第一个 NUL 为止，没有 NUL 就取满。值读不出是 nil。
+/// 补写与核对都按这一条取值。
+func imageUniqueIDValue(_ e: RawExifEntry) -> [UInt8]? {
+    e.value.map { Array($0.prefix { $0 != 0 }) }
+}
+
+/// 源里的 ImageUniqueID 能原样补写进产物时，要放进属性字典的字符串；不能就是 nil，
+/// 交给原始清点照报丢失。能补写要同时满足：
+///   主命名空间里恰好一个 0xA420 条目   同号的不止一个时不知道该写哪个
+///   在 Exif 子 IFD、ASCII 类型          放错 IFD、类型不合规范的写法不替它改正
+///   有数据、取出的值非空                没有数据的条目原始清点本来也不报
+///   取出的字节是合法 UTF-8              写入器存的是字符串的 UTF-8，别的字节写不回原样
+/// 这里不看 ImageIO 视图：视图里已经有它（33 字节的写法）时不补，由调用方判断。
+func restorableImageUniqueID(_ entries: [RawExifEntry]) -> String? {
+    let found = entries.filter { $0.space == .main && $0.tag == imageUniqueIDTag }
+    guard found.count == 1, let e = found.first, e.ifd == "ExifIFD", e.type == ASCII, exifEntryHasData(e),
+          let bytes = imageUniqueIDValue(e), !bytes.isEmpty else { return nil }
+    let text = String(decoding: bytes, as: UTF8.self)
+    return Array(text.utf8) == bytes ? text : nil
+}
+
+/// ImageUniqueID 的变化行。两边的值照文本显示（不去尾部空格，空格的差别也看得见）；
+/// 不是合法 UTF-8 的写字节数。显示截断后两边一样时，注明原始字节从哪里开始不同。
+private func imageUniqueIDChangeLine(_ a: [UInt8]?, _ b: [UInt8]?) -> String {
+    func show(_ v: [UInt8]?) -> String {
+        guard let v else { return "值读不出" }
+        let text = String(decoding: v, as: UTF8.self)
+        return Array(text.utf8) == v ? "\"\(truncate(text))\"" : "\(v.count) 字节（不是合法的 UTF-8）"
+    }
+    var line = "变化 EXIF 标签 ImageUniqueID：\(show(a)) → \(show(b))"
+    if show(a) == show(b), let a, let b {
+        let at = (0..<min(a.count, b.count)).first { a[$0] != b[$0] } ?? min(a.count, b.count)
+        line += "（显示相同，原始字节从第 \(at + 1) 个起不同）"
+    }
+    return line
+}
+
 // MARK: - 显示
 
 func tiffTypeName(_ type: Int) -> String {
@@ -351,8 +399,10 @@ struct RawExifComparison {
 ///   的视图键（viewKeys）在其中时，那一行已经有了，不再重复。
 /// - `makerNoteReported`：键空间比对已经出了 MakerNote 汇总行（佳能、松下那种被
 ///   ImageIO 解析成 {MakerCanon} 等伪字典的），原始清点不再报 0x927C。
+/// - `sourceViewHasImageUniqueID`：源的 ImageIO 视图里有 `{Exif}/ImageUniqueID`。有的话
+///   它的值由键空间比对管；没有的话两边都有 0xA420 时在这里按原始字节比值。
 func compareRawExif(source: [RawExifEntry], dest: [RawExifEntry]?, viewLosses: Set<String>,
-                    makerNoteReported: Bool) -> RawExifComparison {
+                    makerNoteReported: Bool, sourceViewHasImageUniqueID: Bool) -> RawExifComparison {
     var result = RawExifComparison()
     let candidates = source.filter { e in
         exifEntryHasData(e)
@@ -380,6 +430,16 @@ func compareRawExif(source: [RawExifEntry], dest: [RawExifEntry]?, viewLosses: S
         if key.space == .main, key.tag == 0x927C, makerNoteReported { continue }
         if viewKeys(key.space, key.tag).contains(where: viewLosses.contains) { continue }
         result.issues.append(lostTagLine(groups[key]!))
+    }
+
+    // ImageUniqueID：源的视图里没有它时，产物里的值只可能来自转换时按原始字节的补写，两边
+    // 视图都看不见（33 字节以外的写法 ImageIO 读不出），只能在这里比。只比这一个标签：别的
+    // 标签源一侧读不出就不会写进产物，而原始值的写法（分数的分母、补齐长度、整数宽度）
+    // 重新写一遍本来就会变，逐值比只会刷出噪声。取值规则同补写；同号条目各取第一个。
+    func isImageUniqueID(_ e: RawExifEntry) -> Bool { e.space == .main && e.tag == imageUniqueIDTag }
+    if !sourceViewHasImageUniqueID, let s = candidates.first(where: isImageUniqueID),
+       let d = dest.first(where: isImageUniqueID), imageUniqueIDValue(s) != imageUniqueIDValue(d) {
+        result.issues.append(imageUniqueIDChangeLine(imageUniqueIDValue(s), imageUniqueIDValue(d)))
     }
 
     // GPS 的分数：两边都有、都是分数的标签逐个比原始值，不加容差。同号条目各取第一个。
@@ -460,7 +520,7 @@ private func gpsChangeLine(_ tag: Int, _ a: [(n: Int, d: Int)], _ b: [(n: Int, d
 
 /// 读两边的原始 EXIF 并比对。源不是带 EXIF 的 JPEG 时没有可清点的东西。
 func rawExifDiff(source bytes: [UInt8], dest destBytes: [UInt8], viewLosses: Set<String>,
-                 makerNoteReported: Bool) -> RawExifComparison {
+                 makerNoteReported: Bool, sourceViewHasImageUniqueID: Bool) -> RawExifComparison {
     guard let sourceTIFF = TIFFStructure(jpeg: bytes) else { return RawExifComparison() }
     let dest: [RawExifEntry]?
     switch heifExif(destBytes) {
@@ -469,5 +529,5 @@ func rawExifDiff(source bytes: [UInt8], dest destBytes: [UInt8], viewLosses: Set
     case .tiff(let tiff): dest = rawExifEntries(tiff)
     }
     return compareRawExif(source: rawExifEntries(sourceTIFF), dest: dest, viewLosses: viewLosses,
-                          makerNoteReported: makerNoteReported)
+                          makerNoteReported: makerNoteReported, sourceViewHasImageUniqueID: sourceViewHasImageUniqueID)
 }

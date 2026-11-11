@@ -739,8 +739,9 @@ func rawEntry(_ space: ExifSpace, _ ifd: String, _ tag: Int, _ type: Int, _ valu
 }
 func rationalBytes(_ parts: [(Int, Int)]) -> [UInt8] { parts.flatMap { le32($0.0) + le32($0.1) } }
 func rawIssues(_ source: [RawExifEntry], _ dest: [RawExifEntry]?, viewLosses: Set<String> = [],
-               makerNote: Bool = false) -> [String] {
-    compareRawExif(source: source, dest: dest, viewLosses: viewLosses, makerNoteReported: makerNote).issues
+               makerNote: Bool = false, idInView: Bool = false) -> [String] {
+    compareRawExif(source: source, dest: dest, viewLosses: viewLosses, makerNoteReported: makerNote,
+                   sourceViewHasImageUniqueID: idInView).issues
 }
 let lightSourceLong = rawEntry(.main, "ExifIFD", 0x9208, 4, le32(0))
 let lostLightSource = "丢失 EXIF 标签 LightSource（ExifIFD 0x9208，LONG，0）——类型不合规范（规范是 SHORT），ImageIO 读不出这种写法"
@@ -808,14 +809,96 @@ let sourceWithLightSource = jpegWithExif(tiffLE([(0x8769, 4, 1, le32(afterOneEnt
 check("前提：手搭的源里读得出 Exif 子 IFD 的 LightSource",
       TIFFStructure(jpeg: sourceWithLightSource).map { rawExifEntries($0).map(\.tag) }, [0x8769, 0x9208])
 check("产物不是读得通的 HEIF：报无法核对",
-      rawExifDiff(source: sourceWithLightSource, dest: Array("garbage".utf8), viewLosses: [], makerNoteReported: false).issues,
+      rawExifDiff(source: sourceWithLightSource, dest: Array("garbage".utf8), viewLosses: [], makerNoteReported: false,
+                  sourceViewHasImageUniqueID: false).issues,
       ["无法核对原始 EXIF 标签：产物里的 EXIF 读不出，源里有 1 个标签没法确认带过去了"])
+
+print("ImageUniqueID：能原样写回才补写，两边的值按原始字节比")
+func uniqueID(_ value: [UInt8]?, type: Int = 2, ifd: String = "ExifIFD", count: Int? = nil) -> RawExifEntry {
+    rawEntry(.main, ifd, 0xA420, type, value, count: count)
+}
+let j12 = Array("J12LLKF00SM J12LLKL01GM".utf8)
+for (entries, want, why) in [
+    ([uniqueID(j12 + [0])], "J12LLKF00SM J12LLKL01GM", "24 字节的 ASCII"),
+    ([uniqueID(Array("唯一标识".utf8) + [0])], "唯一标识", "非 ASCII 的 UTF-8"),
+    ([uniqueID(Array("abc".utf8))], "abc", "没有 NUL：取满个数"),
+    ([uniqueID(Array("ab\0cd\0".utf8))], "ab", "取到第一个 NUL 为止"),
+    ([uniqueID([0xEF, 0xBB, 0xBF] + Array("abc".utf8) + [0])], "\u{FEFF}abc", "开头的 BOM 原样保留"),
+] as [([RawExifEntry], String, String)] {
+    check("补写：\(why)", restorableImageUniqueID(entries), want)
+}
+for (entries, why) in [
+    ([uniqueID(Array("J12".utf8) + [0xFF] + Array("J12".utf8) + [0])], "不是合法 UTF-8"),
+    ([uniqueID(j12, type: 7)], "UNDEFINED 类型"),
+    ([uniqueID(Array("abc".utf8) + [0]), uniqueID(Array("def".utf8) + [0])], "同号条目两个"),
+    ([uniqueID(j12 + [0], ifd: "IFD0")], "放在 IFD0"),
+    ([uniqueID(nil, count: 99999)], "值越界读不出"),
+    ([uniqueID(nil, count: 0)], "长度 0"),
+    ([uniqueID([0x20, 0x20, 0])], "只有空格和 NUL"),
+    ([uniqueID([0] + Array("abc".utf8) + [0])], "第一个字节就是 NUL"),
+    ([rawEntry(.gps, "GPS", 0xA420, 2, j12 + [0])], "GPS 命名空间里的同号标签"),
+] as [([RawExifEntry], String)] {
+    check("不补：\(why)", restorableImageUniqueID(entries), String?.none)
+}
+let j12Entry = uniqueID(j12 + [0])
+check("两边的值相同（补齐长度不同也算）：不报",
+      rawIssues([j12Entry], [uniqueID(j12 + [0, 0, 0, 0])]), [])
+check("产物的值末尾多一个空格：报变化",
+      rawIssues([j12Entry], [uniqueID(j12 + [0x20, 0])]),
+      ["变化 EXIF 标签 ImageUniqueID：\"J12LLKF00SM J12LLKL01GM\" → \"J12LLKF00SM J12LLKL01GM \""])
+check("源的视图里读得到 ImageUniqueID：值由键空间比对管，这里不比",
+      rawIssues([j12Entry], [uniqueID(j12 + [0x20, 0])], idInView: true), [])
+check("产物的值读不出：报变化",
+      rawIssues([j12Entry], [uniqueID(nil, count: 99999)]),
+      ["变化 EXIF 标签 ImageUniqueID：\"J12LLKF00SM J12LLKL01GM\" → 值读不出"])
+check("两边都不是合法 UTF-8、长度相同：注明原始字节从哪里开始不同",
+      rawIssues([uniqueID([0x41, 0xFF, 0x42, 0])], [uniqueID([0x41, 0xFE, 0x42, 0])]),
+      ["变化 EXIF 标签 ImageUniqueID：3 字节（不是合法的 UTF-8） → 3 字节（不是合法的 UTF-8）（显示相同，原始字节从第 2 个起不同）"])
+let longID = [UInt8](repeating: 0x61, count: 70)
+check("显示截断后相同：注明原始字节从哪里开始不同",
+      rawIssues([uniqueID(longID + [0])], [uniqueID(longID + [0x62, 0])]).first?.hasSuffix("（显示相同，原始字节从第 71 个起不同）"),
+      true)
+check("产物里没有：照报丢失，不报变化", rawIssues([j12Entry], []),
+      ["丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，ASCII，\"J12LLKF00SM J12LLKL01GM\"）——ImageIO 没有把它写进产物"])
+check("源里没有数据的条目不比：产物里有别的值也不报",
+      rawIssues([uniqueID([0x20, 0])], [uniqueID(j12 + [0])]), [])
+// 接到文件上：手搭的 JPEG，Exif 子 IFD 里只有一个 0xA420。超过 4 字节的值放在子 IFD 后面。
+func jpegWithUniqueID(type: Int = 2, count: Int? = nil, value: [UInt8]) -> [UInt8] {
+    let field = value.count <= 4 ? value + [UInt8](repeating: 0, count: 4 - value.count) : le32(afterOneEntry + 18)
+    return jpegWithExif(tiffLE([(0x8769, 4, 1, le32(afterOneEntry))],
+                               tail: le16(1) + le16(0xA420) + le16(type) + le32(count ?? value.count) + field + le32(0)
+                                   + (value.count <= 4 ? [] : value)))
+}
+let uidDir = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-uid-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: uidDir, withIntermediateDirectories: true)
+func writtenUniqueID(_ jpeg: [UInt8], props: [CFString: Any] = [:]) -> String? {
+    let url = uidDir.appendingPathComponent("\(UUID().uuidString).jpg")
+    guard (try? Data(jpeg).write(to: url)) != nil else { return "<写不出样本>" }
+    let exif = propertiesToWrite(props, source: url)[kCGImagePropertyExifDictionary] as? [CFString: Any]
+    return exif?[kCGImagePropertyExifImageUniqueID] as? String
+}
+check("前提：手搭的 JPEG 里读得出 Exif 子 IFD 的 0xA420",
+      TIFFStructure(jpeg: jpegWithUniqueID(value: j12 + [0])).map { rawExifEntries($0).map(\.tag) }, [0x8769, 0xA420])
+check("写入用的属性补上源里的 ImageUniqueID", writtenUniqueID(jpegWithUniqueID(value: j12 + [0])), "J12LLKF00SM J12LLKL01GM")
+check("视图里已经有 ImageUniqueID：不动它",
+      writtenUniqueID(jpegWithUniqueID(value: j12 + [0]),
+                      props: [kCGImagePropertyExifDictionary: [kCGImagePropertyExifImageUniqueID: "视图里的值"]]),
+      "视图里的值")
+for (jpeg, why) in [
+    (jpegWithUniqueID(count: 0x7FFF_FFFF, value: j12 + [0]), "个数离谱"),
+    (jpegWithUniqueID(count: 200, value: j12 + [0]), "值越出 EXIF"),
+    (jpegWithUniqueID(count: 0, value: []), "长度 0"),
+    (Array(jpegWithUniqueID(value: j12 + [0]).dropLast(12)), "EXIF 段被截短"),
+] {
+    check("不补、不崩：\(why)", writtenUniqueID(jpeg), String?.none)
+}
+try? FileManager.default.removeItem(at: uidDir)
 
 print("GPS 按原始分数比：值不等就报，不加容差")
 let srcLatitude = rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(22, 1), (38, 1), (53743286, 1000000)]))
 let gps = compareRawExif(source: [srcLatitude],
                          dest: [rawEntry(.gps, "GPS", 0x0002, 5, rationalBytes([(22, 1), (38, 1), (5374, 100)]))],
-                         viewLosses: [], makerNoteReported: false)
+                         viewLosses: [], makerNoteReported: false, sourceViewHasImageUniqueID: false)
 check("秒被截到 1/100：报一行，注明原因", gps.issues,
       ["变化 GPS 纬度：22°38′53.743286″ → 22°38′53.74″（HEIF 写入器只保留到 1/100 秒）"])
 check("同一处的视图键交给键空间比对跳过", gps.coveredViewKeys, ["{GPS}/Latitude", "XMP/exif:GPSLatitude"])

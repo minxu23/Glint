@@ -24,6 +24,8 @@ let usage = """
           probe --headroom <文件>                    按 HDR 解码的内容余量
           probe --hdr-peak <文件>                    按 HDR 解码后最亮的线性亮度
           probe --aux-items <文件.heic>              HEIF 里辅助图项的个数（iref 的 auxl 条数）
+          probe --raw-exif <文件> <标签十六进制>     原始 EXIF 里 IFD0/Exif 子 IFD 的这个标签，
+                                                     每个条目一行：IFD 类型 个数 值的十六进制
     辅助图类型是 kCGImageAuxiliaryDataType 后面那一截，如 HDRGainMap、Depth。
     """
 func die(_ message: String) -> Never {
@@ -43,6 +45,30 @@ if args.first == "--aux-items", args.count == 2 {
           let references = heifBoxes(bytes, in: (iref.content.lowerBound + 4)..<iref.content.upperBound)
     else { print("<无法读取>"); exit(1) }
     print(references.filter { $0.type == "auxl" }.count)
+    exit(0)
+}
+
+// 原始 EXIF 条目：JPEG 读 APP1 的 TIFF，HEIF 读 Exif 项，和 --verify 的原始清点同一套解析。
+// 用来断言 ImageIO 视图读不出的值（如非 33 字节的 ImageUniqueID）逐字节带过去了。
+if args.first == "--raw-exif", args.count == 3 {
+    guard let tag = Int(args[2], radix: 16) else { die(usage) }
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])) else { print("<无法读取>"); exit(1) }
+    let bytes = [UInt8](data)
+    let tiff: TIFFStructure?
+    if let jpeg = TIFFStructure(jpeg: bytes) {
+        tiff = jpeg
+    } else if case .tiff(let heif) = heifExif(bytes) {
+        tiff = heif
+    } else {
+        tiff = nil
+    }
+    guard let tiff else { print("<无法读取>"); exit(1) }
+    let found = rawExifEntries(tiff).filter { $0.space == .main && $0.tag == tag }
+    guard !found.isEmpty else { print("<无>"); exit(0) }
+    for e in found {
+        let hex = e.value.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "值读不出"
+        print("\(e.ifd) \(tiffTypeName(e.type)) \(e.count) \(hex)")
+    }
     exit(0)
 }
 

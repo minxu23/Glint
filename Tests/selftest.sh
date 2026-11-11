@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=197
-EXPECTED_UNIT=418
+EXPECTED_ASSERTIONS=221
+EXPECTED_UNIT=447
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -702,6 +702,62 @@ check "前提：源里接上了深度图" "$(./Tests/probe --aux "$WORK/四二�
 out=$("$BIN" --verify "$WORK/四二二.jpg" 2>&1); st=$?
 check "前提：产物是 4:2:0" "$(./Tests/probe "$WORK/四二二.heic" '{FileContents}/Images[0]/ChromaSubsampling')" "4:2:0"
 refute "色度抽样不报" "$st" grep -qF "ChromaSubsampling" <<< "$out"
+
+round "7k. ImageIO 读不出的 ImageUniqueID"
+# ImageIO 只读恰好 33 字节的 ImageUniqueID，写入器却什么长度都照写。别的长度的值转换时从
+# 原始字节补写进产物，校验按两边的原始字节比值（ImageIO 视图两边都读不出它）。源的副本
+# 放在另一个目录里留作比对。
+mkdir -p "$WORK/唯一标识/源副本"
+i=0
+while IFS='|' read -r what value; do
+    i=$((i + 1))
+    f="$WORK/唯一标识/$i.jpg" ref="$WORK/唯一标识/源副本/$i.jpg"
+    make_sample ./Tests/fixture --unique-id "$value" "$f"
+    cp "$f" "$ref"
+    check "$what：前提，源的 ImageIO 视图里没有 ImageUniqueID" "$(./Tests/probe "$f" '{Exif}/ImageUniqueID')" "<无>"
+    out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过" \
+        || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    refute "$what：校验通过后删了源" "$st" test -e "$f"
+    check_same "$what：产物原始 EXIF 里的 0xA420 与源逐字节相同" \
+        "$(./Tests/probe --raw-exif "${f%.jpg}.heic" A420)" "$(./Tests/probe --raw-exif "$ref" A420)"
+done <<'EOF'
+24 字节|J12LLKF00SM J12LLKL01GM
+26 字节|OPPO_20201019_204116_0001
+含非 ASCII 字符|唯一标识
+EOF
+# 33 字节：ImageIO 自己读得到，键空间比对管它的值，补写那一路什么都不做。
+make_sample ./Tests/fixture --unique-id 0123456789abcdef0123456789abcdef "$WORK/唯一标识/33字节.jpg"
+check "33 字节：前提，源的 ImageIO 视图里读得到" \
+    "$(./Tests/probe "$WORK/唯一标识/33字节.jpg" '{Exif}/ImageUniqueID')" "0123456789abcdef0123456789abcdef"
+cp "$WORK/唯一标识/33字节.jpg" "$WORK/唯一标识/源副本/33字节.jpg"
+out=$("$BIN" --verify "$WORK/唯一标识/33字节.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" && pass "33 字节：校验通过" || { fail "33 字节：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+check_same "33 字节：产物原始 EXIF 里的 0xA420 与源逐字节相同" \
+    "$(./Tests/probe --raw-exif "$WORK/唯一标识/33字节.heic" A420)" \
+    "$(./Tests/probe --raw-exif "$WORK/唯一标识/源副本/33字节.jpg" A420)"
+# 写不回原样的不补，照报丢失：不是合法 UTF-8 的值、UNDEFINED 类型。
+./Tests/fixture "$WORK/唯一标识/非UTF8.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$WORK/唯一标识/非UTF8.jpg" 'exif:A420:ascii=J12LLKF00SM\xffJ12'
+expect_reported "ImageUniqueID 不是合法 UTF-8" "$WORK/唯一标识/非UTF8.jpg" \
+    '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，ASCII，"J12LLKF00SM'
+check "ImageUniqueID 不是合法 UTF-8：产物里没有补写" \
+    "$(./Tests/probe --raw-exif "$WORK/唯一标识/非UTF8.heic" A420)" "<无>"
+./Tests/fixture "$WORK/唯一标识/UNDEFINED.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$WORK/唯一标识/UNDEFINED.jpg" 'exif:A420:undef=J12LLKF00SM J12LLKL01GM'
+expect_reported "UNDEFINED 类型的 ImageUniqueID" "$WORK/唯一标识/UNDEFINED.jpg" \
+    '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，UNDEFINED，"J12LLKF00SM J12LLKL01GM"）——类型不合规范'
+# 个数离谱、值越出 EXIF：不崩，照报。
+while IFS='|' read -r what spec; do
+    f="$WORK/唯一标识/$what.jpg"
+    ./Tests/fixture "$f" >/dev/null
+    make_sample ./Tests/mangle-tool --tags "$f" "$spec"
+    expect_reported "ImageUniqueID $what" "$f" '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，ASCII，值读不出）——值越界'
+done <<'EOF'
+个数离谱|exif:A420:ascii#99999=J12LLKF00SM
+值偏移越出EXIF|exif:A420:ascii@7FFFFFF0=J12LLKF00SM J12LLKL01GM
+EOF
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

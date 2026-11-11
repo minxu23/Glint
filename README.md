@@ -85,6 +85,12 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
    包括拍摄时间（`DateTimeOriginal`、时区偏移、亚秒）、拍摄位置（经纬度、
    海拔、方位角、GPS 时间戳）、相机与镜头型号、光圈快门 ISO 焦距、
    图像描述、`UserComment` 备注、作者、版权、星级评分等。
+   `ImageUniqueID` 也包括 ImageIO 读不出的写法：ImageIO 只读长度恰好 33 字节（32 个字符
+   加 NUL，规范的定长）的值，别的长度（如 24 字节的 `J12LLKF00SM J12LLKL01GM`、26 字节的
+   `OPPO_20201019_204116_0001`）它当作不存在，与内容无关。本工具从源 JPEG 的原始字节里
+   取出值（取到第一个 NUL 为止）补进要写入的属性，写入器把它原样写进产物。只补能原样写回
+   的：Exif 子 IFD 里恰好一个、ASCII 类型、有数据、取出的字节是合法 UTF-8；别的写法不补，
+   `--verify` 照报丢失。
 2. **XMP 数据包** —— Lightroom / Photoshop / Bridge 写入的标题、说明、
    关键词、评级、版权、人脸区域等，整包合并进产物：包括属性字典表达不了的
    `xmp:Label`、`lr:hierarchicalSubject`、`dc:title` 的各个语言、人脸区域的
@@ -104,8 +110,8 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 按 HDR 显示的亮度余量不变。辅助图的像素是重新有损编码的，见「已知限制」。
 
 转换分两遍。第一遍走 `CGImageDestinationAddImageFromSource`，直接从源转码而不是
-先解码成位图再编码，ICC 跟着走，EXIF 等属性字典（含本工具修补过的 `UserComment`）
-写进去；增益图由这一步的 `kCGImageDestinationPreserveGainMap` 带过去，深度图、视差图、
+先解码成位图再编码，ICC 跟着走，EXIF 等属性字典（含本工具修补过的 `UserComment` 和补回的
+`ImageUniqueID`）写进去；增益图由这一步的 `kCGImageDestinationPreserveGainMap` 带过去，深度图、视差图、
 蒙版用 `CGImageDestinationAddAuxiliaryDataInfo` 逐个加在主图后面。增益图不走后一条路：
 3 通道的 ISO 增益图从源里取出来没有像素数据，交给 `AddAuxiliaryDataInfo` 时写入照样
 成功、产物里却没有增益图；单通道增益图两条路写出的产物逐字节相同，两条一起走则苹果
@@ -202,6 +208,17 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 相等才算没变，不加容差，例如
 `变化 GPS 纬度：22°38′53.743286″ → 22°38′53.74″（HEIF 写入器只保留到 1/100 秒）`。报了这一行，
 ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不再另报。
+
+**ImageIO 读不出的 `ImageUniqueID` 按原始字节比值。** 33 字节以外的 `ImageUniqueID`
+在源和产物的 ImageIO 视图里都没有，转换时补写进去的值写对没有，键空间比对看不见。所以源的
+视图里没有 `{Exif}/ImageUniqueID`、两边原始 EXIF 里都有 `0xA420` 时，按补写时的取值规则
+（取到第一个 NUL 为止）逐字节比两边的值，不同就报，例如
+`变化 EXIF 标签 ImageUniqueID："J12LLKF00SM J12LLKL01GM" → "J12LLKF00SM J12LLKL01GM "`。
+值照文本显示、不去尾部空格；不是合法 UTF-8 的写字节数，显示相同时注明原始字节从第几个起
+不同。产物里没有就是上面那条「丢失」。源的视图里读得到它（33 字节）时，值照常由键空间
+比对管。逐值比只做这一个标签：别的标签 ImageIO 在源一侧读不出就不会写进产物，没有值可比；
+两边视图都读得到的标签已经由键空间比对按值比过，原始值的写法（分数的分母、补齐长度、
+整数宽度）重新写一遍本来就会变，再逐字节比只会刷出噪声。
 
 **认识的段里还有两类 ImageIO 不读的数据，同样直接从源文件字节里读。**
 
@@ -349,7 +366,9 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   LONG 的 `LightSource`）、放错 IFD 的、ImageIO 不认识的私有标签、`PrintImageMatching`、
   不被 ImageIO 解析的短 MakerNote。属性字典里补上、XMP 里补上都写不进产物（实测过），
   所以只做检测：`--verify` 逐个报出（见「`--verify` 到底比什么」的原始标签清点），
-  `--delete-original` 不会删源。
+  `--delete-original` 不会删源。`ImageUniqueID` 是例外：33 字节以外的写法 ImageIO 读不出，
+  但写入器照写，所以能原样写回的由本工具补写（见「保留了哪些元数据」）；写不回原样的
+  （类型不是 ASCII、放错 IFD、同号条目不止一个、不是合法 UTF-8）照报丢失。
 - **GPS 坐标的秒只保留到 1/100**。ImageIO 写 HEIF 时不管给多精确的值，秒都存成分母 100，
   误差最多约 15 厘米；海拔这类分数也会被换成别的近似分数（如 `1250001/100000` →
   `624988/49999`）。写不回去，只能如实报：秒的精度高于 1/100 的照片（很多手机都是）
@@ -423,7 +442,7 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
 | `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：捞回 ImageIO 读不出的 `UserComment`，按标签读原始值 |
 | `Sources/Core/HEIFExif.swift` | 从 HEIF 的 `meta` 盒子里取出 Exif 项的原始 TIFF，供原始 EXIF 清点读产物一侧 |
-| `Sources/Core/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）与 GPS 原始分数比对，含不报清单 |
+| `Sources/Core/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）、GPS 原始分数比对、`ImageUniqueID` 的补写规则与按原始字节比值，含不报清单 |
 | `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）、MPF 索引与尾部记账、APP13 里的 Photoshop 资源 |
 | `Sources/Core/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
 | `Sources/Core/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |

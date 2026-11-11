@@ -25,9 +25,13 @@
 //       往 IFD0（ifd0）、Exif 子 IFD（exif）或 GPS IFD（gps）里写类型由自己指定的条目，
 //       用来造 ImageIO 不认的写法（ASCII 类型的 GPSProcessingMethod、LONG 类型的
 //       LightSource、放错 IFD 的标签、空条目）。类型：ascii（值加 NUL 结尾；值为空时
-//       写个数 0）、undef（值的字节，`\0` 表示 NUL）、short / long（逗号分隔的十进制）、
-//       rational（逗号分隔的 n/d）、none（类型 0、个数 0）。同一张表里同号的条目全部
+//       写个数 0）、undef（值的字节）、short / long（逗号分隔的十进制）、
+//       rational（逗号分隔的 n/d）、none（类型 0、个数 0）。ascii 与 undef 的值里 `\0` 是
+//       NUL、`\xHH` 是任意一个字节（造不是合法 UTF-8 的值）。同一张表里同号的条目全部
 //       换成这里给的；同一个标签号给几次就写几条。
+//       类型后面可以接 `#<个数>` 和 `@<十六进制偏移>`，把条目里的个数、值偏移改成给定的数，
+//       值的字节照常写在表后面：造个数离谱、值越出 EXIF 的条目（如 `exif:A420:ascii#99999=x`、
+//       `exif:A420:ascii@7FFFFFF0=0123456789abcdef`）。
 //   mangle --8bim <文件.jpg> <资源号十六进制> <内容>
 //       往 APP13 Photoshop 资源块末尾追加一个 8BIM 资源，内容是 <内容> 的 UTF-8 字节。
 //   mangle --color-gainmap <文件.jpg>
@@ -95,8 +99,10 @@ func replacePayload(of segment: JPEGSegment, with payload: [UInt8]) {
 struct NewEntry {
     let tag: Int
     let type: Int
-    let count: Int
+    var count: Int
     let value: [UInt8]
+    /// 不是 nil 时条目里的值偏移写成它，不指向真正写下值的地方。
+    var offset: Int? = nil
 }
 
 func encoders(_ tiff: TIFFStructure) -> (u16: (Int) -> [UInt8], u32: (Int) -> [UInt8]) {
@@ -145,10 +151,10 @@ func rewriteIFD(_ which: String, _ added: [NewEntry]) {
     var values: [UInt8] = []
     for a in added {
         var entry = u16(a.tag) + u16(a.type) + u32(a.count)
-        if a.value.count <= 4 {
+        if a.value.count <= 4 && a.offset == nil {
             entry += a.value + [UInt8](repeating: 0, count: 4 - a.value.count)
         } else {
-            entry += u32(dataAt)
+            entry += u32(a.offset ?? dataAt)
             values += a.value
             dataAt += a.value.count
             if a.value.count % 2 == 1 { values.append(0); dataAt += 1 }
@@ -207,16 +213,42 @@ func typedEntries(_ specs: [String]) {
         guard parts.count == 2, head.count == 3, let tag = Int(head[1], radix: 16), (0...0xFFFF).contains(tag)
         else { die("条目写成 <IFD>:<标签十六进制>:<类型>=<值>：\(spec)") }
         let which = String(head[0]), text = String(parts[1])
-        // 文本里的 `\0` 是一个 NUL 字节。
-        let raw = Array(text.replacingOccurrences(of: "\\0", with: "\0").utf8)
+        // 类型后面的 `#个数`、`@偏移`。
+        var typeSpec = Substring(head[2]), countOverride: Int?, offsetOverride: Int?
+        if let at = typeSpec.firstIndex(of: "@") {
+            guard let o = Int(typeSpec[typeSpec.index(after: at)...], radix: 16) else { die("偏移写十六进制：\(spec)") }
+            offsetOverride = o
+            typeSpec = typeSpec[..<at]
+        }
+        if let at = typeSpec.firstIndex(of: "#") {
+            guard let n = Int(typeSpec[typeSpec.index(after: at)...]), (0...0xFFFF_FFFF).contains(n) else {
+                die("个数写十进制：\(spec)")
+            }
+            countOverride = n
+            typeSpec = typeSpec[..<at]
+        }
+        // 文本里的 `\0` 是一个 NUL 字节，`\xHH` 是一个任意字节。
+        var raw: [UInt8] = []
+        let utf8 = Array(text.utf8)
+        var i = 0
+        while i < utf8.count {
+            if utf8[i] == 0x5C, i + 1 < utf8.count, utf8[i + 1] == 0x30 {
+                raw.append(0); i += 2
+            } else if utf8[i] == 0x5C, i + 3 < utf8.count, utf8[i + 1] == 0x78,
+                      let b = UInt8(String(decoding: utf8[(i + 2)..<(i + 4)], as: UTF8.self), radix: 16) {
+                raw.append(b); i += 4
+            } else {
+                raw.append(utf8[i]); i += 1
+            }
+        }
         func numbers(_ width: Int, _ encode: (Int) -> [UInt8]) -> [UInt8] {
             text.split(separator: ",").flatMap { item -> [UInt8] in
                 guard let n = Int(item), n >= 0, width == 4 || n <= 0xFFFF else { die("数值不合法：\(spec)") }
                 return encode(n)
             }
         }
-        let entry: NewEntry
-        switch head[2] {
+        var entry: NewEntry
+        switch typeSpec {
         case "ascii": entry = NewEntry(tag: tag, type: 2, count: raw.isEmpty ? 0 : raw.count + 1, value: raw.isEmpty ? [] : raw + [0])
         case "undef": entry = NewEntry(tag: tag, type: 7, count: raw.count, value: raw)
         case "short": let v = numbers(2, u16); entry = NewEntry(tag: tag, type: 3, count: v.count / 2, value: v)
@@ -231,6 +263,8 @@ func typedEntries(_ specs: [String]) {
         case "none": entry = NewEntry(tag: tag, type: 0, count: 0, value: [])
         default: die("类型只能是 ascii、undef、short、long、rational、none：\(spec)")
         }
+        if let countOverride { entry.count = countOverride }
+        entry.offset = offsetOverride
         if let i = byIFD.firstIndex(where: { $0.which == which }) {
             byIFD[i].entries.append(entry)
         } else {

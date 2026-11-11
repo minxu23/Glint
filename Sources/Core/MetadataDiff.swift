@@ -647,10 +647,12 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
         .merging(rawTimeFields(of: bytes)) { _, raw in raw }
     let after = metadataKeySpace(of: destImage, url: dest)
     // 原始 EXIF 清点先做：它报出的 GPS 分数变化，键空间比对里同一处的视图键不再重复报；
-    // 键空间比对已经报了丢失的标签，它也不再重复报。
+    // 键空间比对已经报了丢失的标签，它也不再重复报。源视图里没有的 ImageUniqueID 由它按
+    // 原始字节比值。
     let raw = rawExifDiff(source: bytes, dest: [UInt8](destData),
                           viewLosses: keySpaceLosses(before: before, after: after),
-                          makerNoteReported: makerNoteLost(before: before, after: after))
+                          makerNoteReported: makerNoteLost(before: before, after: after),
+                          sourceViewHasImageUniqueID: before[exifKey(kCGImagePropertyExifImageUniqueID)] != nil)
     // 后几项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
     return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
         + raw.issues

@@ -58,7 +58,8 @@ func imageProperties(_ src: CGImageSource) -> [CFString: Any] {
 }
 
 /// 在 ImageIO 给出的属性之上，补回它读不出来的字段。目前只有一处：
-/// 缺少字符集前缀的 EXIF UserComment（见 rawExifUserComment 的说明）。
+/// 缺少字符集前缀的 EXIF UserComment（见 rawExifUserComment 的说明）。它同时是 --verify
+/// 源侧的视图；不进视图的 ImageUniqueID 另在 propertiesToWrite 里补。
 func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
     var props = imageProperties(src)
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
@@ -69,6 +70,24 @@ func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
     exif[kCGImagePropertyExifUserComment] = recovered
     props[kCGImagePropertyExifDictionary] = exif
     return props
+}
+
+/// 要写进产物的属性：在 repairedProperties 的结果上补回 ImageIO 读不出的 ImageUniqueID
+/// （33 字节以外的写法，规则见 restorableImageUniqueID）。视图里已经有它时原样返回同一个字典。
+///
+/// 补回的值只用于写入，不进 --verify 的源侧视图：产物一侧的 ImageIO 视图同样读不出这类值，
+/// 放进源侧视图就会被键空间比对报成丢失。值写对没有，由原始清点按两边的原始字节核对
+/// （compareRawExif）。
+func propertiesToWrite(_ props: [CFString: Any], source url: URL) -> [CFString: Any] {
+    var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+    guard exif[kCGImagePropertyExifImageUniqueID] == nil,
+          let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+          let tiff = TIFFStructure(jpeg: [UInt8](data)),
+          let id = restorableImageUniqueID(rawExifEntries(tiff)) else { return props }
+    exif[kCGImagePropertyExifImageUniqueID] = id
+    var result = props
+    result[kCGImagePropertyExifDictionary] = exif
+    return result
 }
 
 /// 把 UserComment 改写成 ImageIO 的 HEIC 写入器能完整写下的形式。
@@ -212,7 +231,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
     }
 
     let inBytes = fileSize(input)   // 要在可能删除源文件之前读
-    let props = repairedProperties(src, url: input)
+    let props = propertiesToWrite(repairedProperties(src, url: input), source: input)
     let xmp = CGImageSourceCopyMetadataAtIndex(src, 0, nil)
 
     var flatProps: [String: String] = [:]
@@ -345,7 +364,7 @@ private func encodeFirstPass(_ src: CGImageSource, properties: [CFString: Any],
 /// 把源图编码成 HEIF 写到 `url`，分两遍：
 ///
 /// 1. AddImageFromSource 直接从源转码到内存：像素不先解码成位图，ICC 色彩描述
-///    文件跟着走，`properties`（含 UserComment 的修补）写进 EXIF 等字典。
+///    文件跟着走，`properties`（含 UserComment 的修补与补回的 ImageUniqueID）写进 EXIF 等字典。
 ///    写之前先过 propertiesForHEIFWriter：源属性直通的备注和修补出来的备注都走
 ///    这一处，不在别处另做改写。源里的辅助图也在这一遍加进去：增益图靠
 ///    PreserveGainMap，深度图、蒙版等靠 AddAuxiliaryDataInfo（见 encodeFirstPass）。

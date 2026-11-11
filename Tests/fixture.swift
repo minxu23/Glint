@@ -47,6 +47,10 @@
 //            编成带 ISO 增益图的 JPEG：增益图放在 MPF 登记的第二张 JPEG 里，单通道，
 //            主图带 ISO 21496-1 版本标记段（APP2）。属性字典照常写进去，XMP 包不另外合并。
 //            要 3 通道的增益图，再用 mangle-tool --color-gainmap 改写。
+//   --unique-id <值>
+//            EXIF ImageUniqueID（ExifIFD 0xA420）写成 <值>。ImageIO 的写入器什么长度都照写
+//            （值的 UTF-8 加一个 NUL），读的时候却只认恰好 33 字节的写法，所以给别的长度的值
+//            就得到一张 ImageIO 视图里看不见 ImageUniqueID 的样本。
 
 import CoreGraphics
 import CryptoKit
@@ -70,7 +74,17 @@ args.removeAll {
      "--thumbnail", "--noise", "--iso-gainmap"].contains($0)
 }
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
-    + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap] <输出.jpg>"
+    + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap]"
+    + " [--unique-id <值>] <输出.jpg>"
+var uniqueID: String?
+if let at = args.firstIndex(of: "--unique-id") {
+    guard at + 1 < args.count else {
+        FileHandle.standardError.write(Data("\(usage)\n".utf8))
+        exit(2)
+    }
+    uniqueID = args[at + 1]
+    args.removeSubrange(at...(at + 1))
+}
 var auxKinds: [String] = []
 while let at = args.firstIndex(of: "--aux") {
     guard at + 1 < args.count else {
@@ -184,6 +198,11 @@ if lossy, var iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any] {
 // 默认写上；--no-exif-offset 时不写，让 IIM 时间后缀成为偏移的唯一源头。
 if !noExifOffset, var exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
     exif[kCGImagePropertyExifOffsetTimeOriginal] = "+08:00"
+    props[kCGImagePropertyExifDictionary] = exif
+}
+
+if let uniqueID, var exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+    exif[kCGImagePropertyExifImageUniqueID] = uniqueID
     props[kCGImagePropertyExifDictionary] = exif
 }
 
