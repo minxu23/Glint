@@ -911,8 +911,14 @@ if let jpegSource = tinyJPEGSource() {
 for (bytes, why) in [([UInt8](), "空文件"), (Array("not a heif file at all".utf8), "垃圾"),
                      ([0, 0, 0, 1] + Array("ftyp".utf8) + [UInt8](repeating: 0xFF, count: 8), "64 位盒子长度离谱"),
                      ([0, 0, 0, 0x10] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 0x30], "meta 里的子盒子越界"),
-                     ([0, 0, 0, 0x15] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 9] + Array("iinf".utf8) + [0],
-                      "iinf 只有 1 字节内容")] {
+                     // 下面两个 iinf 后面都紧跟一个 free 盒子：越过 iinf 读字段时读得到字节，
+                     // 不会因为到了文件末尾而碰巧停下。
+                     ([0, 0, 0, 0x1D] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 9] + Array("iinf".utf8) + [0]
+                      + [0, 0, 0, 8] + Array("free".utf8),
+                      "iinf 只有 1 字节内容"),
+                     ([0, 0, 0, 0x21] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 13] + Array("iinf".utf8)
+                      + [0, 0, 0, 0, 0] + [0, 0, 0, 8] + Array("free".utf8),
+                      "iinf 装得下版本、装不下条目数")] {
     if case .unreadable = heifExif(bytes) { pass("读不出：\(why)") } else { fail("\(why) 没被判成读不出") }
 }
 
