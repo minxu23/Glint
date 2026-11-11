@@ -1015,7 +1015,8 @@ for (bytes, why) in [([UInt8](), "空文件"), (Array("not a heif file at all".u
 }
 
 print("EXIF 整块照搬：源一侧的闸门")
-let carryTIFF: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0] + Array("源里的 EXIF".utf8)
+// 源 TIFF 与下面手搭产物里的 TIFF 长度不同：iloc 的长度字段不改的话，读回会对不上。
+let carryTIFF: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0] + Array("源里的 EXIF，比产物里的长".utf8)
 check("恰好一个 EXIF 段：取出 Exif\\0\\0 之后的全部字节",
       try? sourceExifTIFF(jpegWithExif(carryTIFF)).get(), carryTIFF)
 func sourceSkip(_ jpeg: [UInt8]) -> String? {
@@ -1127,6 +1128,8 @@ func expectCarried(_ spec: HEIFSpec, _ why: String) {
     let base = spec.baseOffsetSize == 0 ? 0 : mdatStart + (spec.mdatHeader == 64 ? 16 : 8)
     let fields = be(exifRange.lowerBound - base, spec.offsetSize) + be(exifRange.count, spec.lengthSize)
     let fieldAt = (0...(old.count - fields.count)).first { Array(old[$0..<($0 + fields.count)]) == fields }
+    let newFields = be(old.count - base, spec.offsetSize) + be(content.count, spec.lengthSize)
+    let fieldsOK = fieldAt.map { Array(new[$0..<($0 + newFields.count)]) == newFields } ?? false
     if let fieldAt { allowed.formUnion(fieldAt..<(fieldAt + fields.count)) }
     let untouched = (0..<old.count).allSatisfy { allowed.contains($0) || old[$0] == new[$0] }
     let zeroed = exifRange.allSatisfy { new[$0] == 0 }
@@ -1137,10 +1140,10 @@ func expectCarried(_ spec: HEIFSpec, _ why: String) {
     if spec.mdatHeader == 32 { mdatOK = bigEndianInt(new, mdatStart, 4) == bigEndianInt(old, mdatStart, 4)! + content.count }
     if spec.mdatHeader == 64 { mdatOK = bigEndianInt(new, mdatStart + 8, 8) == bigEndianInt(old, mdatStart + 8, 8)! + content.count }
     if spec.mdatHeader == 0 { mdatOK = Array(new[mdatStart..<(mdatStart + 8)]) == Array(old[mdatStart..<(mdatStart + 8)]) }
-    let ok = fieldAt != nil && untouched && zeroed && tail && new.count == old.count + content.count && readBack && mdatOK
+    let ok = fieldsOK && untouched && zeroed && tail && new.count == old.count + content.count && readBack && mdatOK
         && heifExifEndsAtFileEnd(new)
     check(ok, "\(why)：只动了该动的字节，旧范围清零，末尾是原前缀 + 源 TIFF，读回是源 TIFF"
-          + (ok ? "" : "（字段 \(fieldAt != nil) 其余不动 \(untouched) 清零 \(zeroed) 末尾 \(tail) 读回 \(readBack) mdat \(mdatOK)）"))
+          + (ok ? "" : "（iloc 字段 \(fieldsOK) 其余不动 \(untouched) 清零 \(zeroed) 末尾 \(tail) 读回 \(readBack) mdat \(mdatOK)）"))
 }
 expectCarried(HEIFSpec(), "mdat 32 位长度、iloc 版本 1、4 字节偏移")
 expectCarried(HEIFSpec(mdatHeader: 64), "mdat 64 位长度")
