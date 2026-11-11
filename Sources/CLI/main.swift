@@ -22,7 +22,8 @@ GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间�
                            遇到读不了产物的软件时用
   -n, --dry-run            只打印将要做什么，不实际写文件
   -j, --jobs <n>           并发任务数，默认 \(ProcessInfo.processInfo.activeProcessorCount)
-  -v, --verbose            输出每张图保留的元数据条目数，以及 EXIF 整块照搬了没有
+  -v, --verbose            输出每张图保留的元数据条目数，以及 EXIF 整块照搬了没有；
+                           产物比原图大而重编过一次的，再说明两次的大小
   -h, --help               显示本帮助
 
 示例:
