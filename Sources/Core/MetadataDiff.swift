@@ -118,6 +118,31 @@ func isVolatile(_ key: String) -> Bool {
     return volatileKeys.contains(strippingArrayIndex(key))
 }
 
+/// 内嵌缩略图在属性视图里的键，去掉每一层的数组下标后按**完整键路径**比对。
+/// 缩略图是从像素派生的预览，有意不报（README「--verify 到底比什么」）。
+///
+/// ImageIO 在容器级属性的 `{FileContents}` 字典里给每张缩略图列一组键。实测这个
+/// 字典只在 JPEG 带辅助图时出现：带 IFD1 缩略图、不带辅助图的照片（`test_pic/` 两张）
+/// 读不出它。子键只收实测见过的五个，ImageIO 以后多吐一个子键，它会照常被报出来，
+/// 而不是被一个前缀悄悄吞掉。
+let thumbnailKeys: Set<String> = Set(["Width", "Height", "Orientation", "ThumbnailOffset", "ThumbnailSize"]
+    .map { "{FileContents}/Images/ThumbnailImages/\($0)" })
+
+/// 去掉键路径里每一层末尾的数组下标：`{FileContents}/Images[0]/ThumbnailImages[1]/Width`
+/// → `{FileContents}/Images/ThumbnailImages/Width`。下标里只认 ASCII 数字。
+func strippingAllArrayIndices(_ key: String) -> String {
+    key.split(separator: "/", omittingEmptySubsequences: false).map { component -> String in
+        guard component.hasSuffix("]"), let bracket = component.lastIndex(of: "["),
+              isAllDigits(Array(component[component.index(after: bracket)..<component.index(before: component.endIndex)]))
+        else { return String(component) }
+        return String(component[..<bracket])
+    }.joined(separator: "/")
+}
+
+func isThumbnailKey(_ key: String) -> Bool {
+    thumbnailKeys.contains(strippingAllArrayIndices(key))
+}
+
 /// JPEG 的 IPTC-IIM 段在 HEIF 里没有对应容器，但同样的信息由 XMP 或 EXIF 承载：
 /// IIM 键 → 目标里可能承载它的那几个键。判据见 equivalentCarries。
 let equivalentKeys: [String: [String]] = {
@@ -570,11 +595,28 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     let before = metadataKeySpace(of: sourceImage, url: source)
         .merging(rawTimeFields(of: bytes)) { _, raw in raw }
     let after = metadataKeySpace(of: destImage, url: dest)
-    // 后三项都是属性视图里没有的源数据，直接读源文件字节。
+    // 后三项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
     return keySpaceDiff(before: before, after: after)
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after)
-        + unportableSegments(in: bytes)
+        + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage))
         + unportablePhotoshopResources(in: bytes)
+}
+
+/// 源和产物里都有的辅助图的宽高：同一类型、宽高与像素格式都相同才算。尾部记账
+/// （carriedTrailerRanges）只认这里列出的尺寸。
+func carriedAuxiliarySizes(source: CGImageSource, dest: CGImageSource) -> [(width: Int, height: Int)] {
+    func shape(_ image: CGImageSource, _ type: CFString) -> [Int]? {
+        guard let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(image, 0, type) as? [CFString: Any],
+              let description = info[kCGImageAuxiliaryDataInfoDataDescription] as? [CFString: Any],
+              let width = description[kCGImagePropertyWidth] as? Int,
+              let height = description[kCGImagePropertyHeight] as? Int,
+              let format = description[kCGImagePropertyPixelFormat] as? Int else { return nil }
+        return [width, height, format]
+    }
+    return auxiliaryDataTypes.compactMap { type in
+        guard let s = shape(source, type), shape(dest, type) == s else { return nil }
+        return (s[0], s[1])
+    }
 }
 
 /// XMP 的时间戳按时刻比（Timestamp.isCarried）：目标可以多带小数秒或偏移，
@@ -592,7 +634,7 @@ func keySpaceDiff(before: [String: String], after: [String: String]) -> [String]
     var issues: [String] = []
     var makerNoteLost: [String: Int] = [:]   // 伪字典名 → 丢失条目数
 
-    for (k, v) in before.sorted(by: { $0.key < $1.key }) where !isVolatile(k) {
+    for (k, v) in before.sorted(by: { $0.key < $1.key }) where !isVolatile(k) && !isThumbnailKey(k) {
         if after[k] == nil {
             if equivalentCarries(key: k, value: v, in: after) { continue }
             if let group = makerNoteGroup(of: k) {

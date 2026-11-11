@@ -531,6 +531,122 @@ expectResources(resource(0x0404, [1, 2]) + Array("PHUT".utf8) + [0, 1, 0, 0], [0
                 "不是 8BIM 开头的旧式资源算解析不了")
 expectResources(Array(resource(0x0404, [1, 2]).prefix(11)), [], 6, "不到一个资源头长")
 
+print("缩略图键：按去掉下标后的完整键路径认，只认实测见过的子键")
+for key in ["{FileContents}/Images[0]/ThumbnailImages[0]/Width",
+            "{FileContents}/Images[0]/ThumbnailImages[0]/Height",
+            "{FileContents}/Images[0]/ThumbnailImages[0]/Orientation",
+            "{FileContents}/Images[0]/ThumbnailImages[0]/ThumbnailOffset",
+            "{FileContents}/Images[3]/ThumbnailImages[12]/ThumbnailSize"] {
+    checkRule(key, isThumbnailKey(key), true, "缩略图的 \(key.split(separator: "/").last!)")
+}
+for (key, why) in [("{FileContents}/Images[0]/ThumbnailImages[0]/HDRHeadroom", "没见过的子键照常报"),
+                   ("{FileContents}/Images[0]/Width", "主图的宽不是缩略图"),
+                   ("{FileContents}/Images[0]/AuxiliaryData[0]/Width", "辅助图的宽不是缩略图"),
+                   ("{Exif}/ThumbnailImages[0]/Width", "别的字典里同名的键不算"),
+                   ("{FileContents}/Images[0]/MyThumbnailImages[0]/Width", "名字里含 ThumbnailImages 不算"),
+                   ("{FileContents}/Images[0]/ThumbnailImages[x]/Width", "下标不是数字不算"),
+                   ("{FileContents}/Images[0]/ThumbnailImages[0]/Width/x", "更深一层不算")] {
+    checkRule(key, isThumbnailKey(key), false, why)
+}
+check("keySpaceDiff 跳过缩略图键、照报主图的键",
+      keySpaceDiff(before: ["{FileContents}/Images[0]/ThumbnailImages[0]/ThumbnailSize": "27774",
+                            "{FileContents}/Images[0]/Width": "4080"], after: [:]),
+      ["丢失 {FileContents}/Images[0]/Width = 4080"])
+
+print("尾部记账：MPF 登记的辅助图搬进产物才不报，偏移、长度、条目数都不信")
+func jpegSegment(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] {
+    let n = payload.count + 2
+    return [0xFF, marker, UInt8(n >> 8), UInt8(n & 0xFF)] + payload
+}
+/// 一张只有 SOF0 的完整小 JPEG（JPEGLayout 与 standaloneJPEGSize 只看段结构）。
+func tinyJPEG(_ width: Int, _ height: Int) -> [UInt8] {
+    [0xFF, 0xD8] + jpegSegment(0xC0, [8, UInt8(height >> 8), UInt8(height & 0xFF), UInt8(width >> 8),
+                                      UInt8(width & 0xFF), 1, 1, 0x11, 0]) + [0xFF, 0xD9]
+}
+typealias MPFEntry = (type: Int, size: Int, offset: Int)
+/// 主图（SOI + MPF 段 + EOI）后面依次接 `gap`、各张附加图像、`tail`。MP 索引按实际
+/// 位置填好，`edit` 再改条目或 MPEntry 的长度字段，造各种说谎的索引。偏移从 MPF 段里
+/// TIFF 头的起点（文件第 10 字节）算。
+func mpfJPEG(_ images: [(type: Int, data: [UInt8])], gap: [UInt8] = [], tail: [UInt8] = [], bigEndian: Bool = false,
+             entryBytes: Int? = nil, edit: (inout [MPFEntry]) -> Void = { _ in }) -> [UInt8] {
+    let base = 10
+    func u16(_ v: Int) -> [UInt8] { bigEndian ? [UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] : le16(v) }
+    func u32(_ v: Int) -> [UInt8] { bigEndian ? u16(v >> 16 & 0xFFFF) + u16(v & 0xFFFF) : le32(v) }
+    let header = 2 + 4 + 4 + 26 + 16 * (images.count + 1) + 2
+    var entries: [MPFEntry] = [(0x030000, header, 0)]
+    var at = header + gap.count
+    for image in images {
+        entries.append((image.type, image.data.count, at - base))
+        at += image.data.count
+    }
+    edit(&entries)
+    var tiff: [UInt8] = (bigEndian ? [0x4D, 0x4D, 0, 0x2A] : [0x49, 0x49, 0x2A, 0]) + u32(8) + u16(1)
+    tiff += u16(0xB002) + u16(7) + u32(entryBytes ?? entries.count * 16) + u32(26) + u32(0)
+    for e in entries { tiff += u32(e.type) + u32(e.size) + u32(e.offset) + u16(0) + u16(0) }
+    return [0xFF, 0xD8] + jpegSegment(0xE2, Array("MPF".utf8) + [0] + tiff) + [0xFF, 0xD9]
+        + gap + images.flatMap(\.data) + tail
+}
+let gainMap = tinyJPEG(40, 30), depthMap = tinyJPEG(20, 15)
+func expectTrailer(_ bytes: [UInt8], carried: [(width: Int, height: Int)], _ want: [String], _ why: String) {
+    checkRule("\(bytes.count) 字节，搬走 \(carried)", unportableSegments(in: bytes, carriedAuxiliary: carried), want, why)
+}
+let mpfNote = "（MPF 多图格式的附加图像）"
+let one = mpfJPEG([(0, gainMap)])
+let oneTrailer = gainMap.count
+expectTrailer(one, carried: [(40, 30)], [], "唯一的附加图像是搬走了的辅助图：不报")
+expectTrailer(one, carried: [], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "产物里没有这张辅助图：照报")
+expectTrailer(one, carried: [(41, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "尺寸对不上：照报")
+expectTrailer(mpfJPEG([(0x010002, gainMap)]), carried: [(40, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"],
+              "MP 类型是预览图（0x010002）：尺寸碰巧对上也照报")
+expectTrailer(mpfJPEG([(0, gainMap)], bigEndian: true), carried: [(40, 30)], [], "大端的 MP 索引照样读")
+expectTrailer(mpfJPEG([(0, gainMap)], tail: Array("xyz".utf8)), carried: [(40, 30)],
+              ["丢失 EOI 之后的 3 字节（尾部共 \(oneTrailer + 3) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
+              "辅助图后面另有数据：报剩下的字节")
+expectTrailer(mpfJPEG([(0, gainMap)], gap: [0xAB, 0xCD]), carried: [(40, 30)],
+              ["丢失 EOI 之后的 2 字节（尾部共 \(oneTrailer + 2) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
+              "EOI 与辅助图之间夹着数据：报夹着的字节")
+expectTrailer(mpfJPEG([(0, gainMap)], gap: [0, 0xFF, 0], tail: [0, 0]), carried: [(40, 30)], [],
+              "剩下的全是 0x00/0xFF 填充：不报")
+expectTrailer(mpfJPEG([(0, gainMap), (0, depthMap)]), carried: [(40, 30), (20, 15)], [], "两张辅助图都搬走了：不报")
+expectTrailer(mpfJPEG([(0, gainMap), (0, gainMap)]), carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节（尾部共 \(2 * oneTrailer) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
+              "一张辅助图只能认领一个条目")
+expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset = 0x7FFF_FFF0 }, carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "条目偏移指到文件外：照报，不崩")
+expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].size += 1 }, carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "条目长度越过文件末尾：照报")
+expectTrailer(mpfJPEG([(0, gainMap)], tail: [1]) { $0[1].size += 1 }, carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer + 1) 字节\(mpfNote)"], "条目范围里不只一张 JPEG：照报")
+expectTrailer(mpfJPEG([(0, Array(gainMap.dropLast(2)) + [0x12, 0x34])]), carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "登记的图像没有 EOI：照报")
+expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset = 0 }, carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "偏移 0 指回主图自己：照报")
+expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset -= 4 }, carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "条目范围伸进主图里：照报")
+expectTrailer(mpfJPEG([(0, gainMap)], entryBytes: 0xFFFF_FFF0), carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "MPEntry 声称的条目数离谱：照报，不崩")
+expectTrailer(mpfJPEG([(0, gainMap)], entryBytes: 40), carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "MPEntry 长度不是 16 的倍数：照报")
+check("条目数离谱时一个条目都不收", mpfImages(in: mpfJPEG([(0, gainMap)], entryBytes: 0xFFFF_FFF0),
+                                      JPEGLayout(mpfJPEG([(0, gainMap)]))!).count, 0)
+// 逐字节截短：不崩；截在辅助图中间（尾部至少还有一个非填充字节）时必须照报。
+let eoiEnd = one.count - oneTrailer
+let truncations = (0..<one.count).map { unportableSegments(in: Array(one.prefix($0)), carriedAuxiliary: [(40, 30)]) }
+check("逐字节截短的文件都不崩", truncations.count, one.count)
+check("截在辅助图中间的每一种都照报尾部丢失",
+      (eoiEnd + 2..<one.count).filter { truncations[$0].isEmpty }, [])
+// MPF 段本身被截短（段长度字段跟着改，后面的字节整体前移）：不崩，附加图像一律照报。
+// 截掉的部分不含条目表时，条目偏移也因前移而对不上，这几种照报的原因不只是索引读不出。
+let mpfStart = 2, mpfEnd = 2 + 4 + 4 + 26 + 32
+let segmentCuts = (mpfStart + 4 + 4 + 1..<mpfEnd).filter { cut in
+    var bytes = one
+    let n = cut - mpfStart - 2
+    bytes[mpfStart + 2] = UInt8(n >> 8); bytes[mpfStart + 3] = UInt8(n & 0xFF)
+    bytes.removeSubrange(cut..<mpfEnd)
+    return unportableSegments(in: bytes, carriedAuxiliary: [(40, 30)]).isEmpty
+}
+check("MPF 段截短到任何长度，附加图像都照报", segmentCuts, [])
+
 print("UserComment：经 encodeHEIF 写进 HEIC，读回与原文一致、字段里没有多余内容")
 // 这一组真的走 ImageIO 的 HEIC 写入器：userCommentForHEIFWriter 依据的是量出来的
 // 写入规则，只断言它自己的输出证明不了产物对。夹具的字段只有 48 字节，长备注

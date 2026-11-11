@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=118
-EXPECTED_UNIT=303
+EXPECTED_ASSERTIONS=153
+EXPECTED_UNIT=338
 EXPECTED_GUI=41
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -507,6 +507,70 @@ cp "$WORK/照片.jpg" "$WORK/PS资源.jpg"
 make_sample ./Tests/mangle-tool --8bim "$WORK/PS资源.jpg" 0BB7 "Photoshop 资源里的标记串"
 expect_reported "APP13 里的其它 Photoshop 资源" "$WORK/PS资源.jpg" \
     "丢失 APP13 里的 1 个 Photoshop 资源（0x0BB7）"
+
+round "7e. 辅助图搬进产物"
+# 每种辅助图一张合成样本，内容有纹理（每种图案不同）。逐张断言：产物里有同类型、
+# 同尺寸、同像素格式的辅助图；数据与源的最大差不超过 AUX_MAX_DIFF；附带元数据的标签
+# 与源相同；校验通过、--delete-original 删了源。源的副本放在另一个目录里留作比对。
+# AUX_MAX_DIFF 的单位是 8 位级数（浮点类型按源取值范围的 1/255 为一级，见 probe）。
+# 8 位与浮点类型都被重新有损编码：这些样本上量到 3，四张真实 HDR 照片的增益图量到
+# 5–8；质量参数（-q 0 到 1）不影响辅助图，产物里的辅助图数据逐字节相同。
+AUX_MAX_DIFF=8
+mkdir -p "$WORK/辅助图/源副本"
+while IFS='|' read -r what type flags; do
+    f="$WORK/辅助图/$type.jpg" ref="$WORK/辅助图/源副本/$type.jpg"
+    # shellcheck disable=SC2086  # flags 是要拆开的多个参数
+    make_sample ./Tests/fixture $flags "$f"
+    cp "$f" "$ref"
+    out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过" \
+        || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    refute "$what：校验通过后删了源" "$st" test -e "$f"
+    heic="${f%.jpg}.heic"
+    check_same "$what：产物里有同类型的辅助图，尺寸与像素格式相同" \
+        "$(./Tests/probe --aux "$heic" "$type")" "$(./Tests/probe --aux "$ref" "$type")"
+    diff=$(./Tests/probe --aux-diff "$ref" "$heic" "$type")
+    [[ "$diff" =~ ^[0-9]+$ ]] && [ "$diff" -le "$AUX_MAX_DIFF" ] \
+        && pass "$what：数据与源的最大差 $diff 级，不超过 $AUX_MAX_DIFF" \
+        || fail "$what：数据与源的最大差是 [$diff]，上界 $AUX_MAX_DIFF"
+    check_same "$what：附带元数据的标签与源相同" \
+        "$(./Tests/probe --aux-tags "$heic" "$type")" "$(./Tests/probe --aux-tags "$ref" "$type")"
+done <<'EOF'
+深度图|Depth|--aux depth
+视差图|Disparity|--aux disparity
+人像蒙版|PortraitEffectsMatte|--aux matte
+皮肤蒙版|SemanticSegmentationSkinMatte|--aux skin
+增益图（带缩略图）|HDRGainMap|--aux gainmap --thumbnail
+EOF
+# 增益图那张：元数据是真的苹果增益图标签，值要和夹具写进去的一样；按 HDR 解码，
+# 产物的内容余量要和源一样（源的余量就是夹具写的 HDRGainMapHeadroom）。
+gain="$WORK/辅助图/HDRGainMap.heic" gain_ref="$WORK/辅助图/源副本/HDRGainMap.jpg"
+tags=$(./Tests/probe --aux-tags "$gain" HDRGainMap)
+for want in "XMP/HDRGainMap:HDRGainMapVersion=131072" "XMP/HDRGainMap:HDRGainMapHeadroom=3.5"; do
+    grep -qxF "$want" <<< "$tags" && pass "增益图：产物里 $want" || fail "增益图：产物里没有 $want（[$tags]）"
+done
+check "增益图：前提，源按 HDR 解码的内容余量" "$(./Tests/probe --headroom "$gain_ref")" "3.50"
+check_same "增益图：产物按 HDR 解码的内容余量与源相同" \
+    "$(./Tests/probe --headroom "$gain")" "$(./Tests/probe --headroom "$gain_ref")"
+# 缩略图：带辅助图的 JPEG 在 {FileContents}/Images[n]/ThumbnailImages[m]/… 下列出
+# 内嵌缩略图，产物里没有。缩略图有意不报（README），这组键也不报。
+v=$(./Tests/probe "$gain_ref" '{FileContents}/Images[0]/ThumbnailImages[0]/Width')
+case "$v" in
+    ""|"<无>"|"<无法读取>") fail "缩略图：前提不成立，源里没有 ThumbnailImages 这组键（[$v]）" ;;
+    *) pass "缩略图：前提，源里有 ThumbnailImages 这组键（Width = $v）" ;;
+esac
+out=$("$BIN" --verify "$gain_ref" -o "$WORK/辅助图/缩略图.heic" 2>&1); st=$?
+refute "缩略图：校验不报 ThumbnailImages 这组键" "$st" grep -qF "ThumbnailImages" <<< "$out"
+
+# 尾部记账：辅助图在 JPEG 里放在 EOI 之后、由 MPF 登记。搬进产物的那几段不报，其余照报。
+# 真实相机照片的 EOI 之后是一张大尺寸预览图，不是辅助图，搬不走。
+cp test_pic/P1130939.JPG "$WORK/辅助图/带预览图.jpg"
+expect_reported "EOI 之后是预览图" "$WORK/辅助图/带预览图.jpg" \
+    "丢失 EOI 之后的 845456 字节（MPF 多图格式的附加图像）"
+./Tests/fixture --aux gainmap "$WORK/辅助图/辅助图加尾巴.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --append "$WORK/辅助图/辅助图加尾巴.jpg" "动态照片的视频放在这里"
+expect_reported "辅助图后面另有数据" "$WORK/辅助图/辅助图加尾巴.jpg" "丢失 EOI 之后的 33 字节（尾部共 "
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

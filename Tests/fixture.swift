@@ -30,6 +30,15 @@
 //            不写描述、作者、备注、关键词和星级评分（TIFF ImageDescription/Artist、
 //            EXIF UserComment、IPTC Caption/Keywords/Byline/StarRating）。目标里于是
 //            没有任何能承载 Windows XP 标签和评级的字段。
+//   --aux <种类>
+//            再加一张辅助图，可以重复。种类：depth（深度，32 位浮点）、disparity
+//            （视差，32 位浮点）、matte（人像蒙版，8 位）、skin（语义分割的皮肤蒙版，
+//            8 位）、gainmap（苹果增益图，8 位，带 HDRGainMap:HDRGainMapVersion 与
+//            HDRGainMap:HDRGainMapHeadroom 两个元数据标签）。内容是有纹理的平滑图案，
+//            每种的图案不同；宽 150 不是对齐宽度，ImageIO 读回时每行带填充。
+//            加辅助图要用 ImageIO 从头写一遍 JPEG，那一遍不带上面并进 XMP 包的标签。
+//   --thumbnail
+//            内嵌一张缩略图（kCGImageDestinationEmbedThumbnail）。
 
 import CoreGraphics
 import CryptoKit
@@ -45,12 +54,22 @@ let richXMP = args.contains("--rich-xmp")
 let extendedXMP = args.contains("--extended-xmp")
 let msRating = args.contains("--ms-rating")
 let noText = args.contains("--no-text")
+let thumbnail = args.contains("--thumbnail")
 args.removeAll {
-    ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp", "--ms-rating", "--no-text"]
-        .contains($0)
+    ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp", "--ms-rating", "--no-text",
+     "--thumbnail"].contains($0)
 }
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
-    + " [--no-text] <输出.jpg>"
+    + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] <输出.jpg>"
+var auxKinds: [String] = []
+while let at = args.firstIndex(of: "--aux") {
+    guard at + 1 < args.count else {
+        FileHandle.standardError.write(Data("\(usage)\n".utf8))
+        exit(2)
+    }
+    auxKinds.append(args[at + 1])
+    args.removeSubrange(at...(at + 1))
+}
 guard let path = args.first else {
     FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
@@ -271,5 +290,95 @@ if extendedXMP {
 guard let packet = CGImageMetadataCreateXMPData(merged, nil) as Data?,
       xmpID.count + packet.count + 2 <= 0xFFFF else { die("合并后的 XMP 包写不进一个段") }
 bytes.replaceSubrange(segment, with: app1(xmpID + [UInt8](packet)) + extensionSegment)
+
+/// 一张辅助图的描述与数据。图案是两个正弦的叠加，`seed` 让每种的图案不同，好让
+/// 「数据被换成另一种」也看得出来。浮点类型的值落在 0.5…3.5（单位是米或 1/米），
+/// 8 位类型落在 0…255。每行按 `width` 紧排，不带填充。
+func auxiliaryInfo(_ kind: String, seed: Double) -> (type: CFString, info: [CFString: Any]) {
+    let width = 150, height = 120
+    func pattern(_ x: Int, _ y: Int) -> Double {
+        0.5 + 0.25 * sin(Double(x) * (0.21 + 0.05 * seed)) + 0.25 * cos(Double(y) * (0.17 + 0.03 * seed) + Double(x) * 0.04)
+    }
+    let type: CFString, format: UInt32, float: Bool
+    switch kind {
+    case "depth": (type, format, float) = (kCGImageAuxiliaryDataTypeDepth, kCVPixelFormatDepthFloat32, true)
+    case "disparity": (type, format, float) = (kCGImageAuxiliaryDataTypeDisparity, kCVPixelFormatDisparityFloat32, true)
+    case "matte": (type, format, float) = (kCGImageAuxiliaryDataTypePortraitEffectsMatte, kCVPixelFormatOneComponent8, false)
+    case "skin": (type, format, float) = (kCGImageAuxiliaryDataTypeSemanticSegmentationSkinMatte, kCVPixelFormatOneComponent8, false)
+    case "gainmap": (type, format, float) = (kCGImageAuxiliaryDataTypeHDRGainMap, kCVPixelFormatOneComponent8, false)
+    default: die("不认识的辅助图种类：\(kind)\n\(usage)")
+    }
+    var data = Data()
+    for y in 0..<height {
+        for x in 0..<width {
+            if float {
+                var v = Float(0.5 + 3 * pattern(x, y))
+                withUnsafeBytes(of: &v) { data.append(contentsOf: $0) }
+            } else {
+                data.append(UInt8(max(0, min(255, (pattern(x, y) * 255).rounded()))))
+            }
+        }
+    }
+    var info: [CFString: Any] = [
+        kCGImageAuxiliaryDataInfoData: data,
+        kCGImageAuxiliaryDataInfoDataDescription: [
+            kCGImagePropertyWidth: width, kCGImagePropertyHeight: height,
+            kCGImagePropertyBytesPerRow: width * (float ? 4 : 1), kCGImagePropertyPixelFormat: format,
+        ] as [CFString: Any],
+    ]
+    let tags: (namespace: String, prefix: String, values: [(String, CFTypeRef)])?
+    switch kind {
+    case "gainmap":
+        tags = ("http://ns.apple.com/HDRGainMap/1.0/", "HDRGainMap",
+                [("HDRGainMapVersion", 131072 as CFNumber), ("HDRGainMapHeadroom", 3.5 as CFNumber)])
+    case "depth", "disparity":
+        tags = ("http://ns.apple.com/depthData/1.0/", "depthData",
+                [("Accuracy", "relative" as CFString), ("Filtered", "true" as CFString), ("Quality", "high" as CFString)])
+    case "matte":
+        tags = ("http://ns.apple.com/portraitEffectsMatte/1.0/", "portraitEffectsMatte",
+                [("PortraitEffectsMatteVersion", 65536 as CFNumber)])
+    case "skin":
+        tags = ("http://ns.apple.com/semanticSegmentationMatte/1.0/", "semanticSegmentationMatte",
+                [("SemanticSegmentationMatteVersion", 65536 as CFNumber),
+                 ("SemanticSegmentationMatteType", "skin" as CFString)])
+    default:
+        tags = nil
+    }
+    if let tags {
+        let metadata = CGImageMetadataCreateMutable()
+        guard CGImageMetadataRegisterNamespaceForPrefix(metadata, tags.namespace as CFString, tags.prefix as CFString, nil)
+        else { die("写不进 \(kind) 的元数据") }
+        for (name, value) in tags.values {
+            guard CGImageMetadataSetValueWithPath(metadata, nil, "\(tags.prefix):\(name)" as CFString, value)
+            else { die("写不进 \(kind) 的元数据 \(name)") }
+        }
+        info[kCGImageAuxiliaryDataInfoMetadata] = metadata
+    }
+    return (type, info)
+}
+// CoreVideo 的像素格式码（四字符码），夹具不链 CoreVideo，在这里写出来。
+let kCVPixelFormatDepthFloat32: UInt32 = 0x6664_6570          // 'fdep'
+let kCVPixelFormatDisparityFloat32: UInt32 = 0x6664_6973      // 'fdis'
+let kCVPixelFormatOneComponent8: UInt32 = 0x4C30_3038         // 'L008'
+
+// 辅助图与缩略图只能在编码时加：从上面拼好的字节重新读一遍，用 ImageIO 再写一次
+// JPEG，把它们加在主图后面（辅助图进 MPF 登记的尾部，缩略图进 EXIF IFD1）。
+if !auxKinds.isEmpty || thumbnail {
+    guard let assembled = CGImageSourceCreateWithData(Data(bytes) as CFData, nil) else { die("读不回拼好的测试图") }
+    let reencoded = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(reencoded, UTType.jpeg.identifier as CFString, 1, nil) else {
+        die("无法创建 JPEG 编码器")
+    }
+    CGImageDestinationAddImageFromSource(dest, assembled, 0, [
+        kCGImageDestinationLossyCompressionQuality: 0.95,
+        kCGImageDestinationEmbedThumbnail: thumbnail,
+    ] as CFDictionary)
+    for (i, kind) in auxKinds.enumerated() {
+        let (type, info) = auxiliaryInfo(kind, seed: Double(i))
+        CGImageDestinationAddAuxiliaryDataInfo(dest, type, info as CFDictionary)
+    }
+    guard CGImageDestinationFinalize(dest) else { die("写入带辅助图的测试图失败") }
+    bytes = [UInt8](reencoded as Data)
+}
 do { try Data(bytes).write(to: URL(fileURLWithPath: path)) } catch { die("写入测试图失败") }
 print("已生成测试图: \(path)")

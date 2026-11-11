@@ -267,33 +267,76 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
                                       verification: verification, note: note))
 }
 
+/// ImageIO 定义的全部辅助图类型（`kCGImageAuxiliaryDataType*` 的每一个成员）。
+/// 转换时逐个从源里取，取得到就加进产物；校验时逐个比源与产物。
+let auxiliaryDataTypes: [CFString] = {
+    var types = [
+        kCGImageAuxiliaryDataTypeDepth, kCGImageAuxiliaryDataTypeDisparity,
+        kCGImageAuxiliaryDataTypePortraitEffectsMatte,
+        kCGImageAuxiliaryDataTypeSemanticSegmentationSkinMatte,
+        kCGImageAuxiliaryDataTypeSemanticSegmentationHairMatte,
+        kCGImageAuxiliaryDataTypeSemanticSegmentationTeethMatte,
+        kCGImageAuxiliaryDataTypeSemanticSegmentationGlassesMatte,
+        kCGImageAuxiliaryDataTypeSemanticSegmentationSkyMatte,
+        kCGImageAuxiliaryDataTypeHDRGainMap,
+    ]
+    if #available(macOS 15.0, *) { types.append(kCGImageAuxiliaryDataTypeISOGainMap) }
+    return types
+}()
+
+/// 源图第 0 张的辅助图，按 auxiliaryDataTypes 的顺序，每种至多一份。
+func auxiliaryImages(of src: CGImageSource) -> [(type: CFString, info: CFDictionary)] {
+    auxiliaryDataTypes.compactMap { type in
+        CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, type).map { (type, $0) }
+    }
+}
+
+/// 第一遍：从源转码进 `dest`，把源里的辅助图逐个加在主图后面，然后收尾。
+/// 带辅助图收尾失败时，换一个新目标、不带辅助图再编一次：辅助图搬不过去不该让
+/// 整次转换失败，校验会把没搬过去的辅助图逐项报成丢失。
+private func encodeFirstPass(_ src: CGImageSource, properties: [CFString: Any],
+                             makeDestination: () -> CGImageDestination?) -> Bool {
+    let auxiliary = auxiliaryImages(of: src)
+    for carry in auxiliary.isEmpty ? [false] : [true, false] {
+        guard let dest = makeDestination() else { return false }
+        CGImageDestinationAddImageFromSource(dest, src, 0, properties as CFDictionary)
+        if carry {
+            for (type, info) in auxiliary { CGImageDestinationAddAuxiliaryDataInfo(dest, type, info) }
+        }
+        if CGImageDestinationFinalize(dest) { return true }
+    }
+    return false
+}
+
 /// 把源图编码成 HEIF 写到 `url`，分两遍：
 ///
 /// 1. AddImageFromSource 直接从源转码到内存：像素不先解码成位图，ICC 色彩描述
 ///    文件跟着走，`properties`（含 UserComment 的修补）写进 EXIF 等字典。
 ///    写之前先过 propertiesForHEIFWriter：源属性直通的备注和修补出来的备注都走
-///    这一处，不在别处另做改写。
+///    这一处，不在别处另做改写。源里的辅助图（增益图、深度图、蒙版等）也在这一遍
+///    用 AddAuxiliaryDataInfo 加进去（见 encodeFirstPass）。
 ///    它不认 kCGImageDestinationMetadata，XMP 包里属性字典表达不了的标签
 ///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
 ///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
 /// 2. CopyImageSource 把第一遍的结果写到 `url`，同时把源的 XMP 合并进去。
-///    这一步只改元数据，不重新编码像素。它的选项里只有 XMP 和合并开关起作用：
-///    属性字典传进来会被忽略（实测带不带它，产物逐字节相同），所以 EXIF 等字典
-///    只能靠第一遍写进去。
+///    这一步只改元数据，不重新编码像素，第一遍加进去的辅助图原样留在产物里。
+///    它的选项里只有 XMP 和合并开关起作用：属性字典传进来会被忽略（实测带不带它，
+///    产物逐字节相同），所以 EXIF 等字典只能靠第一遍写进去。
 func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
                 xmp: CGImageMetadata?, to url: URL) -> Bool {
     let properties = propertiesForHEIFWriter(properties)
     let heic = UTType.heic.identifier as CFString
     // 源里没有 XMP 就没有第二遍可做；CopyImageSource 不带元数据选项时直接失败。
     guard let xmp else {
-        guard let out = CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil) else { return false }
-        CGImageDestinationAddImageFromSource(out, src, 0, properties as CFDictionary)
-        return CGImageDestinationFinalize(out)
+        return encodeFirstPass(src, properties: properties) {
+            CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil)
+        }
     }
-    let encoded = NSMutableData()
-    guard let first = CGImageDestinationCreateWithData(encoded, heic, 1, nil) else { return false }
-    CGImageDestinationAddImageFromSource(first, src, 0, properties as CFDictionary)
-    guard CGImageDestinationFinalize(first),
+    var encoded = NSMutableData()
+    guard encodeFirstPass(src, properties: properties, makeDestination: {
+              encoded = NSMutableData()
+              return CGImageDestinationCreateWithData(encoded, heic, 1, nil)
+          }),
           let firstPass = CGImageSourceCreateWithData(encoded, nil),
           let out = CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil) else { return false }
     let options = [kCGImageDestinationMetadata: xmp, kCGImageDestinationMergeMetadata: true] as CFDictionary

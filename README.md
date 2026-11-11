@@ -96,11 +96,19 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
 ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：产物会变成 RGB、
 描述文件变成 sRGB，`--verify` 会把这两项报出来。
 
+**辅助图像**也搬进产物：HDR 增益图（苹果格式与 ISO 格式）、深度图、视差图、人像
+蒙版和各种语义分割蒙版（皮肤、头发、牙齿、眼镜、天空），即 ImageIO 的
+`kCGImageAuxiliaryDataType*` 全部成员。每张辅助图附带的元数据跟着走，例如苹果增益图的
+`HDRGainMap:HDRGainMapVersion`、`HDRGainMap:HDRGainMapHeadroom`，ISO 增益图的
+`HDRToneMap:*`，所以带增益图的照片转换后按 HDR 显示的亮度余量不变。辅助图的像素是
+重新有损编码的，见「已知限制」。
+
 转换分两遍。第一遍走 `CGImageDestinationAddImageFromSource`，直接从源转码而不是
 先解码成位图再编码，ICC 跟着走，EXIF 等属性字典（含本工具修补过的 `UserComment`）
-写进去；但它不接受 XMP 包。第二遍用 `CGImageDestinationCopyImageSource` 把第一遍
-的结果连同源的 XMP 一起写出，这一步只合并元数据、不重新编码像素。写入采用「先写
-临时文件、成功后再原子替换」，中断不会留下半个文件。
+写进去，源里的辅助图用 `CGImageDestinationAddAuxiliaryDataInfo` 逐个加在主图后面；
+但它不接受 XMP 包。第二遍用 `CGImageDestinationCopyImageSource` 把第一遍的结果连同
+源的 XMP 一起写出，这一步只合并元数据、不重新编码像素，辅助图原样留在产物里。写入
+采用「先写临时文件、成功后再原子替换」，中断不会留下半个文件。
 
 ## `--verify` 到底比什么
 
@@ -125,7 +133,21 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 - ImageIO 不认识的 `APPn` 段（如 C2PA 用的 APP11）。认识的是 JFIF/JFXX、EXIF、
   XMP 主包与扩展 XMP、ICC、MPF、Photoshop（IPTC）和 Adobe 这几种；
 - `EOI` 之后的数据（安卓动态照片的视频、MPF 多图格式的附加图像等）。全是
-  `0x00`/`0xFF` 填充的不算。
+  `0x00`/`0xFF` 填充的不算。JPEG 的辅助图就存放在这里、由 APP2 的 MPF 索引登记，
+  已经搬进产物的那几段不计入，剩下的字节照报。一个 MPF 条目算作已搬走，要同时满足：
+  MP 类型码是 0（辅助图写的就是 0，大尺寸预览图是 `0x010001`/`0x010002`）；范围整个
+  落在 `EOI` 之后、不与别的已认条目重叠；范围里恰好是一张完整的 JPEG（`SOI` 开头、
+  `EOI` 结尾，不多不少）；这张 JPEG 的宽高等于某一张辅助图的宽高，而这张辅助图在源和
+  产物里都有、类型、宽高、像素格式都相同。每张辅助图只认领一个条目。MPF 索引里的偏移、
+  长度、条目数都来自源文件，越界、自相矛盾或读不出时一个条目都不认，整段照报。剩下的
+  字节报成 `丢失 EOI 之后的 N 字节（尾部共 M 字节，其中 K 字节是已搬进产物的辅助图像）`；
+  一个条目都没认下时报整段，和没有辅助图时一样。
+
+**辅助图本身由键空间比对管着。** ImageIO 在容器级属性的 `{FileContents}` 里给每张
+辅助图列一组键（`{FileContents}/Images[0]/AuxiliaryData[0]/AuxiliaryDataType`、宽、高、
+像素格式、增益图的 `HDRHeadroom`，ISO 增益图还有 `DerivationDetails[…]` 下的色调映射
+参数）。搬过去了这些键就在产物里，没搬过去就逐条报丢失。辅助图的像素数据不比——它们
+和主图一样是有损重新编码的。
 
 **认识的段里还有两类 ImageIO 不读的数据，同样直接从源文件字节里读。**
 
@@ -170,7 +192,11 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
 - 缩略图：EXIF IFD1 里的缩略图，以及 Photoshop 资源里的缩略图（8BIM `0x0409`、
   `0x040C`）。缩略图是从像素派生的预览，不是照片内容，和文件体积、压缩方式同类。
   产物里不带内嵌缩略图，而几乎所有相机直出的 JPEG 都带一个（`test_pic/` 里两张
-  都有），报它会让几乎所有真实照片校验不过，所以不检测。
+  都有），报它会让几乎所有真实照片校验不过，所以不检测。带辅助图的 JPEG 还会在
+  `{FileContents}/Images[n]/ThumbnailImages[m]/` 下列出内嵌缩略图的 `Width`、
+  `Height`、`Orientation`、`ThumbnailOffset`、`ThumbnailSize`，这五个键按同一条策略
+  忽略：去掉每一层的数组下标后按完整键路径比对，不用前缀或子串；这组下面出现别的
+  子键照常报。
 - EXIF 定长字符串的尾部 NUL 填充——JPEG 和 HEIC 的填充长度天然不同，
   只比对有效内容。
 - **有理数的重新编码噪声**。EXIF 的数值以「分子/分母」存放，写入方常常换成另一个
@@ -249,10 +275,16 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   `ImageStabilization`）才算 MakerNote 派生。要的是不刷噪声，不是掩盖真丢失。
   在意 MakerNote 的话就别用 `--delete-original`：校验不通过时工具本来也会拒绝删除。
 - **ImageIO 不认识的 JPEG 段不会保留**：`COM` 注释段、C2PA 的 APP11 等未知 `APPn`
-  段、`EOI` 之后的数据（动态照片的视频、MPF 附加图像）。`--verify` 会逐段报出，
-  所以 `--delete-original` 不会删这样的源文件。
-- **深度图、视差图、HDR 增益图等辅助图像不会保留**。`AddImageFromSource` 不搬它们。
-  `--verify` 会报出来（`{FileContents}/…/AuxiliaryData…` 几条，外加 EOI 之后的数据）。
+  段、`EOI` 之后除辅助图以外的数据（动态照片的视频、相机写的大尺寸预览图等 MPF 附加
+  图像）。`--verify` 会逐段报出，所以 `--delete-original` 不会删这样的源文件。
+- **辅助图像的像素是有损重新编码的**。增益图、蒙版这类 8 位的辅助图，以及深度图、
+  视差图，都和主图一样被重新编码，尺寸、像素格式、附带的元数据不变，像素值有小幅
+  变化：平滑的合成图案上最大差 3 级（按 8 位计；深度图、视差图在 JPEG 里本来就是按
+  取值范围量化成 8 位存的，按同一把尺子算），四张真实 HDR 照片的增益图上最大差 5–8 级。
+  `-q` 不影响辅助图的编码。读回时每行字节数可能变大（多了对齐填充），数据本身不受影响。
+- **辅助图加不进产物时，转换照常完成，辅助图丢失**。带辅助图的那一遍编码失败时，
+  本工具不带辅助图再编一次；`--verify` 会把没搬过去的辅助图逐项报出来（`{FileContents}/…/AuxiliaryData…`
+  几条，外加 EOI 之后的数据），`--delete-original` 不会删源。
 - **APP13 里 IPTC 以外的 Photoshop 资源不会保留**。只有 8BIM `0x0404`（IPTC-IIM）
   会被 ImageIO 读出并搬走，其它资源随段一起消失。`--verify` 把它们报成一条
   （见「`--verify` 到底比什么」），所以 `--delete-original` 不会删这样的源文件。
@@ -262,7 +294,8 @@ ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：�
   只有在同时写了同值的标准字段时才跟着标准字段走。没有同值的标准字段时
   `--verify` 逐个报出，`--delete-original` 不会删源。
 - **EXIF 的 IFD1 缩略图和 Photoshop 资源里的缩略图不会保留，`--verify` 有意不报**：
-  它们是从像素派生的预览（见「`--verify` 到底比什么」的有意忽略）。
+  它们是从像素派生的预览（见「`--verify` 到底比什么」的有意忽略），`{FileContents}`
+  里的 `ThumbnailImages` 那组键同样不报。
 - **界面用 AppKit 而非 SwiftUI**。SwiftUI 的 `@State` 等属性包装器现在是宏，
   宏插件只随完整版 Xcode 分发；用 AppKit 才能只靠命令行工具构建。
 - **应用是本地临时签名的**，没有开发者证书。自己构建自己用没问题，拷给别人
@@ -317,7 +350,7 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
 | `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：捞回 ImageIO 读不出的 `UserComment`，按标签读原始值 |
-| `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）和 APP13 里的 Photoshop 资源 |
+| `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）、MPF 索引与尾部记账、APP13 里的 Photoshop 资源 |
 | `Sources/Core/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
 | `Sources/Core/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
 | `Sources/CLI/Arguments.swift` | 命令行参数解析（纯函数，可被测试直接调用） |
