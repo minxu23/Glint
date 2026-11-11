@@ -1005,6 +1005,256 @@ for (bytes, why) in [([UInt8](), "空文件"), (Array("not a heif file at all".u
     if case .unreadable = heifExif(bytes) { pass("读不出：\(why)") } else { fail("\(why) 没被判成读不出") }
 }
 
+print("EXIF 整块照搬：源一侧的闸门")
+let carryTIFF: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0] + Array("源里的 EXIF".utf8)
+check("恰好一个 EXIF 段：取出 Exif\\0\\0 之后的全部字节",
+      try? sourceExifTIFF(jpegWithExif(carryTIFF)).get(), carryTIFF)
+func sourceSkip(_ jpeg: [UInt8]) -> String? {
+    if case .failure(let skip) = sourceExifTIFF(jpeg) { return skip.reason }
+    return nil
+}
+check("源里没有 EXIF 段：不换", sourceSkip([0xFF, 0xD8, 0xFF, 0xD9]), "源里没有 EXIF 段")
+check("两个 EXIF 段：不换", sourceSkip(Array(jpegWithExif(carryTIFF).dropLast(2)) + Array(jpegWithExif(carryTIFF).dropFirst(2))),
+      "源里的 EXIF 段不止一个")
+check("EXIF 段里不是合法的 TIFF：不换", sourceSkip(jpegWithExif(Array("not a tiff header".utf8))),
+      "源里的 EXIF 段不是合法的 TIFF")
+check("不是 JPEG：不换", sourceSkip(Array("garbage".utf8)), "源文件的 JPEG 结构读不通")
+
+print("EXIF 整块照搬：手搭的 HEIF，闸门每条一个反例，改写只动该动的字节")
+func be(_ v: Int, _ width: Int) -> [UInt8] { (0..<width).map { UInt8(truncatingIfNeeded: v >> (8 * (width - 1 - $0))) } }
+func box(_ type: String, _ content: [UInt8]) -> [UInt8] { be(content.count + 8, 4) + Array(type.utf8) + content }
+/// 手搭一个 ImageIO 那种布局的 HEIF：ftyp、meta（iinf、iloc）、mdat。mdat 里先是 Exif 项的内容，
+/// 后是 64 字节的「图像数据」（项号 100）。各个开关造闸门的反例。
+struct HEIFSpec {
+    var ilocVersion = 1, offsetSize = 4, lengthSize = 4, baseOffsetSize = 0
+    /// mdat 的长度字段：32、64（size == 1）、0（到文件末尾）。
+    var mdatHeader = 32
+    var exifCount = 1, exifExtents = 1, exifMethod = 0, exifDataRef = 0
+    var exifListedTwice = false
+    var prefixSkip = 6
+    var imageOverlapsExif = false, imageLengthZero = false, imageMethod = 0
+    /// mdat 后面再接一个 free 盒子。
+    var trailingBox = false
+    /// Exif 项的内容放在 mdat 前面的一个 free 盒子里。
+    var exifOutsideMdat = false
+}
+let productTIFF: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0] + Array("ImageIO 写的".utf8)
+let imageData = [UInt8](repeating: 0xAB, count: 64)
+func buildHEIF(_ spec: HEIFSpec) -> (bytes: [UInt8], exif: Range<Int>, mdatStart: Int) {
+    let prefixFill = spec.prefixSkip == 6 ? Array("Exif".utf8) + [0, 0]
+                                          : [UInt8](repeating: 0, count: min(spec.prefixSkip, 300))
+    let exifContent = be(spec.prefixSkip, 4) + prefixFill + productTIFF
+    let ftyp = box("ftyp", Array("heic".utf8) + be(0, 4))
+    func meta(exifAt: Int, imageAt: Int, base: Int) -> [UInt8] {
+        var infes: [UInt8] = []
+        for id in 0..<spec.exifCount { infes += box("infe", [2, 0, 0, 0] + be(id + 1, 2) + be(0, 2) + Array("Exif".utf8) + [0]) }
+        infes += box("infe", [2, 0, 0, 0] + be(100, 2) + be(0, 2) + Array("hvc1".utf8) + [0])
+        let iinf = box("iinf", [0, 0, 0, 0] + be(spec.exifCount + 1, 2) + infes)
+        let idWidth = spec.ilocVersion < 2 ? 2 : 4
+        var entries: [[UInt8]] = []
+        func entry(_ id: Int, method: Int, dataRef: Int, _ extents: [(Int, Int)]) -> [UInt8] {
+            var e = be(id, idWidth)
+            if spec.ilocVersion >= 1 { e += be(method, 2) }
+            e += be(dataRef, 2) + be(base, spec.baseOffsetSize) + be(extents.count, 2)
+            for (offset, length) in extents { e += be(offset - base, spec.offsetSize) + be(length, spec.lengthSize) }
+            return e
+        }
+        var exifExtents = [(exifAt, exifContent.count)]
+        if spec.exifExtents == 2 {
+            let half = exifContent.count / 2
+            exifExtents = [(exifAt, half), (exifAt + half, exifContent.count - half)]
+        }
+        for id in 0..<spec.exifCount {
+            entries.append(entry(id + 1, method: spec.exifMethod, dataRef: spec.exifDataRef, exifExtents))
+        }
+        if spec.exifListedTwice { entries.append(entry(1, method: 0, dataRef: 0, exifExtents)) }
+        let imageStart = spec.imageOverlapsExif ? imageAt - 4 : imageAt
+        let imageLength = spec.imageLengthZero ? 0 : imageAt + imageData.count - imageStart
+        entries.append(entry(100, method: spec.imageMethod, dataRef: 0, [(imageStart, imageLength)]))
+        let iloc = box("iloc", [UInt8(spec.ilocVersion), 0, 0, 0,
+                                UInt8(spec.offsetSize << 4 | spec.lengthSize), UInt8(spec.baseOffsetSize << 4)]
+                               + be(entries.count, spec.ilocVersion < 2 ? 2 : 4) + entries.flatMap { $0 })
+        return box("meta", [0, 0, 0, 0] + iinf + iloc)
+    }
+    let header = spec.mdatHeader == 64 ? 16 : 8
+    let free = spec.exifOutsideMdat ? box("free", exifContent) : []
+    let metaLength = meta(exifAt: 0, imageAt: 0, base: 0).count
+    let freeContent = ftyp.count + metaLength + 8
+    let mdatStart = ftyp.count + metaLength + free.count
+    let mdatContent = (spec.exifOutsideMdat ? [] : exifContent) + imageData
+    let exifAt = spec.exifOutsideMdat ? freeContent : mdatStart + header
+    let imageAt = mdatStart + header + (spec.exifOutsideMdat ? 0 : exifContent.count)
+    let base = spec.baseOffsetSize == 0 ? 0 : mdatStart + header
+    var mdat: [UInt8]
+    switch spec.mdatHeader {
+    case 64: mdat = be(1, 4) + Array("mdat".utf8) + be(mdatContent.count + 16, 8)
+    case 0: mdat = be(0, 4) + Array("mdat".utf8)
+    default: mdat = be(mdatContent.count + 8, 4) + Array("mdat".utf8)
+    }
+    mdat += mdatContent
+    let bytes = ftyp + meta(exifAt: exifAt, imageAt: imageAt, base: base) + free + mdat
+        + (spec.trailingBox ? box("free", [1, 2, 3]) : [])
+    return (bytes, exifAt..<(exifAt + exifContent.count), mdatStart)
+}
+func carrySkip(_ spec: HEIFSpec, limit32: Int = 0xFFFF_FFFF) -> String? {
+    let built = buildHEIF(spec).bytes
+    if case .failure(let skip) = carryingExif(carryTIFF, into: built, limit32: limit32) { return skip.reason }
+    return nil
+}
+check("前提：默认的手搭 HEIF 读得出 Exif 项，内容是 ImageIO 那种 TIFF",
+      { if case .tiff(let t) = heifExif(buildHEIF(HEIFSpec()).bytes) { return Array(t.bytes[t.base...]).prefix(productTIFF.count).elementsEqual(productTIFF) }; return false }(), true)
+/// 正例：只有 mdat 长度字段、Exif 项的 iloc 偏移与长度、清零的旧范围变了，末尾接上「原前缀 + 源 TIFF」。
+func expectCarried(_ spec: HEIFSpec, _ why: String) {
+    let (old, exifRange, mdatStart) = buildHEIF(spec)
+    guard case .success(let new) = carryingExif(carryTIFF, into: old) else {
+        fail("\(why)：本该照搬却没换（\(carrySkip(spec) ?? "?")）"); return
+    }
+    let prefix = Array(old[exifRange.lowerBound..<(exifRange.lowerBound + 4 + spec.prefixSkip)])
+    let content = prefix + carryTIFF
+    var allowed = Set(exifRange)
+    let sizeAt = spec.mdatHeader == 64 ? mdatStart + 8 : mdatStart
+    if spec.mdatHeader != 0 { allowed.formUnion(sizeAt..<(sizeAt + (spec.mdatHeader == 64 ? 8 : 4))) }
+    // iloc 里 Exif 项那两个字段：在旧文件里找「旧偏移、旧长度」紧挨着的那一处。
+    let base = spec.baseOffsetSize == 0 ? 0 : mdatStart + (spec.mdatHeader == 64 ? 16 : 8)
+    let fields = be(exifRange.lowerBound - base, spec.offsetSize) + be(exifRange.count, spec.lengthSize)
+    let fieldAt = (0...(old.count - fields.count)).first { Array(old[$0..<($0 + fields.count)]) == fields }
+    if let fieldAt { allowed.formUnion(fieldAt..<(fieldAt + fields.count)) }
+    let untouched = (0..<old.count).allSatisfy { allowed.contains($0) || old[$0] == new[$0] }
+    let zeroed = exifRange.allSatisfy { new[$0] == 0 }
+    let tail = Array(new[old.count...]) == content
+    var readBack = false
+    if case .tiff(let t) = heifExif(new) { readBack = Array(t.bytes[t.base..<(t.base + t.length)]) == carryTIFF }
+    var mdatOK = true
+    if spec.mdatHeader == 32 { mdatOK = bigEndianInt(new, mdatStart, 4) == bigEndianInt(old, mdatStart, 4)! + content.count }
+    if spec.mdatHeader == 64 { mdatOK = bigEndianInt(new, mdatStart + 8, 8) == bigEndianInt(old, mdatStart + 8, 8)! + content.count }
+    if spec.mdatHeader == 0 { mdatOK = Array(new[mdatStart..<(mdatStart + 8)]) == Array(old[mdatStart..<(mdatStart + 8)]) }
+    let ok = fieldAt != nil && untouched && zeroed && tail && new.count == old.count + content.count && readBack && mdatOK
+        && heifExifEndsAtFileEnd(new)
+    check(ok, "\(why)：只动了该动的字节，旧范围清零，末尾是原前缀 + 源 TIFF，读回是源 TIFF"
+          + (ok ? "" : "（字段 \(fieldAt != nil) 其余不动 \(untouched) 清零 \(zeroed) 末尾 \(tail) 读回 \(readBack) mdat \(mdatOK)）"))
+}
+expectCarried(HEIFSpec(), "mdat 32 位长度、iloc 版本 1、4 字节偏移")
+expectCarried(HEIFSpec(mdatHeader: 64), "mdat 64 位长度")
+expectCarried(HEIFSpec(mdatHeader: 0), "mdat 长度写成到文件末尾")
+for version in [0, 1, 2] {
+    for width in [4, 8] {
+        expectCarried(HEIFSpec(ilocVersion: version, offsetSize: width, lengthSize: width),
+                      "iloc 版本 \(version)、偏移与长度 \(width) 字节")
+    }
+}
+expectCarried(HEIFSpec(baseOffsetSize: 4), "iloc 带 4 字节基址")
+expectCarried(HEIFSpec(prefixSkip: 64), "TIFF 头偏移等于上限 64，前缀原样保留")
+func expectSkip(_ spec: HEIFSpec, limit32: Int = 0xFFFF_FFFF, _ want: String, _ why: String) {
+    checkRule(why, carrySkip(spec, limit32: limit32), want, "不换：\(why)")
+}
+expectSkip(HEIFSpec(exifCount: 2), "产物里的 Exif 项不止一个", "两个 Exif 项")
+expectSkip(HEIFSpec(exifListedTwice: true), "Exif 项在 iloc 里不是恰好出现一次", "Exif 项在 iloc 里出现两次")
+expectSkip(HEIFSpec(exifExtents: 2), "Exif 项不是恰好一段", "Exif 项分两段")
+expectSkip(HEIFSpec(exifMethod: 1), "Exif 项不是按文件偏移存放的", "构造方式 1")
+expectSkip(HEIFSpec(exifDataRef: 1), "Exif 项不是按文件偏移存放的", "data_reference_index 不是 0")
+expectSkip(HEIFSpec(trailingBox: true), "产物的最后一个盒子不是 mdat", "最后一个盒子不是 mdat")
+expectSkip(HEIFSpec(imageOverlapsExif: true), "Exif 项与别的项重叠", "旧范围与别的项重叠")
+expectSkip(HEIFSpec(imageLengthZero: true), "产物里有长度写成「到文件末尾」的项", "别的项长度写成 0（到文件末尾）")
+expectSkip(HEIFSpec(imageMethod: 2), "产物里有按项偏移构造的项", "别的项是构造方式 2")
+expectSkip(HEIFSpec(exifOutsideMdat: true), "Exif 项不在顶层 mdat 里", "旧范围不在 mdat 里")
+expectSkip(HEIFSpec(prefixSkip: 65), "Exif 项开头的 TIFF 头偏移不对", "TIFF 头偏移超过上限")
+expectSkip(HEIFSpec(prefixSkip: 0x7FFF_FFFF), "Exif 项开头的 TIFF 头偏移不对", "TIFF 头偏移离谱")
+let carriedLength = 10 + carryTIFF.count
+let plain = buildHEIF(HEIFSpec())
+let mdatSize32 = bigEndianInt(plain.bytes, plain.mdatStart, 4)!
+expectSkip(HEIFSpec(), limit32: mdatSize32 + carriedLength - 1, "产物的 mdat 是 32 位长度，放不下照搬后的长度",
+           "32 位 mdat 长度放不下")
+expectSkip(HEIFSpec(mdatHeader: 64), limit32: buildHEIF(HEIFSpec(mdatHeader: 64)).bytes.count - 1,
+           "iloc 的偏移字段放不下新位置", "iloc 的 4 字节偏移放不下")
+expectSkip(HEIFSpec(offsetSize: 8, mdatHeader: 64), limit32: carriedLength - 1, "iloc 的长度字段放不下新长度",
+           "iloc 的 4 字节长度放不下")
+expectSkip(HEIFSpec(exifCount: 0), "产物里没有 Exif 项", "没有 Exif 项")
+check("产物里的 EXIF 已与源相同：无事可做",
+      { () -> String? in
+          if case .failure(let s) = carryingExif(productTIFF, into: buildHEIF(HEIFSpec()).bytes) { return s.reason }
+          return nil }(),
+      "产物里的 EXIF 已与源逐字节相同")
+// 截断在任意位置：顶层盒子都会越界，一律不换。逐字节改坏、随机改坏：不崩；换了的话读回必须是源 TIFF。
+let sample = buildHEIF(HEIFSpec()).bytes
+check("截断在每一个位置都不换", (0..<sample.count).filter {
+    if case .success = carryingExif(carryTIFF, into: Array(sample.prefix($0))) { return true }; return false
+}, [])
+func carriedBadly(_ bytes: [UInt8]) -> Bool {
+    guard case .success(let new) = carryingExif(carryTIFF, into: bytes) else { return false }
+    guard case .tiff(let t) = heifExif(new) else { return true }
+    return Array(t.bytes[t.base..<(t.base + t.length)]) != carryTIFF || new.count != bytes.count + carriedLength
+}
+var badFlips: [Int] = []
+for i in 0..<sample.count {
+    for value: UInt8 in [0x00, 0xFF, sample[i] ^ 0x01] {
+        var bad = sample
+        bad[i] = value
+        if carriedBadly(bad) { badFlips.append(i) }
+    }
+}
+check("每个字节改成 00、FF、翻最低位都不崩，换了的读回都是源 TIFF", badFlips, [])
+var carrySeed: UInt64 = 18
+func carryRandom(_ n: Int) -> Int {
+    carrySeed = carrySeed &* 6364136223846793005 &+ 1442695040888963407
+    return Int(carrySeed >> 33) % n
+}
+var randomBad = 0
+for _ in 0..<5000 {
+    var bad = sample
+    for _ in 0...carryRandom(4) { bad[carryRandom(bad.count)] = UInt8(carryRandom(256)) }
+    if carriedBadly(bad) { randomBad += 1 }
+}
+check("随机改坏 5000 次都不崩，换了的读回都是源 TIFF", randomBad, 0)
+
+print("EXIF 整块照搬：ImageIO 写的 HEIC，截断与改坏 meta 都不崩")
+if let jpegSource = tinyJPEGSource() {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-carry-\(UUID().uuidString).heic")
+    let props = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifLensModel: "RF50mm"]] as [CFString: Any]
+    if encodeHEIF(jpegSource, properties: props, xmp: nil, to: url), let heic = try? [UInt8](Data(contentsOf: url)),
+       case .success(let children) = heifMetaChildren(heic), let top = heifBoxes(heic, in: 0..<heic.count),
+       let meta = top.first(where: { $0.type == "meta" }) {
+        check(children.contains { $0.type == "iloc" } && { if case .success = carryingExif(carryTIFF, into: heic) { return true }; return false }(),
+              "前提：ImageIO 写的 HEIC 过得了闸门")
+        let cuts = (0..<heic.count).filter { if case .success = carryingExif(carryTIFF, into: Array(heic.prefix($0))) { return true }; return false }
+        check("截断到每一个长度都不换", cuts, [])
+        var bad: [Int] = []
+        for i in meta.start..<meta.content.upperBound {
+            for value: UInt8 in [0x00, 0xFF, heic[i] ^ 0x80] {
+                var mutated = heic
+                mutated[i] = value
+                if carriedBadly(mutated) { bad.append(i) }
+            }
+        }
+        check("meta 盒的每个字节改成 00、FF、翻最高位都不崩，换了的读回都是源 TIFF", bad, [])
+    } else {
+        fail("写不出作为照搬输入的 HEIC"); fail("（同上）"); fail("（同上）"); fail("（同上）")
+    }
+    try? FileManager.default.removeItem(at: url)
+} else {
+    fail("造不出作为 encodeHEIF 源的 JPEG"); fail("（同上）"); fail("（同上）"); fail("（同上）")
+}
+
+print("不一致键集合：照搬 EXIF 的自检与 keySpaceDiff 用同一把尺子")
+let sourceView = ["{TIFF}/Model": "Canon", "{Exif}/UserComment": "备注", "{IPTC}/DateCreated": "20240915"]
+check("等价字段同值承载的键不算不一致，源里没有的承载者本身照算",
+      inconsistentKeys(before: sourceView, after: sourceView.merging(["{Exif}/DateTimeOriginal": "2024:09:15 18:42:07"]) { a, _ in a }
+                       .filter { $0.key != "{IPTC}/DateCreated" }), ["{Exif}/DateTimeOriginal"])
+let regressed = inconsistentKeys(before: sourceView, after: ["{TIFF}/Model": "Canon"])
+    .subtracting(inconsistentKeys(before: sourceView, after: sourceView))
+check("一致 → 不一致（读不出）算退步", regressed, ["{Exif}/UserComment", "{IPTC}/DateCreated"])
+let wrongBefore = inconsistentKeys(before: sourceView, after: sourceView.merging(["{TIFF}/Model": "Nikon"]) { _, b in b })
+let wrongAfter = inconsistentKeys(before: sourceView, after: sourceView.merging(["{TIFF}/Model": "Sony"]) { _, b in b })
+check("不一致 → 换一个不一致的值不算退步", wrongAfter.subtracting(wrongBefore), [])
+check("新出现且与源一致的键不算退步",
+      inconsistentKeys(before: sourceView, after: sourceView)
+          .subtracting(inconsistentKeys(before: sourceView, after: sourceView.filter { $0.key != "{TIFF}/Model" })), [])
+check("新出现而源里没有的键算退步",
+      inconsistentKeys(before: sourceView, after: sourceView.merging(["{MakerCanon}/LensModel": "EF"]) { a, _ in a })
+          .subtracting(inconsistentKeys(before: sourceView, after: sourceView)), ["{MakerCanon}/LensModel"])
+check("尺子不比的键新出现也不算", inconsistentKeys(before: sourceView, after: sourceView.merging(["PixelWidth": "100"]) { a, _ in a }), [])
+check("MakerNote 派生键丢失按键逐个算",
+      inconsistentKeys(before: ["{MakerCanon}/a": "1", "{MakerCanon}/b": "2"], after: [:]), ["{MakerCanon}/a", "{MakerCanon}/b"])
+
 print("{FileContents} 里的编码参数：按去掉下标后的完整键路径认")
 check(isFileContentsEncodingKey("{FileContents}/Images[0]/ChromaSubsampling"), "主图的色度抽样忽略")
 check(isFileContentsEncodingKey("{FileContents}/Images[12]/ChromaSubsampling"), "任何一张主图的色度抽样都忽略")
@@ -1084,6 +1334,8 @@ check("收下一个输入文件", parsed(["a.jpg"])?.inputs, ["a.jpg"])
 check("-r 打开递归", parsed(["-r", "目录"])?.recursive, true)
 check("-q 读出质量", parsed(["-q", "0.95", "a.jpg"])?.quality, 0.95)
 check("-j 读出并发数", parsed(["-j", "4", "a.jpg"])?.jobs, 4)
+check("默认整块照搬 EXIF", parsed(["a.jpg"])?.rawExif, true)
+check("--no-raw-exif 关掉整块照搬", parsed(["--no-raw-exif", "a.jpg"])?.rawExif, false)
 check("-- 之后的横杠开头当文件名",
       parsed(["--", "-奇怪的文件名.jpg"])?.inputs, ["-奇怪的文件名.jpg"])
 check("-o 展开 ~", parsed(["-o", "~/out", "a.jpg"])?.output?.path.hasPrefix("/"), true)
@@ -1110,6 +1362,7 @@ expectSame(gui.options.recursive, cli.recursive, "递归子文件夹")
 expectSame(gui.options.quality, cli.quality, "质量")
 expectSame(gui.options.overwrite, cli.overwrite, "覆盖同名文件")
 expectSame(gui.options.deleteOriginal, cli.deleteOriginal, "删除源文件")
+expectSame(gui.options.rawExif, cli.rawExif, "整块照搬 EXIF")
 
 // verify 是有意分叉：界面结果直接给人看，默认校验；命令行按需开关。
 // 若哪天两端被"统一"成一样，这条会失败，提醒连同 Model.swift 的注释一起改。

@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=221
-EXPECTED_UNIT=447
+EXPECTED_ASSERTIONS=298
+EXPECTED_UNIT=497
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -82,9 +82,12 @@ refute() {
 }
 # 一张必有差异的样本走 --delete-original：校验必须报出每一条期望文本，源文件必须留着。
 # 用法：expect_reported 描述 文件 期望文本...（每条期望文本一条断言，另加源文件一条）
+# 要走 EXIF 交给系统重写的那条路时在前面写 XFLAGS=--no-raw-exif。
+XFLAGS=""
 expect_reported() {
     local what=$1 file=$2 out st want; shift 2
-    out=$("$BIN" -v --delete-original "$file" 2>&1); st=$?
+    # shellcheck disable=SC2086  # XFLAGS 为空时不能变成一个空参数
+    out=$("$BIN" -v --delete-original $XFLAGS "$file" 2>&1); st=$?
     for want in "$@"; do
         if grep -qF -- "$want" <<< "$out"; then
             pass "$what：报出「$want」"
@@ -93,6 +96,19 @@ expect_reported() {
         fi
     done
     refute "$what：源文件保留" "$st" test ! -f "$file"
+}
+# 默认路径（EXIF 整块照搬）：拷一份走 --verify，校验必须通过，产物的 EXIF 必须与源逐字节相同。
+# 用在「EXIF 交给系统重写时会报丢失」的样本旁边，要在那张样本被转换之前调用（拷的是原样）。
+# 用法：expect_carried 描述 文件（两条断言）
+expect_carried() {
+    local what=$1 copy="${2%.*}-照搬.jpg" out
+    cp "$2" "$copy"
+    out=$("$BIN" -v --verify "$copy" 2>&1)
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what（默认路径）：校验通过" \
+        || { fail "$what（默认路径）：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    check "$what（默认路径）：产物的 EXIF 与源逐字节相同" \
+        "$(./Tests/probe --exif-same "$copy" "${copy%.jpg}.heic")" "相同"
 }
 # 造样本的那一步失败要出声，否则后面的断言测的是一张没改过的图。
 make_sample() { "$@" >/dev/null 2>&1 || fail "造不出样本：$*"; }
@@ -384,7 +400,9 @@ refute "预演不删源文件" "$st" test ! -f "$WORK/预演不删.jpg"
 # 成为这张图唯一的差异——"源文件保留"这条于是只由 MakerNote 那一行撑着。
 cp test_pic/P1130939.JPG "$WORK/相机.jpg"
 make_sample ./Tests/mangle-tool --strip-trailer "$WORK/相机.jpg"
-expect_reported "相机照片丢失 MakerNote" "$WORK/相机.jpg" "丢失 厂商私有数据 MakerNote"
+# 默认路径整块照搬 EXIF，MakerNote 原样在产物里；交给系统重写时才丢。
+expect_carried "相机照片的 MakerNote" "$WORK/相机.jpg"
+XFLAGS=--no-raw-exif expect_reported "相机照片丢失 MakerNote" "$WORK/相机.jpg" "丢失 厂商私有数据 MakerNote"
 
 round "7b. 偏移只靠 XMP 承载"
 # IIM 时间后缀里的偏移，在目标里的唯一承载是 ImageIO 合成的
@@ -636,7 +654,9 @@ round "7g. ImageIO 读不出的 EXIF 标签"
 make_sample ./Tests/mangle-tool --tags "$WORK/读不出的标签.jpg" 'gps:001B:ascii=CELLID' 'exif:9208:long=0' \
     'exif:C000:ascii=私有串' 'exif:010D:ascii=放错位置的文档名' \
     'exif:927C:undef=J' 'exif:927C:undef=##**N4206_vivi' 'exif:927C:undef=Auto'
-expect_reported "ImageIO 读不出的 EXIF 标签" "$WORK/读不出的标签.jpg" \
+# 默认路径整块照搬，这些标签原样在产物里；下面的「必须报」是 EXIF 交给系统重写的那条路。
+expect_carried "ImageIO 读不出的 EXIF 标签" "$WORK/读不出的标签.jpg"
+XFLAGS=--no-raw-exif expect_reported "ImageIO 读不出的 EXIF 标签" "$WORK/读不出的标签.jpg" \
     '丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELLID"）——类型不合规范' \
     '丢失 EXIF 标签 LightSource（ExifIFD 0x9208，LONG，0）——类型不合规范' \
     '丢失 EXIF 标签 未知标签（ExifIFD 0xC000，ASCII，"私有串"）' \
@@ -648,7 +668,8 @@ expect_reported "ImageIO 读不出的 EXIF 标签" "$WORK/读不出的标签.jpg
 ./Tests/fixture "$WORK/空条目.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --tags "$WORK/空条目.jpg" 'exif:010D:ascii=' 'exif:0000:none=' \
     "exif:9286:undef=$(printf '\\0%.0s' 1 2 3 4 5 6 7 8)$(printf '%248s' '')" 'exif:9208:long=0'
-out=$("$BIN" --verify "$WORK/空条目.jpg" 2>&1)
+expect_carried "空条目与一个类型不合规范的标签" "$WORK/空条目.jpg"
+out=$("$BIN" --verify --no-raw-exif "$WORK/空条目.jpg" 2>&1)
 grep -q "发现 1 处差异" <<< "$out" && grep -qF "LightSource（ExifIFD 0x9208" <<< "$out" \
     && pass "没有数据的条目不报，同一张图里该报的照报（恰好 1 处）" \
     || { fail "空条目被报了，或该报的没报"; sed 's/^/     /' <<< "$out"; }
@@ -660,7 +681,9 @@ round "7h. GPS 按原始分数比"
 ./Tests/fixture "$WORK/GPS精度.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --tags "$WORK/GPS精度.jpg" 'gps:0004:rational=120/1,8/1,55304567/1000000'
 cp "$WORK/GPS精度.jpg" "$WORK/GPS精度副本.jpg"
-out=$("$BIN" --verify "$WORK/GPS精度.jpg" 2>&1); st=$?
+# 默认路径整块照搬，GPS 的原始分数原样在产物里；截断只发生在 EXIF 交给系统重写的那条路上。
+expect_carried "秒是分母 1000000 的 GPS" "$WORK/GPS精度.jpg"
+out=$("$BIN" --verify --no-raw-exif "$WORK/GPS精度.jpg" 2>&1); st=$?
 grep -qF "变化 GPS 经度：120°8′55.304567″ → 120°8′55.3″（HEIF 写入器只保留到 1/100 秒）" <<< "$out" \
     && pass "GPS 经度按原始分数报出截断" \
     || { fail "GPS 经度的截断没报出来"; sed 's/^/     /' <<< "$out"; }
@@ -707,15 +730,19 @@ round "7k. ImageIO 读不出的 ImageUniqueID"
 # ImageIO 只读恰好 33 字节的 ImageUniqueID，写入器却什么长度都照写。别的长度的值转换时从
 # 原始字节补写进产物，校验按两边的原始字节比值（ImageIO 视图两边都读不出它）。源的副本
 # 放在另一个目录里留作比对。
+# 默认路径整块照搬，值跟着整个 EXIF 过去；--no-raw-exif 时走转换时的补写。两条路各跑一遍。
 mkdir -p "$WORK/唯一标识/源副本"
+for mode in "" --no-raw-exif; do
 i=0
 while IFS='|' read -r what value; do
     i=$((i + 1))
-    f="$WORK/唯一标识/$i.jpg" ref="$WORK/唯一标识/源副本/$i.jpg"
+    what="$what${mode:+（$mode）}"
+    f="$WORK/唯一标识/$i${mode}.jpg" ref="$WORK/唯一标识/源副本/$i${mode}.jpg"
     make_sample ./Tests/fixture --unique-id "$value" "$f"
     cp "$f" "$ref"
     check "$what：前提，源的 ImageIO 视图里没有 ImageUniqueID" "$(./Tests/probe "$f" '{Exif}/ImageUniqueID')" "<无>"
-    out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+    # shellcheck disable=SC2086  # mode 为空时不能变成一个空参数
+    out=$("$BIN" -v --delete-original $mode "$f" 2>&1); st=$?
     grep -q "元数据校验通过" <<< "$out" \
         && pass "$what：校验通过" \
         || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
@@ -727,6 +754,7 @@ done <<'EOF'
 26 字节|OPPO_20201019_204116_0001
 含非 ASCII 字符|唯一标识
 EOF
+done
 # 33 字节：ImageIO 自己读得到，键空间比对管它的值，补写那一路什么都不做。
 make_sample ./Tests/fixture --unique-id 0123456789abcdef0123456789abcdef "$WORK/唯一标识/33字节.jpg"
 check "33 字节：前提，源的 ImageIO 视图里读得到" \
@@ -737,26 +765,149 @@ grep -q "元数据校验通过" <<< "$out" && pass "33 字节：校验通过" ||
 check_same "33 字节：产物原始 EXIF 里的 0xA420 与源逐字节相同" \
     "$(./Tests/probe --raw-exif "$WORK/唯一标识/33字节.heic" A420)" \
     "$(./Tests/probe --raw-exif "$WORK/唯一标识/源副本/33字节.jpg" A420)"
-# 写不回原样的不补，照报丢失：不是合法 UTF-8 的值、UNDEFINED 类型。
+# 写不回原样的不补，EXIF 交给系统重写时照报丢失：不是合法 UTF-8 的值、UNDEFINED 类型。
+# 默认路径整块照搬，它们原样在产物里。
 ./Tests/fixture "$WORK/唯一标识/非UTF8.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --tags "$WORK/唯一标识/非UTF8.jpg" 'exif:A420:ascii=J12LLKF00SM\xffJ12'
-expect_reported "ImageUniqueID 不是合法 UTF-8" "$WORK/唯一标识/非UTF8.jpg" \
+expect_carried "ImageUniqueID 不是合法 UTF-8" "$WORK/唯一标识/非UTF8.jpg"
+XFLAGS=--no-raw-exif expect_reported "ImageUniqueID 不是合法 UTF-8" "$WORK/唯一标识/非UTF8.jpg" \
     '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，ASCII，"J12LLKF00SM'
 check "ImageUniqueID 不是合法 UTF-8：产物里没有补写" \
     "$(./Tests/probe --raw-exif "$WORK/唯一标识/非UTF8.heic" A420)" "<无>"
 ./Tests/fixture "$WORK/唯一标识/UNDEFINED.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --tags "$WORK/唯一标识/UNDEFINED.jpg" 'exif:A420:undef=J12LLKF00SM J12LLKL01GM'
-expect_reported "UNDEFINED 类型的 ImageUniqueID" "$WORK/唯一标识/UNDEFINED.jpg" \
+expect_carried "UNDEFINED 类型的 ImageUniqueID" "$WORK/唯一标识/UNDEFINED.jpg"
+XFLAGS=--no-raw-exif expect_reported "UNDEFINED 类型的 ImageUniqueID" "$WORK/唯一标识/UNDEFINED.jpg" \
     '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，UNDEFINED，"J12LLKF00SM J12LLKL01GM"）——类型不合规范'
-# 个数离谱、值越出 EXIF：不崩，照报。
+# 个数离谱、值越出 EXIF：不崩，EXIF 交给系统重写时照报；默认路径原样照搬。
 while IFS='|' read -r what spec; do
     f="$WORK/唯一标识/$what.jpg"
     ./Tests/fixture "$f" >/dev/null
     make_sample ./Tests/mangle-tool --tags "$f" "$spec"
-    expect_reported "ImageUniqueID $what" "$f" '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，ASCII，值读不出）——值越界'
+    expect_carried "ImageUniqueID $what" "$f"
+    XFLAGS=--no-raw-exif expect_reported "ImageUniqueID $what" "$f" '丢失 EXIF 标签 ImageUniqueID（ExifIFD 0xA420，ASCII，值读不出）——值越界'
 done <<'EOF'
 个数离谱|exif:A420:ascii#99999=J12LLKF00SM
 值偏移越出EXIF|exif:A420:ascii@7FFFFFF0=J12LLKF00SM J12LLKL01GM
+EOF
+
+round "7l. EXIF 整块照搬"
+# 默认路径：ImageIO 写完 HEIC 后，产物里 Exif 项的内容换成源 EXIF 段的原始字节。照搬会让
+# 视图退步的（缺字符集头的 UserComment、EXIF 与 IIM 打架）退回 ImageIO 重写的产物，与
+# --no-raw-exif 逐字节相同。凡是要逐字节比两个产物的，两次转换前后紧挨着跑（编码结果受负载影响）。
+mkdir -p "$WORK/照搬/源副本" "$WORK/照搬/重写"
+# 1. ImageIO 读不出的标签、GPS 秒的精度、24 字节的 ImageUniqueID 放在同一张图里。
+UID24="J12LLKF00SM J12LLKL01GM"
+f="$WORK/照搬/整块.jpg" ref="$WORK/照搬/源副本/整块.jpg" rw="$WORK/照搬/重写/整块.jpg"
+make_sample ./Tests/fixture --unique-id "$UID24" "$f"
+make_sample ./Tests/mangle-tool --tags "$f" 'gps:001B:ascii=CELLID' 'exif:9208:long=0' \
+    'exif:C000:ascii=私有串' 'exif:010D:ascii=放错位置的文档名' \
+    'exif:927C:undef=J' 'exif:927C:undef=##**N4206_vivi' 'exif:927C:undef=Auto' \
+    'gps:0004:rational=120/1,8/1,55304567/1000000'
+cp "$f" "$ref"; cp "$f" "$rw"
+out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "整块照搬：校验通过" || { fail "整块照搬：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+refute "整块照搬：校验通过后删了源" "$st" test -e "$f"
+grep -qE "EXIF 整块照搬（[0-9]+ 字节）" <<< "$out" \
+    && pass "整块照搬：-v 说照搬了多少字节" || { fail "整块照搬：-v 没说照搬了"; sed 's/^/     /' <<< "$out"; }
+check "整块照搬：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --exif-same "$ref" "${f%.jpg}.heic")" "相同"
+# 7. 没有死数据：源 EXIF 里那个 24 字节的 ImageUniqueID 在产物里恰好出现一次（旧内容清零了）。
+check "整块照搬：产物里 ImageUniqueID 的字节串恰好出现一次" \
+    "$(LC_ALL=C grep -aoF "$UID24" "${f%.jpg}.heic" | wc -l | tr -d ' ')" "1"
+XFLAGS=--no-raw-exif expect_reported "整块照搬（--no-raw-exif）" "$rw" \
+    '丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELLID"）——类型不合规范' \
+    '丢失 EXIF 标签 LightSource（ExifIFD 0x9208，LONG，0）——类型不合规范' \
+    '丢失 EXIF 标签 未知标签（ExifIFD 0xC000，ASCII，"私有串"）' \
+    '丢失 EXIF 标签 DocumentName（ExifIFD 0x010D，ASCII，"放错位置的文档名"）——放错了 IFD' \
+    '丢失 EXIF 标签 MakerNote（ExifIFD 0x927C，UNDEFINED，"J"、"##**N4206_vivi"、"Auto"，同号条目 3 个）' \
+    "变化 GPS 经度：120°8′55.304567″ → 120°8′55.3″（HEIF 写入器只保留到 1/100 秒）"
+# 照搬了的产物比 ImageIO 重写的恰好大「4 字节偏移 + Exif\0\0 + 源的 TIFF」。
+n=$(grep -oE "EXIF 整块照搬（[0-9]+ 字节）" <<< "$out" | grep -oE "[0-9]+")
+check_same "整块照搬：产物比 --no-raw-exif 的恰好大 10 + 源 TIFF 的字节数" \
+    "$(( $(stat -f %z "${f%.jpg}.heic") - $(stat -f %z "${rw%.jpg}.heic") ))" "$(( 10 + ${n:-0} ))"
+
+# 2. 真实的 MakerNote：两张相机照片都带 IFD1 缩略图，逐字节相同就说明缩略图也过去了。
+for name in IMG_1225 P1130939; do
+    cp "test_pic/$name.JPG" "$WORK/照搬/$name.jpg"
+    out=$("$BIN" --verify "$WORK/照搬/$name.jpg" 2>&1)
+    check "$name：产物的 EXIF 与源逐字节相同" \
+        "$(./Tests/probe --exif-same "$WORK/照搬/$name.jpg" "$WORK/照搬/$name.heic")" "相同"
+    if [ "$name" = IMG_1225 ]; then
+        grep -q "元数据校验通过" <<< "$out" \
+            && pass "$name：校验通过" || { fail "$name：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+        check_same "$name：产物里读得出 {MakerCanon}/LensModel，与源相同" \
+            "$(./Tests/probe "$WORK/照搬/$name.heic" '{MakerCanon}/LensModel')" \
+            "$(./Tests/probe "$WORK/照搬/$name.jpg" '{MakerCanon}/LensModel')"
+    else
+        grep -q "发现 1 处差异" <<< "$out" && grep -qF "丢失 EOI 之后的 845456 字节" <<< "$out" \
+            && pass "$name：只剩 EOI 之后那一行" || { fail "$name：差异不止 EOI 之后那一行"; sed 's/^/     /' <<< "$out"; }
+    fi
+done
+
+# 3. 方向：产物里的 irot/imir 由 ImageIO 按源的方向写，照搬不改 EXIF 里的方向。
+for o in 3 6 8 5; do
+    for mode in "" --no-raw-exif; do
+        d="$WORK/照搬/方向$o${mode}"
+        mkdir -p "$d"
+        ./Tests/fixture "$d/图.jpg" >/dev/null
+        make_sample ./Tests/mangle-tool --tags "$d/图.jpg" "ifd0:0112:short=$o"
+        # shellcheck disable=SC2086
+        "$BIN" $mode "$d/图.jpg" >/dev/null 2>&1
+    done
+    a="$WORK/照搬/方向$o/图.heic" b="$WORK/照搬/方向$o--no-raw-exif/图.heic"
+    check "方向 $o：默认路径照搬了" "$(./Tests/probe --exif-same "$WORK/照搬/方向$o/图.jpg" "$a")" "相同"
+    check_same "方向 $o：两条路的产物 Orientation 相同" "$(./Tests/probe "$a" Orientation)" "$(./Tests/probe "$b" Orientation)"
+    check_same "方向 $o：两条路的产物解码像素相同" "$(./Tests/probe --pixels "$a")" "$(./Tests/probe --pixels "$b")"
+done
+
+# 4. 退回旧路：照搬会让视图退步的两张，产物与 --no-raw-exif 逐字节相同，校验输出逐行相同。
+for what in 无前缀 只改IIM; do
+    for mode in "" --no-raw-exif; do
+        d="$WORK/照搬/$what${mode}"
+        mkdir -p "$d"
+        if [ "$what" = 无前缀 ]; then
+            cp "$WORK/照片.jpg" "$d/样本.jpg"
+            make_sample ./Tests/mangle-tool "$d/样本.jpg" "$NOTE"
+        else
+            ./Tests/fixture "$d/样本.jpg" >/dev/null
+            make_sample ./Tests/mangle-tool --replace "$d/样本.jpg" "184207+0800" "104207+0000"
+        fi
+    done
+    a="$WORK/照搬/$what" b="$WORK/照搬/$what--no-raw-exif"
+    out_a=$(cd "$a" && "$OLDPWD/$BIN" -v --verify 样本.jpg 2>&1)
+    out_b=$(cd "$b" && "$OLDPWD/$BIN" -v --verify --no-raw-exif 样本.jpg 2>&1)
+    cmp -s "$a/样本.heic" "$b/样本.heic" && [ -s "$a/样本.heic" ] \
+        && pass "$what：默认路径的产物与 --no-raw-exif 的逐字节相同" || fail "$what：两条路的产物不同"
+    grep -qE "EXIF 没有照搬：照搬后 .+" <<< "$out_a" \
+        && pass "$what：-v 说了没照搬的原因" || { fail "$what：-v 没说没照搬的原因"; sed 's/^/     /' <<< "$out_a"; }
+    check_same "$what：校验输出逐行相同" "$(grep -v "EXIF 没有照搬" <<< "$out_a")" "$out_b"
+done
+
+# 6. 增益图与辅助图：照搬只动 EXIF，辅助图与 HDR 解码与 --no-raw-exif 的产物相同。3 通道的
+# ISO 增益图（像素格式 420f）--aux-diff 读不了，那一张只比 HDR 解码出来的最亮值。
+mkdir -p "$WORK/照搬/辅助图" "$WORK/照搬/辅助图重写"
+./Tests/fixture --aux depth --aux matte --aux gainmap "$WORK/照搬/辅助图/三种.jpg" >/dev/null
+./Tests/fixture --iso-gainmap "$WORK/照搬/辅助图/ISO.jpg" >/dev/null
+cp "$WORK/照搬/辅助图/ISO.jpg" "$WORK/照搬/辅助图/彩色.jpg"
+make_sample ./Tests/mangle-tool --color-gainmap "$WORK/照搬/辅助图/彩色.jpg"
+while IFS='|' read -r name types; do
+    a="$WORK/照搬/辅助图/$name" b="$WORK/照搬/辅助图重写/$name"
+    cp "$a.jpg" "$b.jpg"
+    "$BIN" "$a.jpg" >/dev/null 2>&1
+    "$BIN" --no-raw-exif "$b.jpg" >/dev/null 2>&1
+    check "$name：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --exif-same "$a.jpg" "$a.heic")" "相同"
+    for type in $types; do
+        check "$name：$type 与 --no-raw-exif 的产物相差 0 级" "$(./Tests/probe --aux-diff "$b.heic" "$a.heic" "$type")" "0"
+    done
+    check_same "$name：内容余量与 --no-raw-exif 的产物相同" \
+        "$(./Tests/probe --headroom "$a.heic")" "$(./Tests/probe --headroom "$b.heic")"
+    check_same "$name：按 HDR 解码的最亮值与 --no-raw-exif 的产物相同" \
+        "$(./Tests/probe --hdr-peak "$a.heic")" "$(./Tests/probe --hdr-peak "$b.heic")"
+done <<'EOF'
+三种|Depth PortraitEffectsMatte HDRGainMap
+ISO|ISOGainMap
+彩色|
 EOF
 
 round "8. 界面模型：指定输出文件夹与取消"

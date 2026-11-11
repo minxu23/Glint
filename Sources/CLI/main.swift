@@ -18,9 +18,11 @@ GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间�
       --delete-original    删除源 JPEG（会自动先做 --verify，只有完全无损、
                            且 HEIF 不比原图大才删）
       --verify             转换后逐条比对元数据，报告任何丢失或变化的条目
+      --no-raw-exif        EXIF 交给系统重写，不整块照搬源文件的 EXIF。
+                           遇到读不了产物的软件时用
   -n, --dry-run            只打印将要做什么，不实际写文件
   -j, --jobs <n>           并发任务数，默认 \(ProcessInfo.processInfo.activeProcessorCount)
-  -v, --verbose            输出每张图保留的元数据条目数
+  -v, --verbose            输出每张图保留的元数据条目数，以及 EXIF 整块照搬了没有
   -h, --help               显示本帮助
 
 示例:
@@ -87,6 +89,11 @@ let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result 
         print(line)
         if opts.verbose {
             print("    元数据条目 \(r.tagCount) 项，扩展属性 \(r.xattrCount) 项")
+            switch r.rawExif {
+            case .carried(let bytes)?: print("    EXIF 整块照搬（\(bytes) 字节）")
+            case .kept(let why)?: print("    EXIF 没有照搬：\(why)")
+            case nil: break
+            }
         }
         switch r.verification {
         case .differences(let issues):

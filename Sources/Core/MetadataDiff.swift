@@ -629,6 +629,12 @@ func keyingAuxiliaryDataByType(_ flat: [String: String]) -> [String: String] {
     return result
 }
 
+/// --verify 的源侧键空间：属性视图加 XMP（metadataKeySpace），时间字段以原始字节为准，
+/// 覆盖属性视图里被调和过的值（见 RawTimes.swift）。转换时照搬 EXIF 的自检用同一份。
+func sourceKeySpace(of image: CGImageSource, url: URL, bytes: [UInt8]) -> [String: String] {
+    metadataKeySpace(of: image, url: url).merging(rawTimeFields(of: bytes)) { _, raw in raw }
+}
+
 /// 比对源与目标的元数据，返回丢失/变化的条目描述。
 func metadataDiff(source: URL, dest: URL) -> [String] {
     guard let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil),
@@ -642,9 +648,7 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
         return ["无法重新读取产物进行校验"]
     }
     let bytes = [UInt8](data)
-    // 源侧的时间字段以原始字节为准，覆盖属性视图里被调和过的值（见 RawTimes.swift）。
-    let before = metadataKeySpace(of: sourceImage, url: source)
-        .merging(rawTimeFields(of: bytes)) { _, raw in raw }
+    let before = sourceKeySpace(of: sourceImage, url: source, bytes: bytes)
     let after = metadataKeySpace(of: destImage, url: dest)
     // 原始 EXIF 清点先做：它报出的 GPS 分数变化，键空间比对里同一处的视图键不再重复报；
     // 键空间比对已经报了丢失的标签，它也不再重复报。源视图里没有的 ImageUniqueID 由它按
@@ -695,29 +699,59 @@ func xmpTimeCarried(key: String, _ source: String, _ target: String) -> Bool {
     return s.isCarried(by: t)
 }
 
-/// 键空间比对怎么处置源里的一个键。keySpaceDiff 和下面两个问询共用这一处判定，
-/// 原始 EXIF 清点据此知道哪些丢失已经报过，不会和键空间比对各说一套。
-private enum KeyFate {
-    case skipped, carried, makerNote(String), lost, compared
+/// 尺子本来就不比的键：描述文件自身的（isVolatile）、内嵌缩略图的、编码参数的。
+func isIgnoredKey(_ k: String) -> Bool {
+    isVolatile(k) || isThumbnailKey(k) || isFileContentsEncodingKey(k)
 }
 
-private func fate(of k: String, _ v: String, after: [String: String]) -> KeyFate {
-    if isVolatile(k) || isThumbnailKey(k) || isFileContentsEncodingKey(k) { return .skipped }
-    guard after[k] == nil else { return .compared }
-    if equivalentCarries(key: k, value: v, in: after) { return .carried }
-    if let group = makerNoteGroup(of: k) { return .makerNote(group) }
-    return .lost
+/// 源里的一个键与另一边的键空间比，得出的结论。这是键空间比对的那把尺子：keySpaceDiff 据此
+/// 出差异行，keySpaceLosses、makerNoteLost 据此告诉原始 EXIF 清点哪些已经报过，
+/// inconsistentKeys 据此判「与源不一致」（转换时照搬 EXIF 的自检用它），各处不另写一份。
+enum KeyVerdict: Equatable {
+    /// 尺子不比的键（isIgnoredKey）。
+    case skipped
+    /// 另一边没有这个键，但等价字段带着同一个值（equivalentCarries）。
+    case carried
+    /// 另一边没有这个键，它属于 MakerNote 派生的伪字典（makerNoteGroup）。
+    case makerNote(String)
+    case lost
+    /// 两边都有，值算作相同（valuesMatch，XMP 时间按 xmpTimeCarried）。
+    case matched
+    case changed
+}
+
+func keyVerdict(_ k: String, _ v: String, after: [String: String]) -> KeyVerdict {
+    if isIgnoredKey(k) { return .skipped }
+    guard let w = after[k] else {
+        if equivalentCarries(key: k, value: v, in: after) { return .carried }
+        if let group = makerNoteGroup(of: k) { return .makerNote(group) }
+        return .lost
+    }
+    return valuesMatch(v, w) || xmpTimeCarried(key: k, v, w) ? .matched : .changed
+}
+
+/// 视图 `after` 里与源 `before` 不一致的键：源里有、按 keyVerdict 是丢失、MakerNote 丢失或
+/// 值变了的；以及视图里有、源里没有的（尺子不比的键除外）。键照原样（带数组下标）。
+func inconsistentKeys(before: [String: String], after: [String: String]) -> Set<String> {
+    var keys = Set<String>()
+    for (k, v) in before {
+        switch keyVerdict(k, v, after: after) {
+        case .makerNote, .lost, .changed: keys.insert(k)
+        case .skipped, .carried, .matched: break
+        }
+    }
+    for k in after.keys where before[k] == nil && !isIgnoredKey(k) { keys.insert(k) }
+    return keys
 }
 
 /// keySpaceDiff 会逐条报成「丢失」的键，去掉了数组下标。
 func keySpaceLosses(before: [String: String], after: [String: String]) -> Set<String> {
-    Set(before.filter { k, v in if case .lost = fate(of: k, v, after: after) { return true }; return false }
-        .keys.map(strippingAllArrayIndices))
+    Set(before.filter { k, v in keyVerdict(k, v, after: after) == .lost }.keys.map(strippingAllArrayIndices))
 }
 
 /// keySpaceDiff 会出 MakerNote 汇总行。
 func makerNoteLost(before: [String: String], after: [String: String]) -> Bool {
-    before.contains { k, v in if case .makerNote = fate(of: k, v, after: after) { return true }; return false }
+    before.contains { k, v in if case .makerNote = keyVerdict(k, v, after: after) { return true }; return false }
 }
 
 /// 两个键空间 → 差异列表。纯函数，不碰文件：单测直接喂手搭的字典，
@@ -731,17 +765,15 @@ func keySpaceDiff(before: [String: String], after: [String: String],
     var makerNoteLost: [String: Int] = [:]   // 伪字典名 → 丢失条目数
 
     for (k, v) in before.sorted(by: { $0.key < $1.key }) where !covered.contains(strippingAllArrayIndices(k)) {
-        switch fate(of: k, v, after: after) {
-        case .skipped, .carried:
+        switch keyVerdict(k, v, after: after) {
+        case .skipped, .carried, .matched:
             continue
         case .makerNote(let group):
             makerNoteLost[group, default: 0] += 1
         case .lost:
             issues.append("丢失 \(k) = \(truncate(v))")
-        case .compared:
-            if !valuesMatch(v, after[k]!) && !xmpTimeCarried(key: k, v, after[k]!) {
-                issues.append("变化 \(k): \(truncate(v)) → \(truncate(after[k]!))")
-            }
+        case .changed:
+            issues.append("变化 \(k): \(truncate(v)) → \(truncate(after[k]!))")
         }
     }
 

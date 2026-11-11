@@ -23,6 +23,8 @@ enum HEIFExif {
 /// ISO BMFF 的一个盒子：类型与内容（盒头之后）在文件里的范围。
 struct HEIFBox {
     let type: String
+    /// 盒头的起点（长度字段所在的位置）。
+    let start: Int
     let content: Range<Int>
 }
 
@@ -55,7 +57,7 @@ func heifBoxes(_ bytes: [UInt8], in range: Range<Int>) -> [HEIFBox]? {
             size = range.upperBound - at
         }
         guard size >= header, size <= range.upperBound - at else { return nil }
-        result.append(HEIFBox(type: type, content: (at + header)..<(at + size)))
+        result.append(HEIFBox(type: type, start: at, content: (at + header)..<(at + size)))
         at += size
         // 一个合法的文件远到不了这个数；到了就是构造出来卡循环的。
         guard result.count < 100_000 else { return nil }
@@ -117,7 +119,7 @@ func heifExif(_ bytes: [UInt8]) -> HEIFExif {
 }
 
 /// iinf 里类型为 `Exif` 的项号，按出现顺序。结构读不通是 nil。
-private func exifItemIDs(_ bytes: [UInt8], _ iinf: HEIFBox) -> [Int]? {
+func exifItemIDs(_ bytes: [UInt8], _ iinf: HEIFBox) -> [Int]? {
     // 每一步都先核对盒子自己的内容够不够长：盒子内的字段不能借用后面盒子的字节。
     let c = iinf.content
     guard c.count >= 4, let version = bigEndianInt(bytes, c.lowerBound, 1) else { return nil }
@@ -138,9 +140,33 @@ private func exifItemIDs(_ bytes: [UInt8], _ iinf: HEIFBox) -> [Int]? {
     return ids
 }
 
-/// iloc 里某一项的各段范围。结构读不通或找不到这一项是 nil。
-private func itemExtents(_ bytes: [UInt8], _ iloc: HEIFBox, item wanted: Int)
-    -> [(method: Int, offset: Int, length: Int)]? {
+/// iloc 里一项的一段。`offset` 是 iloc 里写的值（不含项的基址），`offsetField`、`lengthField`
+/// 是这两个字段在文件里的起点，改写时原地改它们。
+struct ILocExtent {
+    let offset: Int
+    let length: Int
+    let offsetField: Int
+    let lengthField: Int
+}
+
+/// iloc 里的一项。`method` 是构造方式（0 文件偏移、1 idat 偏移、2 项偏移）。
+struct ILocItem {
+    let id: Int
+    let method: Int
+    let dataReference: Int
+    let baseOffset: Int
+    let extents: [ILocExtent]
+}
+
+/// iloc 的字段宽度（字节，0、4 或 8）。
+struct ILocWidths {
+    let offset: Int
+    let length: Int
+}
+
+/// 按顺序逐项读 iloc，每读完一项交给 `visit`，`visit` 返回 false 就停在那里。
+/// 在停下之前结构就读不通（版本不认识、字段宽度不合法、越出盒子）是 nil。
+func walkILoc(_ bytes: [UInt8], _ iloc: HEIFBox, visit: (ILocItem) -> Bool) -> ILocWidths? {
     let end = iloc.content.upperBound
     var at = iloc.content.lowerBound
     func read(_ width: Int) -> Int? {
@@ -153,6 +179,7 @@ private func itemExtents(_ bytes: [UInt8], _ iloc: HEIFBox, item wanted: Int)
     let offsetSize = sizes1 >> 4, lengthSize = sizes1 & 0xF, baseOffsetSize = sizes2 >> 4
     let indexSize = version == 0 ? 0 : sizes2 & 0xF
     for width in [offsetSize, lengthSize, baseOffsetSize, indexSize] where ![0, 4, 8].contains(width) { return nil }
+    let widths = ILocWidths(offset: offsetSize, length: lengthSize)
     guard let itemCount = read(version < 2 ? 2 : 4) else { return nil }
     for _ in 0..<itemCount {
         guard let id = read(version < 2 ? 2 : 4) else { return nil }
@@ -161,13 +188,44 @@ private func itemExtents(_ bytes: [UInt8], _ iloc: HEIFBox, item wanted: Int)
             guard let m = read(2) else { return nil }
             method = m & 0xF
         }
-        guard read(2) != nil, let baseOffset = read(baseOffsetSize), let extentCount = read(2) else { return nil }
-        var extents: [(method: Int, offset: Int, length: Int)] = []
+        guard let dataReference = read(2), let baseOffset = read(baseOffsetSize),
+              let extentCount = read(2) else { return nil }
+        var extents: [ILocExtent] = []
         for _ in 0..<extentCount {
-            guard read(indexSize) != nil, let offset = read(offsetSize), let length = read(lengthSize) else { return nil }
-            extents.append((method, baseOffset + offset, length))
+            guard read(indexSize) != nil else { return nil }
+            let offsetField = at
+            guard let offset = read(offsetSize) else { return nil }
+            let lengthField = at
+            guard let length = read(lengthSize) else { return nil }
+            extents.append(ILocExtent(offset: offset, length: length, offsetField: offsetField, lengthField: lengthField))
         }
-        if id == wanted { return extents.isEmpty ? nil : extents }
+        if !visit(ILocItem(id: id, method: method, dataReference: dataReference, baseOffset: baseOffset,
+                           extents: extents)) { break }
     }
-    return nil
+    return widths
+}
+
+/// iloc 里某一项的各段范围。结构读不通或找不到这一项是 nil。
+private func itemExtents(_ bytes: [UInt8], _ iloc: HEIFBox, item wanted: Int)
+    -> [(method: Int, offset: Int, length: Int)]? {
+    var found: ILocItem?
+    guard walkILoc(bytes, iloc, visit: { item in
+        guard item.id == wanted else { return true }
+        found = item
+        return false
+    }) != nil, let found, !found.extents.isEmpty else { return nil }
+    return found.extents.map { (found.method, found.baseOffset + $0.offset, $0.length) }
+}
+
+/// Exif 项的最后一段是否按文件偏移存放、恰好结束在文件的最后一个字节。ImageIO 写的产物里
+/// Exif 项在 `mdat` 靠前的位置（图像数据之前），只有照搬过的产物（carryingExif 把新内容
+/// 接在文件末尾）才会这样。结构读不通或没有 Exif 项都是 false。
+func heifExifEndsAtFileEnd(_ bytes: [UInt8]) -> Bool {
+    guard case .success(let children) = heifMetaChildren(bytes),
+          let iinf = children.first(where: { $0.type == "iinf" }),
+          let exifID = exifItemIDs(bytes, iinf)?.first,
+          let iloc = children.first(where: { $0.type == "iloc" }),
+          let last = itemExtents(bytes, iloc, item: exifID)?.last else { return false }
+    return last.method == 0 && last.length > 0 && last.offset >= 0
+        && last.offset <= bytes.count - last.length && last.offset + last.length == bytes.count
 }

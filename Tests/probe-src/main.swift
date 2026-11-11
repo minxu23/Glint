@@ -26,6 +26,10 @@ let usage = """
           probe --aux-items <文件.heic>              HEIF 里辅助图项的个数（iref 的 auxl 条数）
           probe --raw-exif <文件> <标签十六进制>     原始 EXIF 里 IFD0/Exif 子 IFD 的这个标签，
                                                      每个条目一行：IFD 类型 个数 值的十六进制
+          probe --exif-same <源.jpg> <产物.heic>     产物 Exif 项里的 TIFF 与源 EXIF 段的是否逐字节相同：
+                                                     「相同」或「不同（N 字节 → M 字节，第 K 个字节起不同）」
+          probe --exif-at-end <文件.heic>            Exif 项是否结束在文件末尾：「末尾」或「不在末尾」
+          probe --pixels <文件>                      解码出的 8 位 RGBA 像素的宽高与散列（FNV-1a 64 位）
     辅助图类型是 kCGImageAuxiliaryDataType 后面那一截，如 HDRGainMap、Depth。
     """
 func die(_ message: String) -> Never {
@@ -69,6 +73,44 @@ if args.first == "--raw-exif", args.count == 3 {
         let hex = e.value.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "值读不出"
         print("\(e.ifd) \(tiffTypeName(e.type)) \(e.count) \(hex)")
     }
+    exit(0)
+}
+
+// EXIF 数据块：源取 APP1 里 `Exif\0\0` 之后的全部字节，产物取 Exif 项里 TIFF 头偏移之后的
+// 全部字节，直接逐字节比。和 --verify 的比较不共用代码，两边各自独立地说话。
+if args.first == "--exif-same", args.count == 3 {
+    guard let a = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: args[1]))),
+          let b = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: args[2]))) else { print("<无法读取>"); exit(1) }
+    guard let s = TIFFStructure(jpeg: a), case .tiff(let d) = heifExif(b) else { print("<无>"); exit(0) }
+    let x = Array(s.bytes[s.base..<(s.base + s.length)]), y = Array(d.bytes[d.base..<(d.base + d.length)])
+    if x == y { print("相同"); exit(0) }
+    let k = (0..<min(x.count, y.count)).first { x[$0] != y[$0] } ?? min(x.count, y.count)
+    print("不同（\(x.count) 字节 → \(y.count) 字节，第 \(k + 1) 个字节起不同）")
+    exit(0)
+}
+if args.first == "--exif-at-end", args.count == 2 {
+    guard let b = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: args[1]))) else { print("<无法读取>"); exit(1) }
+    guard case .tiff = heifExif(b) else { print("<无>"); exit(0) }
+    print(heifExifEndsAtFileEnd(b) ? "末尾" : "不在末尾")
+    exit(0)
+}
+// 按方向转正之前的原始像素：解码第 0 张，画进 8 位 sRGB RGBA，散列全部字节。
+if args.first == "--pixels", args.count == 2 {
+    guard let s = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[1]) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(s, 0, nil),
+          let space = CGColorSpace(name: CGColorSpace.sRGB) else { print("<无法读取>"); exit(1) }
+    let w = image.width, h = image.height
+    var pixels = [UInt8](repeating: 0, count: w * h * 4)
+    let drawn = pixels.withUnsafeMutableBytes { raw -> Bool in
+        guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return true
+    }
+    guard drawn else { print("<无法读取>"); exit(1) }
+    var hash: UInt64 = 0xcbf29ce484222325
+    for byte in pixels { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+    print("\(w)x\(h) \(String(hash, radix: 16))")
     exit(0)
 }
 
