@@ -94,6 +94,7 @@ let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result 
             case .kept(let why)?: print("    EXIF 没有照搬：\(why)")
             case nil: break
             }
+            if let reencode = r.reencode { print("    \(reencode.description)") }
         }
         switch r.verification {
         case .differences(let issues):

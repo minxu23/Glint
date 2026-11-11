@@ -1348,6 +1348,72 @@ var allGrown = BatchTally()
 allGrown.recordConverted(inBytes: 300, outBytes: 400, hasIssues: false)
 check("总体变大时写增大而不是负的节省", allGrown.summary(unit: "个"), "完成 1 个，1 个比原图大，总计 300 B → 400 B，增大 33%")
 
+print("产物比原图大时重编一次：注入假的编码步骤")
+// 硬件编码器偶发的大产物没法按需触发，这一组给 convert 注入假的编码步骤：按计划依次
+// 写出给定字节数的文件（每遍的填充字节不同，好认出留下的是哪一份），nil 表示这一遍
+// 失败（失败前先写几个字节，看临时文件有没有被清掉）。
+let reencodeRoot = FileManager.default.temporaryDirectory
+    .appendingPathComponent("jpeg2heif-reencode-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: reencodeRoot, withIntermediateDirectories: true)
+let reencodeSource = reencodeRoot.appendingPathComponent("源.jpg")
+if let image = tinyJPEGSource().flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }),
+   let out = CGImageDestinationCreateWithURL(reencodeSource as CFURL, "public.jpeg" as CFString, 1, nil) {
+    CGImageDestinationAddImage(out, image, nil)
+    _ = CGImageDestinationFinalize(out)
+}
+let sourceBytes = fileSize(reencodeSource)
+check(sourceBytes > 8, "前提：造出了源 JPEG")
+/// 按 `plan` 跑一次 convert。`kept` 是留下来的那一遍（从 0 数），nil 表示转换应当失败；
+/// `grown` 是留下的产物该不该带「变大」的备注。
+func expectReencode(_ name: String, _ plan: [Int?], calls: Int, kept: Int?, grown: Bool = false) {
+    let folder = reencodeRoot.appendingPathComponent(name)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    var called = 0
+    let fake: HEIFEncoder = { _, _, _, url in
+        defer { called += 1 }
+        guard called < plan.count, let size = plan[called] else {
+            try? Data([0xEE, 0xEE]).write(to: url)
+            return false
+        }
+        return (try? Data(repeating: UInt8(called + 1), count: size).write(to: url)) != nil
+    }
+    let dest = folder.appendingPathComponent("产物.heic")
+    let result = convert(reencodeSource, opts: ConversionOptions(), dest: dest, encode: fake)
+    check("\(name)：编码步骤调用 \(calls) 次", called, calls)
+    if let kept, let size = plan[kept] {
+        guard case .converted(let r) = result else {
+            fail("\(name)：转换没有成功（\(result)）"); fail("\(name)：outBytes"); fail("\(name)：变大备注")
+            return
+        }
+        check("\(name)：留下第 \(kept + 1) 遍的产物",
+              (try? Data(contentsOf: dest)) == Data(repeating: UInt8(kept + 1), count: size), true)
+        check("\(name)：outBytes 是留下那份的大小", r.outBytes, size)
+        check("\(name)：\(grown ? "有" : "没有")变大的备注",
+              r.note?.contains("HEIF 比原图大") ?? false, grown)
+    } else {
+        guard case .failed = result else { fail("\(name)：转换应当失败（\(result)）"); return }
+        pass("\(name)：转换失败")
+    }
+    let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        .filter { $0.hasPrefix(".jpeg2heif-") }
+    check("\(name)：目标目录里不留临时文件", leftovers, [])
+}
+let big = sourceBytes * 3, bigger = sourceBytes * 4, small = sourceBytes / 2
+expectReencode("先大后小", [big, small], calls: 2, kept: 1)
+expectReencode("两次都大、第二次更小", [bigger, big], calls: 2, kept: 1, grown: true)
+expectReencode("两次都大、第二次更大", [big, bigger], calls: 2, kept: 0, grown: true)
+expectReencode("两次一样大", [big, big], calls: 2, kept: 0, grown: true)
+expectReencode("先大、第二次失败", [big, nil], calls: 2, kept: 0, grown: true)
+expectReencode("第一次不比源大", [sourceBytes, small], calls: 1, kept: 0)
+expectReencode("第一次失败", [nil, small], calls: 1, kept: nil)
+try? FileManager.default.removeItem(at: reencodeRoot)
+check("-v 那一行：第二份更小", Reencode(first: 3_000_000, second: 787_824).description,
+      "产物比原图大，重编了一次：2.9 MB → 769.4 KB（用了较小的一份）")
+check("-v 那一行：两次一样大", Reencode(first: 2048, second: 2048).description,
+      "产物比原图大，重编了一次：2.0 KB → 2.0 KB（两次一样大）")
+check("-v 那一行：第二遍失败", Reencode(first: 2048, second: nil).description,
+      "产物比原图大，重编了一次：2.0 KB → 重编失败（用了第一份）")
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args) else { return nil }

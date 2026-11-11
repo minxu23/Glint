@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=306
-EXPECTED_UNIT=507
+EXPECTED_ASSERTIONS=308
+EXPECTED_UNIT=544
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -159,9 +159,10 @@ fi
 expect_count "单测" "$unit_n" "$EXPECTED_UNIT" EXPECTED_UNIT
 
 round "1. 单文件转换 + 元数据校验"
-OUT=$("$BIN" --verify -v "$WORK/照片.jpg" 2>&1)
+OUT=$("$BIN" --verify -v "$WORK/照片.jpg" 2>&1); st=$?
 echo "$OUT" | grep -q "元数据校验通过" && pass "校验通过，无任何丢失" || { fail "校验报告了差异"; echo "$OUT" | sed 's/^/     /'; }
 [ -f "$WORK/照片.heic" ] && pass "生成了 .heic" || fail "没有生成 .heic"
+refute "产物不比原图大时不重编（-v 里没有重编那一行）" "$st" grep -qF "重编了一次" <<< "$OUT"
 
 # 逐个关键字段对比源 JPEG 与产物 HEIC —— 断言的是"和源文件一致"，
 # 而不是某个写死的值，这样测试不会被生成夹具时的编码行为带偏。
@@ -709,8 +710,11 @@ grep -q "元数据校验通过" <<< "$out" \
 round "7i. 产物比原图大"
 # 噪声图按质量 0.2 存的 JPEG，转出来稳定地变大（--noise 夹具）。提示要出现；
 # --delete-original 下校验通过也不删源，并说明原因；批量汇总单列变大的个数。
+# 变大的产物重编一次，-v 说出来。
 ./Tests/fixture --noise "$WORK/变大.jpg" >/dev/null
-out=$("$BIN" --delete-original "$WORK/变大.jpg" 2>&1); st=$?
+out=$("$BIN" -v --delete-original "$WORK/变大.jpg" 2>&1); st=$?
+grep -qE "^    产物比原图大，重编了一次：.+ → .+（(用了较小的一份|两次一样大)）$" <<< "$out" \
+    && pass "变大时重编一次，-v 说了两次的大小" || { fail "-v 里没有重编那一行"; sed 's/^/     /' <<< "$out"; }
 grep -q "元数据校验通过" <<< "$out" \
     && pass "前提：变大的那张校验通过（不删只因为变大）" || { fail "变大的那张校验没通过"; sed 's/^/     /' <<< "$out"; }
 grep -qE "HEIF 比原图大 [0-9]+%" <<< "$out" && pass "提示 HEIF 比原图大" || { fail "没提示变大"; sed 's/^/     /' <<< "$out"; }

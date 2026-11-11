@@ -182,6 +182,8 @@ struct ConversionReport {
     let verification: Verification
     /// EXIF 整块照搬的结果；没开照搬（--no-raw-exif）或预演时是 nil。只在 -v 时显示。
     let rawExif: RawExifOutcome?
+    /// 产物比原图大而重编过一次时，两遍的大小；没重编是 nil。只在 -v 时显示。
+    let reencode: Reencode?
 
     /// 与元数据差异无关的状态说明：产物比原图大，以及请求了删除源文件却没删的原因
     /// （校验未通过、产物比原图大）。几句用「；」连成一行。没有要说的就是 nil。
@@ -210,6 +212,26 @@ enum Verification: Equatable {
     }
 }
 
+/// 产物比原图大时重编一次的经过（见 convert）。
+struct Reencode: Equatable {
+    /// 第一遍「编码 + 照搬」得到的产物字节数。
+    let first: Int
+    /// 第二遍的字节数；第二遍编码失败是 nil。
+    let second: Int?
+
+    /// -v 时显示的那一行（不含缩进）。
+    var description: String {
+        let head = "产物比原图大，重编了一次：\(humanSize(first)) → "
+        guard let second else { return head + "重编失败（用了第一份）" }
+        let tail = second == first ? "（两次一样大）" : "（用了较小的一份）"
+        return head + humanSize(second) + tail
+    }
+}
+
+/// 「编码」那一步：把源图连同属性和 XMP 编码成 HEIF 写到给定的路径，成功返回 true。
+/// 签名与 encodeHEIF 相同。
+typealias HEIFEncoder = (CGImageSource, [CFString: Any], CGImageMetadata?, URL) -> Bool
+
 enum ConvertResult {
     case converted(ConversionReport)
     case skipped(String)
@@ -218,7 +240,15 @@ enum ConvertResult {
 
 /// 转换单张。`dest` 由 assignDestinations 预先定好且保证全局唯一——不要在这里
 /// 自行推导目标路径，并发下那样会让两个任务抢同一个文件。
-func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult {
+///
+/// 「编码 + EXIF 整块照搬」得到的产物比源大（判据是 growthPercent）时，这一段原样再做
+/// 一遍写到另一个临时文件，第二份更小就用第二份，否则（一样大、更大、第二遍编码失败）
+/// 用第一份，没用上的那份删掉。只重编这一次。硬件编码器偶尔会把一张图按高得多的质量
+/// 编出来，这一遍能把它换回正常大小的产物。
+///
+/// `encode` 只供单测注入假的编码步骤；命令行和界面都用默认值 encodeHEIF。
+func convert(_ input: URL, opts: ConversionOptions, dest: URL,
+             encode: HEIFEncoder = encodeHEIF) -> ConvertResult {
     guard let src = CGImageSourceCreateWithURL(input as CFURL, nil) else {
         return .failed("无法读取图像")
     }
@@ -247,22 +277,42 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
     if opts.dryRun {
         return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: 0,
                                           tagCount: tagCount, xattrCount: 0,
-                                          verification: .notVerified, rawExif: nil, note: nil))
+                                          verification: .notVerified, rawExif: nil, reencode: nil,
+                                          note: nil))
     }
 
     // 先写临时文件，成功后再原子替换，避免中断留下半个文件。
     // 目录到这里才建：被重名避让挪开的那些路径就不会留下空文件夹。
     let folder = dest.deletingLastPathComponent()
     try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
-    let tmp = folder.appendingPathComponent(".jpeg2heif-\(UUID().uuidString).heic")
 
     var destProps = props
     destProps[kCGImageDestinationLossyCompressionQuality] = opts.quality
-    guard encodeHEIF(src, properties: destProps, xmp: xmp, to: tmp) else {
-        try? fm.removeItem(at: tmp)
-        return .failed("HEIC 编码失败")
+    /// 「编码 + 照搬」一遍，写进一个新的临时文件。编码失败是 nil，临时文件已删。
+    func encodeAndCarry() -> (url: URL, rawExif: RawExifOutcome?)? {
+        let tmp = folder.appendingPathComponent(".jpeg2heif-\(UUID().uuidString).heic")
+        guard encode(src, destProps, xmp, tmp) else {
+            try? fm.removeItem(at: tmp)
+            return nil
+        }
+        return (tmp, opts.rawExif ? carryRawExif(source: input, product: tmp) : nil)
     }
-    let rawExif = opts.rawExif ? carryRawExif(source: input, product: tmp) : nil
+    guard var product = encodeAndCarry() else { return .failed("HEIC 编码失败") }
+    var reencode: Reencode?
+    let firstBytes = fileSize(product.url)
+    if growthPercent(inBytes: inBytes, outBytes: firstBytes) != nil {
+        let second = encodeAndCarry()
+        let secondBytes = second.map { fileSize($0.url) }
+        reencode = Reencode(first: firstBytes, second: secondBytes)
+        if let second, let secondBytes, secondBytes < firstBytes {
+            try? fm.removeItem(at: product.url)
+            product = second
+        } else if let second {
+            try? fm.removeItem(at: second.url)
+        }
+    }
+    let tmp = product.url
+    let rawExif = product.rawExif
 
     copyFileAttributes(from: input, to: tmp)
     let xattrs = copyExtendedAttributes(from: input.path, to: tmp.path)
@@ -297,7 +347,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult 
     return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: outBytes,
                                       tagCount: tagCount, xattrCount: xattrs,
                                       verification: verification, rawExif: rawExif,
-                                      note: notes.isEmpty ? nil : notes.joined(separator: "；")))
+                                      reencode: reencode, note: notes.isEmpty ? nil : notes.joined(separator: "；")))
 }
 
 // MARK: - EXIF 整块照搬
