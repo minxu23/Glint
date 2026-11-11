@@ -2,6 +2,9 @@
 // 原始字节。ImageIO 从属性字典重写 EXIF 时，它不认识的东西（各家 MakerNote、规范新标签、
 // 不合规范的写法、GPS 秒的精度）一读一写就没了；照搬让它们原样留在产物里。
 //
+// 照搬的是源的 TIFF 原样，或者只改了备注那一条的源 TIFF：ImageIO 读不出源里的 UserComment
+// （缺字符集头）而自己解析解得出时，备注改写成 ImageIO 读得出的写法（rewritingUserComment）。
+//
 // 这里是纯函数部分：闸门与改写，进字节、出字节，不碰文件也不碰 ImageIO。改写完的自检
 // （读回、视图不退步）和落盘在 Converter.swift 的 carryRawExif。
 //
@@ -40,6 +43,93 @@ func sourceExifTIFF(_ jpeg: [UInt8]) -> Result<[UInt8], RawExifSkip> {
         return .failure(.init("源里的 EXIF 段不是合法的 TIFF"))
     }
     return .success(Array(jpeg[base..<(base + length)]))
+}
+
+// MARK: - 备注改写
+
+/// ExifIFD 里唯一那个 UserComment（0x9286）条目的位置（条目头相对 TIFF 头的偏移）。
+/// ExifIFD 指针读得通、表里每个条目的 12 个字节都在块内、0x9286 恰好一个，才有；否则 nil。
+/// 照搬时的备注改写（rewritingUserComment）与校验认改写（isUserCommentRewrite）都以它为准。
+func soleUserCommentEntry(_ tiff: TIFFStructure) -> Int? {
+    guard let ifd = tiff.exifIFD, let count = tiff.u16(ifd) else { return nil }
+    var found: [Int] = []
+    for k in 0..<count {
+        let entry = ifd + 2 + k * 12
+        guard entry + 12 <= tiff.length, let tag = tiff.u16(entry) else { return nil }
+        if tag == 0x9286 { found.append(entry) }
+    }
+    return found.count == 1 ? found[0] : nil
+}
+
+/// 备注改写时接在块末尾的新值：文本全是 ASCII 用 `ASCII\0\0\0` + 文本；否则
+/// `UNICODE\0` + BOM + UTF-16，字节序（BOM 也一样）与 TIFF 头相同。
+///
+/// BOM 不能省：ImageIO 读 `UNICODE` 备注时有 BOM 认 BOM，没有就一律当大端，小端块里
+/// 不带 BOM 的 UTF-16 会读成乱码。非 ASCII 文本也不能用 `ASCII` 头，ImageIO 按 Latin-1 解。
+func userCommentValue(_ text: String, bigEndian: Bool) -> [UInt8] {
+    if text.utf8.allSatisfy({ $0 < 0x80 }) { return Array("ASCII\0\0\0".utf8) + Array(text.utf8) }
+    let units = [UInt16(0xFEFF)] + Array(text.utf16)
+    return Array("UNICODE\0".utf8) + units.flatMap { u -> [UInt8] in
+        bigEndian ? [UInt8(u >> 8), UInt8(u & 0xFF)] : [UInt8(u & 0xFF), UInt8(u >> 8)]
+    }
+}
+
+/// 把源 TIFF 里的 UserComment 改写成 ImageIO 读得出的写法，返回新的 TIFF；不改写是 nil。
+///
+/// 新值（userCommentValue）接在块末尾，块长为奇数时先补一个 0；0x9286 条目的 type 改成 7
+/// （UNDEFINED）、count 改成新值的字节数、offset 指向新值，按块的字节序写。除这 10 个字节
+/// 以外源 TIFF 的每个字节都不动，旧的备注字节留在原处、不再有人引用。
+///
+/// 不改写：块不是合法的 TIFF、soleUserCommentEntry 是 nil、文本是空的、新值的偏移或长度
+/// 放不进 4 字节。
+func rewritingUserComment(_ tiff: [UInt8], text: String) -> [UInt8]? {
+    guard !text.isEmpty, let structure = TIFFStructure(tiff, base: 0, length: tiff.count),
+          let entry = soleUserCommentEntry(structure) else { return nil }
+    let value = userCommentValue(text, bigEndian: structure.bigEndian)
+    var out = tiff
+    if out.count % 2 == 1 { out.append(0) }
+    let at = out.count
+    guard at + value.count <= 0xFFFF_FFFF else { return nil }
+    func put(_ v: Int, width: Int, at offset: Int) {
+        let be = (0..<width).map { UInt8(truncatingIfNeeded: v >> (8 * (width - 1 - $0))) }
+        out.replaceSubrange(offset..<(offset + width), with: structure.bigEndian ? be : be.reversed())
+    }
+    put(7, width: 2, at: entry + 2)
+    put(value.count, width: 4, at: entry + 4)
+    put(at, width: 4, at: entry + 8)
+    return out + value
+}
+
+/// 产物的 TIFF `product` 是不是源 TIFF `source` 按文本 `text` 做的备注改写。
+///
+/// 全部满足才是：源里 soleUserCommentEntry 找得到那一条；`product` 的前 |source| 个字节与
+/// 源相同，只有那一条的 type、count、offset 这 10 个字节可以不同；补齐字节（源长为奇数时）
+/// 是 0；那一条在 `product` 里是 type 7，offset 指向补齐之后，count 恰好到 `product` 末尾；
+/// 这段值解出来是 userCommentValue 规定的写法：文本全是 ASCII 时是 `ASCII\0\0\0` 加文本
+/// 的字节，否则是 `UNICODE\0` 加 BOM 加文本的 UTF-16，字节序与 TIFF 头相同。
+///
+/// 值是解出来逐项核对的，不调用 userCommentValue 比字节：写的一侧写错了（漏了 BOM、
+/// 选错了头），这里不会跟着它错。
+func isUserCommentRewrite(source: [UInt8], product: [UInt8], text: String) -> Bool {
+    guard let s = TIFFStructure(source, base: 0, length: source.count),
+          let entry = soleUserCommentEntry(s) else { return false }
+    let start = source.count + source.count % 2
+    guard product.count > start else { return false }
+    let editable = (entry + 2)..<(entry + 12)
+    for i in 0..<source.count where !editable.contains(i) && product[i] != source[i] { return false }
+    if start > source.count, product[source.count] != 0 { return false }
+    guard let p = TIFFStructure(product, base: 0, length: product.count),
+          p.u16(entry + 2) == 7, p.u32(entry + 4) == product.count - start, p.u32(entry + 8) == start
+    else { return false }
+    let head = Array(product[start..<min(start + 8, product.count)]), body = Array(product[min(start + 8, product.count)...])
+    if text.utf8.allSatisfy({ $0 < 0x80 }) {
+        return !text.isEmpty && head == Array("ASCII\0\0\0".utf8) && body == Array(text.utf8)
+    }
+    guard head == Array("UNICODE\0".utf8), body.count % 2 == 0 else { return false }
+    let units = stride(from: 0, to: body.count, by: 2).map { i -> UInt16 in
+        s.bigEndian ? UInt16(body[i]) << 8 | UInt16(body[i + 1]) : UInt16(body[i + 1]) << 8 | UInt16(body[i])
+    }
+    return units == [0xFEFF] + Array(text.utf16)
 }
 
 /// 一个数写进 `width` 字节的大端字段；放不下是 nil。`limit32` 是 4 字节字段装得下的最大值。

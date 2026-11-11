@@ -67,13 +67,22 @@ func imageProperties(_ src: CGImageSource) -> [CFString: Any] {
 func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
     var props = imageProperties(src)
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-    let seenByImageIO = trimPadding((exif[kCGImagePropertyExifUserComment] as? String) ?? "")
-    guard seenByImageIO.isEmpty, let recovered = rawExifUserComment(of: url) else { return props }
+    guard let recovered = userCommentImageIOMisses(props, raw: rawExifUserComment(of: url)) else { return props }
     // 这里放的是备注本身。为 HEIC 写入器做的改写只在 encodeHEIF 里做一次，
     // 这个函数的结果同时是 --verify 源侧的视图，不能掺进写入用的填充。
     exif[kCGImagePropertyExifUserComment] = recovered
     props[kCGImagePropertyExifDictionary] = exif
     return props
+}
+
+/// ImageIO 在源里读不出（视图里没有，或去掉填充后为空）、自己解析解得出（`raw`，即
+/// rawExifUserComment 的结果）的 UserComment 文本；不是这种情形是 nil。`props` 是 ImageIO 的
+/// 视图（imageProperties）。转换时的修补（repairedProperties）、照搬时的备注改写
+/// （carryRawExif）、校验认这种改写（carriedExifIssues）用的都是这一个判断。
+func userCommentImageIOMisses(_ props: [CFString: Any], raw: @autoclosure () -> String?) -> String? {
+    let exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+    guard trimPadding((exif[kCGImagePropertyExifUserComment] as? String) ?? "").isEmpty else { return nil }
+    return raw()
 }
 
 /// 要写进产物的属性：在 repairedProperties 的结果上补回 ImageIO 读不出的 ImageUniqueID
@@ -354,13 +363,17 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
 
 /// 一张图的 EXIF 照搬了没有。
 enum RawExifOutcome: Equatable {
-    /// 照搬了源文件 EXIF 段里这么多字节的 TIFF。
-    case carried(bytes: Int)
+    /// 照搬了源文件 EXIF 段里这么多字节的 TIFF；`commentRewritten` 是照搬的块上改写过备注
+    /// （见 rewritingUserComment），字节数仍是源 TIFF 的。
+    case carried(bytes: Int, commentRewritten: Bool)
     /// 没照搬，产物保持 ImageIO 写出来的样子；附带原因。
     case kept(String)
 }
 
 /// 把 `product`（ImageIO 刚写好的 HEIC）里 Exif 项的内容换成源 JPEG 的 EXIF 原始字节。
+///
+/// 打算照搬的那份 TIFF：源 TIFF 原样；ImageIO 读不出源里的 UserComment、自己解析解得出
+/// （userCommentImageIOMisses）且 rewritingUserComment 肯改写时，是改写过备注的源 TIFF。
 ///
 /// 闸门与改写见 carryingExif（RawExifCarry.swift）。改写得到的新字节先写进同目录的另一个
 /// 临时文件，过了 rawExifRegression 的自检才原子地替换 `product`；闸门或自检不过，`product`
@@ -375,9 +388,15 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
     case .success(let t): tiff = t
     case .failure(let skip): return .kept(skip.reason)
     }
+    var rewritten: [UInt8]?
+    if let image = CGImageSourceCreateWithURL(source as CFURL, nil),
+       let text = userCommentImageIOMisses(imageProperties(image), raw: rawExifUserComment(in: sourceBytes)) {
+        rewritten = rewritingUserComment(tiff, text: text)
+    }
+    let intended = rewritten ?? tiff
     guard let productData = try? Data(contentsOf: product) else { return .kept("读不出产物") }
     let carried: [UInt8]
-    switch carryingExif(tiff, into: [UInt8](productData)) {
+    switch carryingExif(intended, into: [UInt8](productData)) {
     case .success(let bytes): carried = bytes
     case .failure(let skip): return .kept(skip.reason)
     }
@@ -385,27 +404,27 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
         .appendingPathComponent(".jpeg2heif-\(UUID().uuidString).heic")
     defer { try? FileManager.default.removeItem(at: candidate) }
     guard (try? Data(carried).write(to: candidate)) != nil else { return .kept("写不出照搬后的产物") }
-    if let regression = rawExifRegression(source: source, sourceBytes: sourceBytes, tiff: tiff,
+    if let regression = rawExifRegression(source: source, sourceBytes: sourceBytes, intended: intended,
                                           before: product, after: candidate) {
         return .kept(regression)
     }
     guard rename(candidate.path, product.path) == 0 else { return .kept("换不上照搬后的产物") }
-    return .carried(bytes: tiff.count)
+    return .carried(bytes: tiff.count, commentRewritten: rewritten != nil)
 }
 
 /// 照搬后的产物 `after` 与照搬前的 `before` 比，有没有退步；有就是原因，没有是 nil。
 ///
-/// 1. 从 `after` 里重新取出 Exif 项，TIFF 字节与源（`tiff`）逐字节相同。
+/// 1. 从 `after` 里重新取出 Exif 项，TIFF 字节与打算照搬的那份（`intended`）逐字节相同。
 /// 2. ImageIO 打得开，状态完整，图像数、顶层 PixelWidth/PixelHeight/Orientation 与 `before` 相同。
 /// 3. 视图不退步：用 --verify 的源侧键空间（sourceKeySpace）当 V源，`after` 里与源不一致的键
 ///    （inconsistentKeys）必须都已经在 `before` 里不一致。原来一致的键，一个都不许变坏。
-///    缺字符集头的 UserComment（转换时修补过，照搬后 ImageIO 读不出）、EXIF 与 IIM 打架
-///    （ImageIO 调和出的值写进了产物，照搬后视图里变回 EXIF 的原值）都靠这一条退回旧路。
-func rawExifRegression(source: URL, sourceBytes: [UInt8], tiff: [UInt8], before: URL, after: URL) -> String? {
+///    EXIF 与 IIM 打架（ImageIO 调和出的值写进了产物，照搬后视图里变回 EXIF 的原值）、
+///    缺字符集头而没能改写的 UserComment（照搬后 ImageIO 读不出）都靠这一条退回旧路。
+func rawExifRegression(source: URL, sourceBytes: [UInt8], intended: [UInt8], before: URL, after: URL) -> String? {
     guard let afterData = try? Data(contentsOf: after),
           case .tiff(let readBack) = heifExif([UInt8](afterData)),
-          Array(readBack.bytes[readBack.base..<(readBack.base + readBack.length)]) == tiff else {
-        return "照搬后读回的 EXIF 与源不一致"
+          Array(readBack.bytes[readBack.base..<(readBack.base + readBack.length)]) == intended else {
+        return "照搬后读回的 EXIF 与打算照搬的不一致"
     }
     guard let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil),
           let beforeImage = CGImageSourceCreateWithURL(before as CFURL, nil),

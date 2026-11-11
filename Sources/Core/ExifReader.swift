@@ -137,9 +137,14 @@ struct TIFFStructure {
 
 /// 从 JPEG 文件里直接读出 EXIF UserComment 的文本；不是 JPEG 或没有该字段时返回 nil。
 func rawExifUserComment(of url: URL) -> String? {
-    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-          let range = exifUserCommentRange(in: data) else { return nil }
-    return decodeUserComment(Array(data[range]))
+    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+    return rawExifUserComment(in: [UInt8](data))
+}
+
+/// 同 rawExifUserComment(of:)，读的是已经在内存里的 JPEG 字节。
+func rawExifUserComment(in bytes: [UInt8]) -> String? {
+    guard let tiff = TIFFStructure(jpeg: bytes), let range = tiff.range(in: tiff.exifIFD, tag: 0x9286) else { return nil }
+    return decodeUserComment(Array(bytes[range]))
 }
 
 /// 定位 JPEG 里 EXIF UserComment 字段的字节范围（相对文件起点）。

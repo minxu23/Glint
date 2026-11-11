@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=308
-EXPECTED_UNIT=544
+EXPECTED_ASSERTIONS=368
+EXPECTED_UNIT=577
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -802,8 +802,7 @@ EOF
 
 round "7l. EXIF 整块照搬"
 # 默认路径：ImageIO 写完 HEIC 后，产物里 Exif 项的内容换成源 EXIF 段的原始字节。照搬会让
-# 视图退步的（缺字符集头的 UserComment、EXIF 与 IIM 打架）退回 ImageIO 重写的产物，与
-# --no-raw-exif 逐字节相同。凡是要逐字节比两个产物的，两次转换前后紧挨着跑（编码结果受负载影响）。
+# 视图退步的（EXIF 与 IIM 打架）退回 ImageIO 重写的产物，与 --no-raw-exif 逐字节相同。凡是要逐字节比两个产物的，两次转换前后紧挨着跑（编码结果受负载影响）。
 mkdir -p "$WORK/照搬/源副本" "$WORK/照搬/重写"
 # 1. ImageIO 读不出的标签、GPS 秒的精度、24 字节的 ImageUniqueID 放在同一张图里。
 UID24="J12LLKF00SM J12LLKL01GM"
@@ -875,17 +874,14 @@ for o in 3 6 8 5; do
 done
 
 # 4. 退回旧路：照搬会让视图退步的两张，产物与 --no-raw-exif 逐字节相同，校验输出逐行相同。
-for what in 无前缀 只改IIM; do
+# 第二张另有一条无前缀备注：备注改写了，EXIF 与 IIM 打架照样让视图退步。
+for what in 只改IIM 无前缀加只改IIM; do
     for mode in "" --no-raw-exif; do
         d="$WORK/照搬/$what${mode}"
         mkdir -p "$d"
-        if [ "$what" = 无前缀 ]; then
-            cp "$WORK/照片.jpg" "$d/样本.jpg"
-            make_sample ./Tests/mangle-tool "$d/样本.jpg" "$NOTE"
-        else
-            ./Tests/fixture "$d/样本.jpg" >/dev/null
-            make_sample ./Tests/mangle-tool --replace "$d/样本.jpg" "184207+0800" "104207+0000"
-        fi
+        ./Tests/fixture "$d/样本.jpg" >/dev/null
+        [ "$what" = 无前缀加只改IIM ] && make_sample ./Tests/mangle-tool "$d/样本.jpg" "$NOTE"
+        make_sample ./Tests/mangle-tool --replace "$d/样本.jpg" "184207+0800" "104207+0000"
     done
     a="$WORK/照搬/$what" b="$WORK/照搬/$what--no-raw-exif"
     out_a=$(cd "$a" && "$OLDPWD/$BIN" -v --verify 样本.jpg 2>&1)
@@ -922,6 +918,105 @@ done <<'EOF'
 ISO|ISOGainMap
 彩色|
 EOF
+
+round "7m. 带无前缀备注的照片也整块照搬"
+# ImageIO 读不出的无前缀 UserComment：照搬的块上只改备注那一条（新值接在块末尾，条目的
+# type/count/offset 指过去），改成 ImageIO 读得出的写法。纯 ASCII 用 ASCII 头；否则 UNICODE 头
+# 加 BOM 加与 TIFF 同字节序的 UTF-16（ImageIO 没有 BOM 时一律当大端读）。
+mkdir -p "$WORK/备注改写/源副本" "$WORK/备注改写/重写"
+# 用法：expect_rewritten 描述 文件 原文 新值头部的十六进制（九条断言）
+# 同时把同一张图的拷贝走 --no-raw-exif（紧挨着跑），输出留在 RW_OUT 里。
+expect_rewritten() {
+    local what=$1 f=$2 text=$3 head=$4 out n raw count name
+    name=$(basename "$f")
+    local ref="$WORK/备注改写/源副本/$name" rw="$WORK/备注改写/重写/$name"
+    cp "$f" "$ref"; cp "$f" "$rw"
+    out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+    RW_OUT=$("$BIN" -v --delete-original --no-raw-exif "$rw" 2>&1)
+    grep -qE "EXIF 整块照搬（[0-9]+ 字节，备注改写成 ImageIO 读得出的写法）" <<< "$out" \
+        && pass "$what：-v 说照搬了并改写了备注" || { fail "$what：-v 没说改写了备注"; sed 's/^/     /' <<< "$out"; }
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过" || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    refute "$what：校验通过后删了源" "$st" test -e "$f"
+    check "$what：产物里 ImageIO 读得出备注，等于原文" \
+        "$(./Tests/probe --no-repair "${f%.jpg}.heic" '{Exif}/UserComment')" "$text"
+    check "$what：产物的 EXIF 只差备注改写" "$(./Tests/probe --exif-same "$ref" "${f%.jpg}.heic")" "只差备注改写"
+    check "$what：Exif 项在文件末尾" "$(./Tests/probe --exif-at-end "${f%.jpg}.heic")" "末尾"
+    raw=$(./Tests/probe --raw-exif "${f%.jpg}.heic" 9286)
+    [[ "$raw" == "ExifIFD UNDEFINED "*" $head"* ]] \
+        && pass "$what：新值是 UNDEFINED，以 $head 开头" || fail "$what：新值的写法不对（[$raw]）"
+    grep -q "元数据校验通过" <<< "$RW_OUT" || grep -q "元数据校验发现" <<< "$RW_OUT" \
+        && pass "$what（--no-raw-exif）：转换并校验了" || { fail "$what（--no-raw-exif）：没转换"; sed 's/^/     /' <<< "$RW_OUT"; }
+    # 照搬了的产物比 ImageIO 重写的恰好大「4 字节偏移 + Exif\0\0 + 源 TIFF + 补齐 + 新值」。
+    n=$(grep -oE "EXIF 整块照搬（[0-9]+ 字节" <<< "$out" | grep -oE "[0-9]+")
+    count=$(cut -d' ' -f3 <<< "$raw")
+    check_same "$what：产物比 --no-raw-exif 的恰好大 10 + 源 TIFF + 补齐 + 新值的字节数" \
+        "$(( $(stat -f %z "${f%.jpg}.heic") - $(stat -f %z "${rw%.jpg}.heic") ))" \
+        "$(( 10 + ${n:-0} + ${n:-0} % 2 + ${count:-0} ))"
+}
+UNICODE_MM="554e49434f444500feff" UNICODE_II="554e49434f444500fffe" ASCII_HEAD="4153434949000000"
+# 1. 大端，中文备注，加上 ImageIO 读不出的那组标签和秒是分母 1000000 的 GPS。
+f="$WORK/备注改写/大端中文.jpg"
+./Tests/fixture "$f" >/dev/null
+make_sample ./Tests/mangle-tool "$f" "$NOTE"
+make_sample ./Tests/mangle-tool --tags "$f" 'gps:001B:ascii=CELLID' 'exif:9208:long=0' \
+    'exif:C000:ascii=私有串' 'exif:010D:ascii=放错位置的文档名' \
+    'exif:927C:undef=J' 'exif:927C:undef=##**N4206_vivi' 'exif:927C:undef=Auto' \
+    'gps:0004:rational=120/1,8/1,55304567/1000000'
+check "大端中文：前提，ImageIO 读不出源里的备注" "$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')" "<无>"
+expect_rewritten "大端中文" "$f" "$NOTE" "$UNICODE_MM"
+for want in '丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELLID"）——类型不合规范' \
+    '丢失 EXIF 标签 MakerNote（ExifIFD 0x927C，UNDEFINED，"J"、"##**N4206_vivi"、"Auto"，同号条目 3 个）' \
+    "变化 GPS 经度：120°8′55.304567″ → 120°8′55.3″（HEIF 写入器只保留到 1/100 秒）"; do
+    grep -qF -- "$want" <<< "$RW_OUT" \
+        && pass "大端中文（--no-raw-exif）：照报「$want」" || { fail "大端中文（--no-raw-exif）：没报「$want」"; sed 's/^/     /' <<< "$RW_OUT"; }
+done
+# 2. 小端：真实相机照片（没有 UserComment）加一条无前缀的中文备注。MakerNote 原样过去，
+#    {ExifAux}/ImageStabilization 读得出；交给系统重写时它没了。
+f="$WORK/备注改写/小端中文.jpg"
+cp test_pic/P1130939.JPG "$f"
+make_sample ./Tests/mangle-tool --strip-trailer "$f"
+make_sample ./Tests/mangle-tool --tags "$f" "exif:9286:undef=$NOTE"
+# P1130939 的第一个段就是 EXIF 的 APP1：TIFF 头在文件的第 12 个字节。
+check "小端中文：前提，TIFF 是小端" "$(dd if="$f" bs=1 skip=6 count=4 2>/dev/null; dd if="$f" bs=1 skip=12 count=2 2>/dev/null)" "ExifII"
+check "小端中文：前提，ImageIO 读不出源里的备注" "$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')" "<无>"
+stab=$(./Tests/probe "$f" '{ExifAux}/ImageStabilization')
+expect_rewritten "小端中文" "$f" "$NOTE" "$UNICODE_II"
+check_same "小端中文：产物里 {ExifAux}/ImageStabilization 与源相同" \
+    "$(./Tests/probe "$WORK/备注改写/小端中文.heic" '{ExifAux}/ImageStabilization')" "$stab"
+check "小端中文（--no-raw-exif）：前提，系统重写的产物里没有 {ExifAux}/ImageStabilization" \
+    "$(./Tests/probe "$WORK/备注改写/重写/小端中文.heic" '{ExifAux}/ImageStabilization')" "<无>"
+# 3. 纯 ASCII 的无前缀备注，大端、小端各一。
+f="$WORK/备注改写/大端ASCII.jpg"
+./Tests/fixture "$f" >/dev/null
+make_sample ./Tests/mangle-tool "$f" "Leuven City Hall 2024"
+expect_rewritten "大端 ASCII" "$f" "Leuven City Hall 2024" "$ASCII_HEAD"
+f="$WORK/备注改写/小端ASCII.jpg"
+cp test_pic/P1130939.JPG "$f"
+make_sample ./Tests/mangle-tool --strip-trailer "$f"
+make_sample ./Tests/mangle-tool --tags "$f" "exif:9286:undef=Leuven City Hall 2024"
+expect_rewritten "小端 ASCII" "$f" "Leuven City Hall 2024" "$ASCII_HEAD"
+# 4. BMP 之外的字符（代理对）。
+f="$WORK/备注改写/表情.jpg"
+./Tests/fixture "$f" >/dev/null
+make_sample ./Tests/mangle-tool "$f" "🎉拍照😀好看👍"
+expect_rewritten "表情符号" "$f" "🎉拍照😀好看👍" "$UNICODE_MM"
+# 6. 不该改写的不改写：普通夹具（备注本来就有 UNICODE 头）、改成另一段带 UNICODE 头的备注、没有备注。
+mkdir -p "$WORK/备注改写/不改写"
+./Tests/fixture "$WORK/备注改写/不改写/普通.jpg" >/dev/null
+./Tests/fixture "$WORK/备注改写/不改写/UNICODE头.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --unicode-comment "$WORK/备注改写/不改写/UNICODE头.jpg" "备注：带合规头的中文备注"
+# 没有备注的用相机照片：夹具 --no-text 那张的 EXIF 与 ImageIO 写的逐字节相同，不走照搬。
+cp test_pic/P1130939.JPG "$WORK/备注改写/不改写/没有备注.jpg"
+check "没有备注：前提，源里没有 0x9286" "$(./Tests/probe --raw-exif "$WORK/备注改写/不改写/没有备注.jpg" 9286)" "<无>"
+for what in 普通 UNICODE头 没有备注; do
+    f="$WORK/备注改写/不改写/$what.jpg"
+    cp "$f" "${f%.jpg}-源.jpg"
+    out=$("$BIN" -v --verify "$f" 2>&1)
+    grep -qE "^    EXIF 整块照搬（[0-9]+ 字节）$" <<< "$out" \
+        && pass "$what：照搬了，-v 里没有「改写」" || { fail "$what：没照搬，或说了改写"; sed 's/^/     /' <<< "$out"; }
+    check "$what：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --exif-same "${f%.jpg}-源.jpg" "${f%.jpg}.heic")" "相同"
+done
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

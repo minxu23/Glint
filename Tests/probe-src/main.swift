@@ -27,7 +27,8 @@ let usage = """
           probe --raw-exif <文件> <标签十六进制>     原始 EXIF 里 IFD0/Exif 子 IFD 的这个标签，
                                                      每个条目一行：IFD 类型 个数 值的十六进制
           probe --exif-same <源.jpg> <产物.heic>     产物 Exif 项里的 TIFF 与源 EXIF 段的是否逐字节相同：
-                                                     「相同」或「不同（N 字节 → M 字节，第 K 个字节起不同）」
+                                                     「相同」、「只差备注改写」（isUserCommentRewrite）或
+                                                     「不同（N 字节 → M 字节，第 K 个字节起不同）」
           probe --exif-at-end <文件.heic>            Exif 项是否结束在文件末尾：「末尾」或「不在末尾」
           probe --pixels <文件>                      解码出的 8 位 RGBA 像素的宽高与散列（FNV-1a 64 位）
     辅助图类型是 kCGImageAuxiliaryDataType 后面那一截，如 HDRGainMap、Depth。
@@ -77,13 +78,19 @@ if args.first == "--raw-exif", args.count == 3 {
 }
 
 // EXIF 数据块：源取 APP1 里 `Exif\0\0` 之后的全部字节，产物取 Exif 项里 TIFF 头偏移之后的
-// 全部字节，直接逐字节比。和 --verify 的比较不共用代码，两边各自独立地说话。
+// 全部字节，直接逐字节比，和 --verify 的比较不共用代码。不相同时再问「是不是源的备注改写」，
+// 这一问用的是 --verify 同一个 isUserCommentRewrite，它自己的对错由单测管。
 if args.first == "--exif-same", args.count == 3 {
     guard let a = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: args[1]))),
           let b = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: args[2]))) else { print("<无法读取>"); exit(1) }
     guard let s = TIFFStructure(jpeg: a), case .tiff(let d) = heifExif(b) else { print("<无>"); exit(0) }
     let x = Array(s.bytes[s.base..<(s.base + s.length)]), y = Array(d.bytes[d.base..<(d.base + d.length)])
     if x == y { print("相同"); exit(0) }
+    if let image = CGImageSourceCreateWithData(Data(a) as CFData, nil),
+       let text = userCommentImageIOMisses(imageProperties(image), raw: rawExifUserComment(in: a)),
+       isUserCommentRewrite(source: x, product: y, text: text) {
+        print("只差备注改写"); exit(0)
+    }
     let k = (0..<min(x.count, y.count)).first { x[$0] != y[$0] } ?? min(x.count, y.count)
     print("不同（\(x.count) 字节 → \(y.count) 字节，第 \(k + 1) 个字节起不同）")
     exit(0)
