@@ -2,7 +2,8 @@
 //
 // 用处：把 ImageIO 读不出来的 UserComment 捞回来；--verify 在源侧取时间字段的
 // 原始值（ImageIO 的属性视图会把 EXIF、IIM、XMP 的时间互相调和，见 RawTimes.swift）；
-// --verify 读 ImageIO 不读的 Windows XP 标签和评级（见 WindowsTags.swift）。
+// --verify 读 ImageIO 不读的 Windows XP 标签和评级（见 WindowsTags.swift）；--verify 的
+// 原始 EXIF 标签清点读源与产物两边的 TIFF 结构（见 RawExifTags.swift、HEIFExif.swift）。
 
 import Foundation
 

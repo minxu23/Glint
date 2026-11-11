@@ -347,8 +347,8 @@ private func encodeFirstPass(_ src: CGImageSource, properties: [CFString: Any],
 /// 1. AddImageFromSource 直接从源转码到内存：像素不先解码成位图，ICC 色彩描述
 ///    文件跟着走，`properties`（含 UserComment 的修补）写进 EXIF 等字典。
 ///    写之前先过 propertiesForHEIFWriter：源属性直通的备注和修补出来的备注都走
-///    这一处，不在别处另做改写。源里的辅助图（增益图、深度图、蒙版等）也在这一遍
-///    用 AddAuxiliaryDataInfo 加进去（见 encodeFirstPass）。
+///    这一处，不在别处另做改写。源里的辅助图也在这一遍加进去：增益图靠
+///    PreserveGainMap，深度图、蒙版等靠 AddAuxiliaryDataInfo（见 encodeFirstPass）。
 ///    它不认 kCGImageDestinationMetadata，XMP 包里属性字典表达不了的标签
 ///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
 ///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
