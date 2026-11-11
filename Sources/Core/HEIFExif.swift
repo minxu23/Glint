@@ -118,15 +118,16 @@ func heifExif(_ bytes: [UInt8]) -> HEIFExif {
 
 /// iinf 里类型为 `Exif` 的项号，按出现顺序。结构读不通是 nil。
 private func exifItemIDs(_ bytes: [UInt8], _ iinf: HEIFBox) -> [Int]? {
+    // 每一步都先核对盒子自己的内容够不够长：盒子内的字段不能借用后面盒子的字节。
     let c = iinf.content
-    guard let version = bigEndianInt(bytes, c.lowerBound, 1) else { return nil }
+    guard c.count >= 4, let version = bigEndianInt(bytes, c.lowerBound, 1) else { return nil }
     let countWidth = version == 0 ? 2 : 4
-    guard bigEndianInt(bytes, c.lowerBound + 4, countWidth) != nil,
+    guard c.count >= 4 + countWidth,
           let entries = heifBoxes(bytes, in: (c.lowerBound + 4 + countWidth)..<c.upperBound) else { return nil }
     var ids: [Int] = []
     for infe in entries where infe.type == "infe" {
         let at = infe.content.lowerBound
-        guard let v = bigEndianInt(bytes, at, 1) else { return nil }
+        guard infe.content.count >= 4, let v = bigEndianInt(bytes, at, 1) else { return nil }
         // 版本 0、1 没有项类型字段，不会是 Exif 项。
         guard v >= 2 else { continue }
         let idWidth = v == 2 ? 2 : 4

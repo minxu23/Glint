@@ -885,16 +885,34 @@ if let jpegSource = tinyJPEGSource() {
             survived += 1
         }
         check("前 2 KB 任一字节改坏都不崩", survived, min(heic.count, 2048))
+        // 随机改坏几个字节（种子固定）：单个字节改成 0xFF 碰不到的形状（比如某个盒子的
+        // 长度刚好只够装下一两个字节）靠它撞出来。
+        var seed: UInt64 = 2026
+        func random(_ n: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int(seed >> 33) % n
+        }
+        var fuzzed = 0
+        for _ in 0..<5000 {
+            var bad = heic
+            for _ in 0...random(4) { bad[random(min(heic.count, 2048))] = UInt8(random(256)) }
+            if random(4) == 0 { bad = Array(bad.prefix(random(bad.count))) }
+            _ = heifExif(bad)
+            fuzzed += 1
+        }
+        check("随机改坏 5000 次都不崩", fuzzed, 5000)
     } else {
-        fail("写不出作为 heifExif 输入的 HEIC"); fail("（同上）"); fail("（同上）"); fail("（同上）")
+        fail("写不出作为 heifExif 输入的 HEIC"); fail("（同上）"); fail("（同上）"); fail("（同上）"); fail("（同上）")
     }
     try? FileManager.default.removeItem(at: url)
 } else {
-    fail("造不出作为 encodeHEIF 源的 JPEG"); fail("（同上）"); fail("（同上）"); fail("（同上）")
+    fail("造不出作为 encodeHEIF 源的 JPEG"); fail("（同上）"); fail("（同上）"); fail("（同上）"); fail("（同上）")
 }
 for (bytes, why) in [([UInt8](), "空文件"), (Array("not a heif file at all".utf8), "垃圾"),
                      ([0, 0, 0, 1] + Array("ftyp".utf8) + [UInt8](repeating: 0xFF, count: 8), "64 位盒子长度离谱"),
-                     ([0, 0, 0, 0x10] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 0x30], "meta 里的子盒子越界")] {
+                     ([0, 0, 0, 0x10] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 0x30], "meta 里的子盒子越界"),
+                     ([0, 0, 0, 0x15] + Array("meta".utf8) + [0, 0, 0, 0] + [0, 0, 0, 9] + Array("iinf".utf8) + [0],
+                      "iinf 只有 1 字节内容")] {
     if case .unreadable = heifExif(bytes) { pass("读不出：\(why)") } else { fail("\(why) 没被判成读不出") }
 }
 
