@@ -1514,8 +1514,11 @@ check("截断到每个长度、每个字节改成 00/FF/翻最高位都不崩，
 print("备注原文核对：可靠的文本要相等，猜的要逐字节相同")
 let luWenNoHead = Array("鲁汶市政厅".utf8)
 let luWenUnicodeBOM = unicodeHead + [0xFE, 0xFF] + utf16Bytes("鲁汶市政厅", bigEndian: true) + [0, 0, 0, 0]
-func originalIssues(_ s: [UInt8]?, _ p: [UInt8]?, elsewhere: Bool = false) -> [String] {
-    userCommentOriginalIssues(source: s, product: p, reportedElsewhere: elsewhere)
+/// 两边的 TIFF 默认都是大端（ImageIO 写的 HEIC 就是）。
+func originalIssues(_ s: [UInt8]?, _ p: [UInt8]?, sourceBE: Bool = true, productBE: Bool = true,
+                    elsewhere: Bool = false) -> [String] {
+    userCommentOriginalIssues(source: s, sourceBigEndian: sourceBE, product: p, productBigEndian: productBE,
+                              reportedElsewhere: elsewhere)
 }
 check("源里没有备注：产物怎样都不报", [originalIssues(nil, luWenNoHead), originalIssues(asciiHead + [0, 0], nil)], [[], []])
 check("可靠：换了写法（无前缀 → UNICODE + BOM + 尾部 NUL）而原文相同，不报",
@@ -1538,26 +1541,42 @@ let longComment = String(repeating: "长", count: 70)
 check("可靠：差别在显示截断之后，注明从第几个字符起不同",
       originalIssues(Array((longComment + "甲").utf8), Array((longComment + "乙").utf8)),
       ["变化 备注 UserComment 的原文：\(truncate(longComment)) → \(truncate(longComment))（显示相同，第 71 个字符起不同）"])
-// UNICODE 头没有 BOM 的源：字节序没有声明，产物等于大端、小端两种解法里任何一种都算一致。
-// 产物取「ImageIO 按大端读出、带 BOM 写回」的样子。
+// UNICODE 头没有 BOM 的值按它所在 TIFF 的字节序解。产物取系统重写的样子：「ImageIO 按大端读出、
+// 带 BOM 写回」，产物的 TIFF 是大端。
 func imageIOBigEndianRewrite(_ body: [UInt8]) -> [UInt8] {
     let seen = String(bytes: body, encoding: .utf16BigEndian)!
     return unicodeHead + [0xFE, 0xFF] + utf16Bytes(seen, bigEndian: true) + [0, 0, 0, 0]
 }
-let noBOMSources: [(String, [UInt8])] = [
-    ("大端无 BOM + emoji", utf16Bytes("🎉拍照😀好看👍今天", bigEndian: true)),
-    ("小端无 BOM + 中文", utf16Bytes("鲁汶市政厅", bigEndian: false)),
-    ("大端无 BOM + 纯中文", utf16Bytes("鲁汶市政厅", bigEndian: true)),
-]
-for (name, body) in noBOMSources {
-    check("\(name)：产物是 ImageIO 按大端读出再带 BOM 写回的，不报",
-          originalIssues(unicodeHead + body, imageIOBigEndianRewrite(body)), [])
-    let other = originalIssues(unicodeHead + body, unicodeHead + [0xFE, 0xFF] + utf16Bytes("别的文字", bigEndian: true))
-    check("\(name)：产物文本与两种解法都不同，报一行原文变化",
-          other.count == 1 && other[0].hasPrefix("变化 备注 UserComment 的原文：") && other[0].hasSuffix(" → 别的文字"), true)
-}
-check("产物一侧是没有 BOM 的 UNICODE：两种解法里有一种与源相等就不报",
-      originalIssues(luWenNoHead, unicodeHead + utf16Bytes("鲁汶市政厅", bigEndian: false)), [])
+let emojiBE = utf16Bytes("🎉拍照😀好看👍今天", bigEndian: true)
+let luWenBE = utf16Bytes("鲁汶市政厅", bigEndian: true), luWenLE = utf16Bytes("鲁汶市政厅", bigEndian: false)
+let luWenLEReadAsBE = String(bytes: luWenLE, encoding: .utf16BigEndian)!
+let luWenBEReadAsLE = String(bytes: luWenBE, encoding: .utf16LittleEndian)!
+check("大端块、大端无 BOM + emoji：按大端解就是原文，系统重写的产物不报",
+      originalIssues(unicodeHead + emojiBE, imageIOBigEndianRewrite(emojiBE)), [])
+check("大端块、大端无 BOM + 纯中文：系统重写的产物不报，原样照搬的不报",
+      [originalIssues(unicodeHead + luWenBE, imageIOBigEndianRewrite(luWenBE)),
+       originalIssues(unicodeHead + luWenBE, unicodeHead + luWenBE)], [[], []])
+check("小端块、小端无 BOM + 中文：原样照搬（两边都是小端块）不报",
+      originalIssues(unicodeHead + luWenLE, unicodeHead + luWenLE, sourceBE: false, productBE: false), [])
+check("小端块、小端无 BOM + 中文：系统重写把 ImageIO 按大端读出的乱码带 BOM 写进产物，报原文变化",
+      originalIssues(unicodeHead + luWenLE, imageIOBigEndianRewrite(luWenLE), sourceBE: false),
+      ["变化 备注 UserComment 的原文：鲁汶市政厅 → \(luWenLEReadAsBE)"])
+check("大端块、小端无 BOM（不合约定）：两边按同一规则都读成那串乱码，不报（已知的漏网）",
+      originalIssues(unicodeHead + luWenLE, imageIOBigEndianRewrite(luWenLE)), [])
+check("小端块、大端无 BOM（不合约定，ImageIO 读得对）：系统重写的产物被报成变化（已知的多报）",
+      originalIssues(unicodeHead + luWenBE, imageIOBigEndianRewrite(luWenBE), sourceBE: false),
+      ["变化 备注 UserComment 的原文：\(luWenBEReadAsLE) → 鲁汶市政厅"])
+// 小端块里 00 D8 41 00：按小端是落单的高代理项，解不出；按大端解得出（0x00D8 0x4100）。
+let loneSurrogateLE = unicodeHead + [0x00, 0xD8, 0x41, 0x00]
+check("按 TIFF 字节序解不出：当猜的，字节相同不报，换了写法报",
+      [originalIssues(loneSurrogateLE, loneSurrogateLE, sourceBE: false, productBE: false),
+       originalIssues(loneSurrogateLE, unicodeHead + [0xFE, 0xFF, 0xD8, 0x00, 0x00, 0x41], sourceBE: false)],
+      [[], ["变化 备注 UserComment：源里的字节按 UNICODE 头解不出（12 字节），产物里换了一种写法，原文无法核对"]])
+check("产物一侧是没有 BOM 的 UNICODE：按产物 TIFF 的字节序解，小端块里的小端 UTF-16 等于原文",
+      originalIssues(luWenNoHead, unicodeHead + luWenLE, productBE: false), [])
+check("产物一侧是没有 BOM 的 UNICODE：同样的字节放在大端块里就读成乱码，报",
+      originalIssues(luWenNoHead, unicodeHead + luWenLE, productBE: true),
+      ["变化 备注 UserComment 的原文：鲁汶市政厅 → \(luWenLEReadAsBE)"])
 check("猜的：产物的值字节与源逐字节相同，不报",
       [originalIssues(gbkXiHu, gbkXiHu), originalIssues(asciiHead + gbkXiHu, asciiHead + gbkXiHu)], [[], []])
 check("猜的：产物换成 UNICODE 写的 Latin-1 猜测串，报换了写法",

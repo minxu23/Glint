@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=456
-EXPECTED_UNIT=638
+EXPECTED_ASSERTIONS=457
+EXPECTED_UNIT=640
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1112,7 +1112,7 @@ check "普通夹具（--no-raw-exif）：产物的备注是 UNICODE 头加 BOM" 
     "$(./Tests/probe --raw-exif "${f%.jpg}.heic" 9286 | cut -d' ' -f4 | cut -c1-20)" "$UNICODE_MM"
 check_same "普通夹具（--no-raw-exif）：产物里 ImageIO 读出的备注与源相同" \
     "$(./Tests/probe --no-repair "${f%.jpg}.heic" '{Exif}/UserComment')" "$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')"
-# 7. 小端 EXIF 里没有 BOM 的小端 UNICODE 备注：ImageIO 当大端读成乱码，这一轮不改，默认路径照旧原样照搬。
+# 7. 小端 EXIF 里没有 BOM 的小端 UNICODE 备注：ImageIO 当大端读成乱码（不改），默认路径照旧原样照搬。
 f="$WORK/备注读法/小端UNICODE无BOM.jpg"
 comment_sample "$f" 小端 'UNICODE\0\x81\x9C\x76\x6C\x02\x5E\x3F\x65\x85\x53'
 seen=$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')
@@ -1137,7 +1137,17 @@ expect_no_comment_line() {
         fi
     done
 }
-expect_no_comment_line "小端 UNICODE 无 BOM" "${f%.jpg}-重写.jpg"
+# 默认路径：再转一份，没有备注原文的行。系统重写：ImageIO 把读出的乱码带着 BOM（声明了大端）
+# 写进产物，原文（按小端 TIFF 的字节序解）没了，备注原文核对报出来，不删源。
+cp "${f%.jpg}-重写.jpg" "${f%.jpg}-再照搬.jpg"
+out=$("$BIN" -v --verify "${f%.jpg}-再照搬.jpg" 2>&1)
+if grep -q "元数据校验" <<< "$out" && ! grep -q "备注 UserComment" <<< "$out"; then
+    pass "小端 UNICODE 无 BOM：校验了，没有备注原文的行"
+else
+    fail "小端 UNICODE 无 BOM：没校验，或报了备注原文"; sed 's/^/     /' <<< "$out"
+fi
+XFLAGS=--no-raw-exif expect_reported "小端 UNICODE 无 BOM（--no-raw-exif）" "${f%.jpg}-重写.jpg" \
+    "变化 备注 UserComment 的原文：鲁汶市政厅 → "
 mkdir -p "$WORK/备注读法/零噪声"
 z="$WORK/备注读法/零噪声"
 ./Tests/fixture "$z/普通.jpg" >/dev/null

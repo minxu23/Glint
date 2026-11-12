@@ -679,8 +679,10 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     // 备注原文：产物的 EXIF 读不出时原始清点已经报了「无法核对」，这里不再说。
     var commentIssues: [String] = []
     if case .tiff(let destTIFF) = heifExif(destBytes) {
+        let sourceTIFF = TIFFStructure(jpeg: bytes)
         commentIssues = userCommentOriginalIssues(
-            source: TIFFStructure(jpeg: bytes).flatMap(rawUserCommentValue), product: rawUserCommentValue(destTIFF),
+            source: sourceTIFF.flatMap(rawUserCommentValue), sourceBigEndian: sourceTIFF?.bigEndian ?? true,
+            product: rawUserCommentValue(destTIFF), productBigEndian: destTIFF.bigEndian,
             reportedElsewhere: userCommentReportedElsewhere(before: before, after: after, covered: raw.coveredViewKeys,
                                                             rawLostTags: raw.lostMainTags))
     }
@@ -727,23 +729,23 @@ func carriedTIFFMatches(source: [UInt8], product: [UInt8], comment: SourceUserCo
 }
 
 /// 备注原文核对：按两边 0x9286 的原始值字节（含字符集头；没有这一条是 nil）各读一遍
-/// （readUserComment），源里有备注时：
+/// （userCommentReadingForComparison），源里有备注时：
 ///
 /// | 源的备注 | 产物必须 | 否则报 |
 /// |---|---|---|
 /// | 可靠的文本 T | 也是可靠的文本，过了 normalizedUserComment 后等于 T | 原文变化；产物没有备注是原文丢失 |
-///
-/// `UNICODE` 头没有 BOM 的值字节序没有声明，T 有大端、小端两种解法（userCommentTextCandidates），
-/// 两边各自的候选里有一对相等就算一致。报的时候两边显示的都是 readUserComment 选的那一种：
-/// 那是本工具对这段字节的读法（修补也用它），不另起一套显示规则。
 /// | 猜的 | 0x9286 的值字节与源的逐字节相同 | 换了写法、原文无法核对；产物没有备注是丢失 |
+///
+/// `sourceBigEndian`、`productBigEndian` 是两边各自所在 TIFF 的字节序。报的时候两边显示的就是
+/// 拿来比的那串文本。
 ///
 /// 键空间比对比的是 ImageIO 两边读出来的值：ImageIO 把源读错、又把读错的写进产物，两边一样，
 /// 它看不见。这一条看的是原文。`reportedElsewhere`（userCommentReportedElsewhere）为真时同一处
 /// 已经有一行了，不再报。纯函数，单测直接喂字节。
-func userCommentOriginalIssues(source: [UInt8]?, product: [UInt8]?, reportedElsewhere: Bool) -> [String] {
+func userCommentOriginalIssues(source: [UInt8]?, sourceBigEndian: Bool, product: [UInt8]?, productBigEndian: Bool,
+                               reportedElsewhere: Bool) -> [String] {
     guard !reportedElsewhere else { return [] }
-    let p = product.map(readUserComment) ?? .absent
+    let p = product.map { userCommentReadingForComparison($0, bigEndian: productBigEndian) } ?? .absent
     /// 猜的那种值为什么不可靠。
     func unreadable(_ header: UserCommentHeader) -> String {
         switch header {
@@ -752,7 +754,7 @@ func userCommentOriginalIssues(source: [UInt8]?, product: [UInt8]?, reportedElse
         case .ascii, .undefined, .none: return "不是合法的 UTF-8"
         }
     }
-    switch source.map(readUserComment) ?? .absent {
+    switch source.map({ userCommentReadingForComparison($0, bigEndian: sourceBigEndian) }) ?? .absent {
     case .absent:
         return []
     case .reliable(let decoded, _):
@@ -762,9 +764,7 @@ func userCommentOriginalIssues(source: [UInt8]?, product: [UInt8]?, reportedElse
         case .absent: return ["丢失 备注 UserComment 的原文 = \(truncate(text))"]
         case .reliable(let d, _):
             other = normalizedUserComment(d)
-            let sourceTexts = userCommentTextCandidates(source ?? [], decoded: decoded)
-            let productTexts = userCommentTextCandidates(product ?? [], decoded: d)
-            guard !sourceTexts.contains(where: productTexts.contains) else { return [] }
+            guard other != text else { return [] }
         case .guessed(_, let raw, let header):
             return ["变化 备注 UserComment 的原文：\(truncate(text)) → （\(raw.count) 字节，\(unreadable(header))）"]
         }
@@ -782,19 +782,21 @@ func userCommentOriginalIssues(source: [UInt8]?, product: [UInt8]?, reportedElse
     }
 }
 
-/// 备注原文核对拿来比的文本（都过了 normalizedUserComment，空的不算）：`UNICODE` 头、正文不以
-/// BOM 开头的值，大端、小端两种解法里解得出的都算；别的值只有 readUserComment 解出的 `decoded`。
-func userCommentTextCandidates(_ raw: [UInt8], decoded: String) -> [String] {
-    var texts = [normalizedUserComment(decoded)]
-    if raw.count >= 8, Array(raw[0..<8]) == Array("UNICODE\0".utf8) {
-        let body = Array(raw[8...])
-        if !body.starts(with: [0xFE, 0xFF]), !body.starts(with: [0xFF, 0xFE]) {
-            texts += [String(bytes: body, encoding: .utf16BigEndian), String(bytes: body, encoding: .utf16LittleEndian)]
-                .compactMap { $0.map(normalizedUserComment) }
-        }
+/// 备注原文核对用的读法：同 readUserComment，只有一处不同——`UNICODE` 头、正文不以 BOM 开头的
+/// 值，按它所在 TIFF 的字节序（`bigEndian`）解，不用 readUserComment 里「两种都解、取更像文本的」
+/// 那一套：EXIF 里没有 BOM 的 UTF-16 约定俗成跟 TIFF 同字节序，别的读取器（exiftool）也这样读。
+/// 按 TIFF 字节序解不出（如落单的代理项）是猜的。有 BOM 的照样认 BOM。
+func userCommentReadingForComparison(_ raw: [UInt8], bigEndian: Bool) -> UserCommentReading {
+    let reading = readUserComment(raw)
+    guard raw.count >= 8, Array(raw[0..<8]) == Array("UNICODE\0".utf8) else { return reading }
+    let body = Array(raw[8...])
+    if body.starts(with: [0xFE, 0xFF]) || body.starts(with: [0xFF, 0xFE]) { return reading }
+    guard let decoded = String(bytes: body, encoding: bigEndian ? .utf16BigEndian : .utf16LittleEndian) else {
+        return .guessed(nil, raw: raw, header: .unicode)
     }
-    return texts.filter { !$0.isEmpty }
+    return normalizedUserComment(decoded).isEmpty ? .absent : .reliable(decoded, header: .unicode)
 }
+
 
 /// 备注这一处是不是已经有一行了：键空间比对为 `{Exif}/UserComment` 报了丢失或变化（没被原始清点
 /// 盖掉，`covered`），或者原始清点报了 0x9286 丢失（`rawLostTags`）。备注原文核对向它们让位：
