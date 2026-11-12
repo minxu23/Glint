@@ -1794,6 +1794,14 @@ func withXattr(_ name: String, _ value: [UInt8]?) -> [String: [UInt8]] {
 check("同名同值、被跳过的两个产物上没有：不报", extendedAttributeDiff(source: xattrSource, product: xattrCopied), [])
 check("产物多一个属性：不报",
       extendedAttributeDiff(source: xattrSource, product: withXattr("user.extra", [9])), [])
+let xProvenance = "com.apple.provenance"
+let provenanceSource = xattrSource.merging([xProvenance: [1, 2, 0, 3, 4, 5, 6, 7, 8, 9, 10]]) { $1 }
+check("provenance 两边值不同：不报",
+      extendedAttributeDiff(source: provenanceSource, product: withXattr(xProvenance, [1, 2, 0, 0xAA, 4, 5, 6, 7, 8, 9, 10])), [])
+check("provenance 源有、产物没有：不报", extendedAttributeDiff(source: provenanceSource, product: xattrCopied), [])
+check("源有 provenance 时别的属性丢了照旧报",
+      extendedAttributeDiff(source: provenanceSource, product: withXattr("user.custom", nil)),
+      ["丢失 扩展属性 user.custom（6 字节）"])
 check("没有名字的属性丢了", extendedAttributeDiff(source: xattrSource, product: withXattr("user.custom", nil)),
       ["丢失 扩展属性 user.custom（6 字节）"])
 check("等长改了一个字节：注明从第几个字节起不同",

@@ -96,7 +96,8 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
 3. **文件层元数据** —— 创建时间、修改时间、POSIX 权限，以及全部扩展属性
    （「照片」App 的说明 `com.apple.assetsd.description` 和别的 `com.apple.assetsd.*`、
    访达备注 `kMDItemFinderComment`、访达标签 `kMDItemUserTags` 等），只有隔离标记
-   `com.apple.quarantine` 和资源分支 `com.apple.ResourceFork` 不拷。扩展属性由 `--verify`
+   `com.apple.quarantine`、资源分支 `com.apple.ResourceFork` 和系统管的来源标记
+   `com.apple.provenance` 不拷（`-v` 里的「扩展属性 N 项」不数它们）。扩展属性由 `--verify`
    逐个核对（见「`--verify` 到底比什么」）。加 `--embed-caption` 时「照片」的说明另写进 XMP
    （见下面「把「照片」的说明写进文件」）。
    相册类 App 在 EXIF 缺失时会回退到文件时间，所以这一层同样影响"拍摄时间"。
@@ -421,12 +422,14 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   `变化 访达标签（扩展属性 com.apple.metadata:_kMDItemUserTags）：红色、工作 → 工作`。
   值解不出时照旧只报字节数，如 `丢失 访达备注（扩展属性 com.apple.metadata:kMDItemFinderComment，12 字节）`；
   变化后的值解不出时写 `（N 字节 → M 字节，解不出）`；截断后两边显示一样时补上字节数。
-- 不比的只有转换时本来就不拷的那两个：`com.apple.quarantine`（隔离标记，产物是本机新写的
-  文件）、`com.apple.ResourceFork`（资源分支）。拷贝和核对用的是同一份清单
-  （[`skippedXattrs`](Sources/Core/Converter.swift)）。实测没有哪个扩展属性会在转换后被
-  系统改写：`FinderInfo`、`lastuseddate#PS`、`macl`、`provenance`、`kMDItemWhereFroms` 等
-  都原样拷过去。
-- 产物上多出来的属性不报（例如系统给新文件加的 `com.apple.provenance`，源上没有时）。
+- 不比的只有转换时本来就不拷的那三个：`com.apple.quarantine`（隔离标记，产物是本机新写的
+  文件）、`com.apple.ResourceFork`（资源分支）、`com.apple.provenance`（来源标记，由系统管：
+  每个新建文件都会被自动加上，值由创建它的进程决定，`setxattr` 返回成功但写不进去；源由别的
+  App 创建时产物上的值必然不同，核对它只会误报）。拷贝和核对用的是同一份清单
+  （[`skippedXattrs`](Sources/Core/Converter.swift)）。除此之外，实测没有哪个扩展属性会在
+  转换后被系统改写：`FinderInfo`、`lastuseddate#PS`、`macl`、`kMDItemWhereFroms` 等都原样
+  拷过去。
+- 产物上多出来的属性不报。
 - 源或产物的扩展属性读不出（属性列表或某个属性的值读不出，包括文件系统不支持扩展属性）时
   报一行 `无法核对扩展属性：…`，不当作没有差异。
 

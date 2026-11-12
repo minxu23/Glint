@@ -191,7 +191,11 @@ func propertiesForHEIFWriter(_ properties: [CFString: Any]) -> [CFString: Any] {
 
 /// 不应该跟着复制到新文件上的扩展属性。转换时不拷、--verify 也不核对（extendedAttributeIssues），
 /// 两处用的都是这一份。
-let skippedXattrs: Set<String> = ["com.apple.quarantine", "com.apple.ResourceFork"]
+///
+/// `com.apple.provenance` 由系统管：每个新建文件都会被自动加上，值由创建它的进程决定；setxattr
+/// 写源的值返回 0，读回来仍是系统给的值，写不进去。源由别的 App 创建时两边的值必然不同，核对它
+/// 只会误报。
+let skippedXattrs: Set<String> = ["com.apple.quarantine", "com.apple.ResourceFork", "com.apple.provenance"]
 
 /// `path` 上的扩展属性名，按 listxattr 给出的顺序；listxattr 出错（含文件系统不支持扩展属性）
 /// 或两次读到的长度不一致是 nil。没有扩展属性是空数组。
