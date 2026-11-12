@@ -26,10 +26,10 @@ Status: ready-for-agent
 
 ## 1.1 名字
 
-应用叫**存照**（取自「立此存照」：把照片存好，也留下凭据）。用户看得到应用名的地方都用它：
-`Info.plist` 的 `CFBundleName` / `CFBundleDisplayName`、应用菜单、关于面板、没有选中条目时的窗口
-标题、README。应用包是 `存照.app`。`CFBundleIdentifier`、可执行文件名、命令行工具 `jpeg2heif`
-都不变。
+应用的新名字**还没定**。在定下来之前沿用「JPEG 转 HEIF」和 `JPEG2HEIF.app`。
+实现上要做到改名只动两处：代码里一个常量（菜单、关于面板、窗口标题都引用它），`Makefile` 里
+一个变量（应用包名，`Info.plist` 的 `CFBundleName` / `CFBundleDisplayName` 与它一致）。
+`CFBundleIdentifier`、可执行文件名、命令行工具 `jpeg2heif` 不随名字变。
 
 ## 2. 约束
 
