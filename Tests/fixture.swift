@@ -47,6 +47,10 @@
 //            编成带 ISO 增益图的 JPEG：增益图放在 MPF 登记的第二张 JPEG 里，单通道，
 //            主图带 ISO 21496-1 版本标记段（APP2）。属性字典照常写进去，XMP 包不另外合并。
 //            要 3 通道的增益图，再用 mangle-tool --color-gainmap 改写。
+//   --caption-only <tiff|iptc|xmp>
+//            和 --no-text 一起用：只加回一个说明字段，值是「只有 <种类> 的说明」。tiff 是 TIFF
+//            ImageDescription，iptc 是 IPTC Caption/Abstract（这两种写进属性字典），xmp 是 XMP 包里的
+//            dc:description（并 XMP 包时加，属性字典里没有）。
 //   --unique-id <值>
 //            EXIF ImageUniqueID（ExifIFD 0xA420）写成 <值>。ImageIO 的写入器什么长度都照写
 //            （值的 UTF-8 加一个 NUL），读的时候却只认恰好 33 字节的写法，所以给别的长度的值
@@ -75,7 +79,7 @@ args.removeAll {
 }
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
     + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap]"
-    + " [--unique-id <值>] <输出.jpg>"
+    + " [--unique-id <值>] [--caption-only tiff|iptc|xmp] <输出.jpg>"
 var uniqueID: String?
 if let at = args.firstIndex(of: "--unique-id") {
     guard at + 1 < args.count else {
@@ -83,6 +87,15 @@ if let at = args.firstIndex(of: "--unique-id") {
         exit(2)
     }
     uniqueID = args[at + 1]
+    args.removeSubrange(at...(at + 1))
+}
+var captionOnly: String?
+if let at = args.firstIndex(of: "--caption-only") {
+    guard at + 1 < args.count, ["tiff", "iptc", "xmp"].contains(args[at + 1]) else {
+        FileHandle.standardError.write(Data("\(usage)\n".utf8))
+        exit(2)
+    }
+    captionOnly = args[at + 1]
     args.removeSubrange(at...(at + 1))
 }
 var auxKinds: [String] = []
@@ -186,6 +199,19 @@ if noText {
     for (dictionary, keys) in drop {
         guard var d = props[dictionary] as? [CFString: Any] else { die("夹具里没有 \(dictionary)") }
         for k in keys { d.removeValue(forKey: k) }
+        props[dictionary] = d
+    }
+}
+
+// --caption-only：在 --no-text 去掉的字段里只加回一个说明字段（xmp 那种在下面并 XMP 包时加）。
+if let captionOnly {
+    guard noText else { die("--caption-only 要和 --no-text 一起用") }
+    let field: (CFString, CFString)? = captionOnly == "tiff"
+        ? (kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFImageDescription)
+        : captionOnly == "iptc" ? (kCGImagePropertyIPTCDictionary, kCGImagePropertyIPTCCaptionAbstract) : nil
+    if let (dictionary, key) = field {
+        var d = props[dictionary] as? [CFString: Any] ?? [:]
+        d[key] = "只有 \(captionOnly) 的说明"
         props[dictionary] = d
     }
 }
@@ -334,6 +360,11 @@ for (prefix, uri) in [("lr", "http://ns.adobe.com/lightroom/1.0/"), ("xmpMM", "h
 }
 CGImageMetadataEnumerateTagsUsingBlock(extra, nil, nil) { path, tag in
     CGImageMetadataSetTagWithPath(merged, nil, path, tag)
+}
+if captionOnly == "xmp",
+   !CGImageMetadataSetValueMatchingImageProperty(merged, kCGImagePropertyIPTCDictionary, kCGImagePropertyIPTCCaptionAbstract,
+                                                 "只有 xmp 的说明" as CFString) {
+    die("XMP 包里加不上 dc:description")
 }
 func app1(_ payload: [UInt8]) -> [UInt8] {
     let n = payload.count + 2

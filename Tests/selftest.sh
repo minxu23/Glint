@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=470
-EXPECTED_UNIT=664
+EXPECTED_ASSERTIONS=511
+EXPECTED_UNIT=679
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1231,6 +1231,115 @@ cp test_pic/P1130939.JPG "$z/P1130939.jpg"
 for name in 普通 UNICODE备注 中英混排 ASCII开头的中文 大端无BOM带emoji 纯ASCII 尾部NUL填充 尾部空格填充 IMG_1225 P1130939; do
     expect_no_comment_line "零噪声 $name" "$z/$name.jpg"
 done
+
+round "7o. 把「照片」的说明写进文件（--embed-caption）"
+C="$WORK/写说明"
+mkdir -p "$C"
+CAPX=com.apple.assetsd.description
+DESC='XMP/dc:description[x-default]'
+# 没有任何文本字段的夹具加上「照片」的说明：不带选项不写，带选项写进 XMP。
+./Tests/fixture --no-text "$C/无文本.jpg" >/dev/null
+make_sample xattr -w "$CAPX" "西湖日落，和外婆一起" "$C/无文本.jpg"
+cp "$C/无文本.jpg" "$C/不带.jpg"
+cp "$C/无文本.jpg" "$C/带.jpg"
+no_out=$("$BIN" --verify -v "$C/不带.jpg" 2>&1); st=$?
+check "不带选项：产物里没有 dc:description" "$(./Tests/probe "$C/不带.heic" "$DESC")" "<无>"
+refute "不带选项：-v 里没有说明那一行" "$st" grep -qF "「照片」的说明" <<< "$no_out"
+yes_out=$("$BIN" --verify -v --embed-caption "$C/带.jpg" 2>&1)
+check "带选项：产物的 $DESC 是说明" "$(./Tests/probe "$C/带.heic" "$DESC")" "西湖日落，和外婆一起"
+check "带选项：产物的 {IPTC}/Caption/Abstract 也是说明" \
+    "$(./Tests/probe "$C/带.heic" '{IPTC}/Caption/Abstract')" "西湖日落，和外婆一起"
+grep -q "元数据校验通过" <<< "$yes_out" \
+    && pass "带选项：校验通过" || { fail "带选项：校验报了差异"; sed 's/^/     /' <<< "$yes_out"; }
+grep -qF "「照片」的说明：写进了 XMP 的 dc:description（10 个字符）" <<< "$yes_out" \
+    && pass "带选项：-v 说写了 10 个字符" || { fail "带选项：-v 没说写了"; sed 's/^/     /' <<< "$yes_out"; }
+check_same "带选项：产物上的扩展属性还在" \
+    "$(xattr -px "$CAPX" "$C/带.heic" 2>/dev/null)" "$(xattr -px "$CAPX" "$C/带.jpg" 2>/dev/null)"
+check_same "带选项：-v 里 EXIF 那一行与不带选项时相同" \
+    "$(grep EXIF <<< "$yes_out")" "$(grep EXIF <<< "$no_out")"
+check_same "带选项：--exif-same 与不带选项时相同" \
+    "$(./Tests/probe --exif-same "$C/带.jpg" "$C/带.heic")" "$(./Tests/probe --exif-same "$C/不带.jpg" "$C/不带.heic")"
+# 换行、emoji、很长的说明。用法：caption_variant 名字 说明 字符数（两条断言）
+caption_variant() {
+    local f="$C/$1.jpg" out
+    ./Tests/fixture --no-text "$f" >/dev/null
+    make_sample xattr -w "$CAPX" "$2" "$f"
+    out=$("$BIN" --verify -v --embed-caption "$f" 2>&1)
+    check "$1：产物的 $DESC 是说明" "$(./Tests/probe "${f%.jpg}.heic" "$DESC")" "$2"
+    if grep -q "元数据校验通过" <<< "$out" && grep -qF "dc:description（$3 个字符）" <<< "$out"; then
+        pass "$1：校验通过，-v 说写了 $3 个字符"
+    else
+        fail "$1：校验没通过或 -v 没说写了 $3 个字符"; sed 's/^/     /' <<< "$out" | head -20
+    fi
+}
+caption_variant "带换行和emoji" $'第一行：西湖\n第二行：日落 🌅😀' 16
+caption_variant "很长的说明" "$(printf '长说明%.0s' $(seq 1 1200))" 3600
+# 源里没有 XMP 包的相机照片（截掉尾部的 MPF 预览图，让校验能通过）：照样写得进去，EXIF 照常整块照搬。
+cp test_pic/P1130939.JPG "$C/相机-不带.jpg"
+chmod u+w "$C/相机-不带.jpg"
+make_sample ./Tests/mangle-tool --strip-trailer "$C/相机-不带.jpg"
+make_sample xattr -w "$CAPX" "松下相机拍的" "$C/相机-不带.jpg"
+cp "$C/相机-不带.jpg" "$C/相机-带.jpg"
+check "前提：相机照片里没有 XMP 包" "$(./Tests/probe "$C/相机-不带.jpg" 'XMP/iio:hasXMP')" "<无>"
+cam_no=$("$BIN" --verify -v "$C/相机-不带.jpg" 2>&1)
+cam_yes=$("$BIN" --verify -v --embed-caption "$C/相机-带.jpg" 2>&1)
+check "没有 XMP 包的源：产物的 $DESC 是说明" "$(./Tests/probe "$C/相机-带.heic" "$DESC")" "松下相机拍的"
+grep -q "元数据校验通过" <<< "$cam_yes" \
+    && pass "没有 XMP 包的源：校验通过" || { fail "没有 XMP 包的源：校验报了差异"; sed 's/^/     /' <<< "$cam_yes"; }
+check_same "没有 XMP 包的源：EXIF 照常整块照搬（-v 那一行与不带选项时相同）" \
+    "$(grep EXIF <<< "$cam_yes")" "$(grep EXIF <<< "$cam_no" | grep -F '整块照搬')"
+check "没有 XMP 包的源：产物的 EXIF 与源逐字节相同" \
+    "$(./Tests/probe --exif-same "$C/相机-带.jpg" "$C/相机-带.heic")" "相同"
+# 文件里已有说明：不写、不崩，产物里的说明字段与不带选项时相同。
+./Tests/fixture "$C/已有.jpg" >/dev/null
+make_sample xattr -w "$CAPX" "扩展属性里的说明" "$C/已有.jpg"
+cp "$C/已有.jpg" "$C/已有-不带.jpg"
+out=$("$BIN" --verify -v --embed-caption "$C/已有.jpg" 2>&1); st=$?
+check "已有三个说明字段：不崩（退出码 0，产出了 .heic）" "$st $([ -f "$C/已有.heic" ] && echo 有)" "0 有"
+"$BIN" --verify "$C/已有-不带.jpg" >/dev/null 2>&1
+for k in "$DESC" '{IPTC}/Caption/Abstract' '{TIFF}/ImageDescription'; do
+    check_same "已有三个说明字段：产物的 $k 与不带选项时相同" \
+        "$(./Tests/probe "$C/已有.heic" "$k")" "$(./Tests/probe "$C/已有-不带.heic" "$k")"
+done
+grep -qF "「照片」的说明：没写（文件里已有说明）" <<< "$out" \
+    && pass "已有三个说明字段：-v 说文件里已有说明" || { fail "已有三个说明字段：-v 没说原因"; sed 's/^/     /' <<< "$out"; }
+# 只有一个说明字段（写在哪一处不同；ImageIO 的视图会把三处调和成一样，原始存放用 --raw-exif 区分）。
+for only in tiff iptc xmp; do
+    f="$C/只有$only.jpg"
+    ./Tests/fixture --no-text --caption-only "$only" "$f" >/dev/null
+    make_sample xattr -w "$CAPX" "扩展属性里的说明" "$f"
+    cp "$f" "${f%.jpg}-不带.jpg"
+    raw=$(./Tests/probe --raw-exif "$f" 10E)
+    if [ "$only" = tiff ]; then
+        [ "$raw" != "<无>" ] && pass "前提：只有 tiff 的样本原始 EXIF 里有 ImageDescription" \
+            || fail "前提：只有 tiff 的样本原始 EXIF 里没有 ImageDescription"
+    else
+        check "前提：只有 $only 的样本原始 EXIF 里没有 ImageDescription" "$raw" "<无>"
+    fi
+    out=$("$BIN" --verify -v --embed-caption "$f" 2>&1); st=$?
+    check "只有 $only：不崩（退出码 0，产出了 .heic）" "$st $([ -f "${f%.jpg}.heic" ] && echo 有)" "0 有"
+    "$BIN" --verify "${f%.jpg}-不带.jpg" >/dev/null 2>&1
+    check_same "只有 $only：产物的 $DESC 与不带选项时相同" \
+        "$(./Tests/probe "${f%.jpg}.heic" "$DESC")" "$(./Tests/probe "${f%.jpg}-不带.heic" "$DESC")"
+    grep -qF "「照片」的说明：没写（文件里已有说明）" <<< "$out" \
+        && pass "只有 $only：-v 说文件里已有说明" || { fail "只有 $only：-v 没说原因"; sed 's/^/     /' <<< "$out"; }
+done
+# 不写的其它情形：没有这个扩展属性、值是空白、值不是合法的 UTF-8。用法：caption_skipped 名字 原因
+caption_skipped() {
+    local f="$C/$1.jpg" out
+    out=$("$BIN" --verify -v --embed-caption "$f" 2>&1)
+    check "$1：产物里没有 dc:description" "$(./Tests/probe "${f%.jpg}.heic" "$DESC")" "<无>"
+    grep -qF "「照片」的说明：没写（$2）" <<< "$out" \
+        && pass "$1：-v 说$2" || { fail "$1：-v 没说$2"; sed 's/^/     /' <<< "$out"; }
+}
+./Tests/fixture --no-text "$C/没有属性.jpg" >/dev/null
+caption_skipped 没有属性 "没有说明"
+./Tests/fixture --no-text "$C/空白.jpg" >/dev/null
+make_sample xattr -w "$CAPX" $'  \n\t ' "$C/空白.jpg"
+caption_skipped 空白 "没有说明"
+./Tests/fixture --no-text "$C/不是UTF8.jpg" >/dev/null
+make_sample xattr -wx "$CAPX" "E8A5BFE6" "$C/不是UTF8.jpg"
+caption_skipped 不是UTF8 "不是合法的 UTF-8"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

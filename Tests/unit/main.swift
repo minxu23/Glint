@@ -1874,6 +1874,93 @@ check("产物多一个属性：不报", xattrIssuesAfter { setX($0, "user.extra"
 check("被跳过的两个只在源上：不报", xattrIssuesAfter { _ in }, [])
 try? FileManager.default.removeItem(at: xattrRoot)
 
+print("把「照片」的说明写进文件")
+// 源是小 JPEG，扩展属性里有说明；默认带 TIFF 的 Make/Model/DateTime（实测有 DateTime 时 ImageIO 写第一遍
+// 会写 XMP 项，只有 Make/Model 时不写），
+// `bare` 时一个属性都不带。
+let captionRoot = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-caption-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: captionRoot, withIntermediateDirectories: true)
+let captionText = "西湖日落\n第二行 😀"
+/// 新造一张带说明的源，返回路径。
+func captionSource(_ name: String, bare: Bool = false) -> URL {
+    let url = captionRoot.appendingPathComponent("\(name).jpg")
+    // 256×256 的渐变按质量 1 存：转出来的 HEIF 比它小，--delete-original 不会因为变大而不删。
+    var props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 1.0]
+    if !bare {
+        props[kCGImagePropertyTIFFDictionary] = [kCGImagePropertyTIFFMake: "Apple", kCGImagePropertyTIFFModel: "iPhone",
+                                                 kCGImagePropertyTIFFDateTime: "2024:09:15 18:42:07"]
+    }
+    let ctx = CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    for i in 0..<16 {
+        ctx?.setFillColor(red: CGFloat(i) / 16, green: 0.5, blue: 1 - CGFloat(i) / 16, alpha: 1)
+        ctx?.fill(CGRect(x: i * 16, y: 0, width: 16, height: 256))
+    }
+    if let image = ctx?.makeImage(),
+       let out = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) {
+        CGImageDestinationAddImage(out, image, props as CFDictionary)
+        _ = CGImageDestinationFinalize(out)
+    }
+    let bytes = Array(captionText.utf8)
+    _ = setxattr(url.path, photosCaptionXattr, bytes, bytes.count, 0, XATTR_NOFOLLOW)
+    return url
+}
+var captionOptions = ConversionOptions()
+captionOptions.embedCaption = true
+let plainSource = captionSource("只有TIFF")
+let plainDest = captionRoot.appendingPathComponent("只有TIFF.heic")
+var deletingOptions = captionOptions
+deletingOptions.deleteOriginal = true
+if case .converted(let r) = convert(plainSource, opts: deletingOptions, dest: plainDest) {
+    check("没有 XMP 包的源：写了", r.caption, .written(characters: captionText.count))
+} else {
+    fail("没有 XMP 包的源：转换没有成功")
+}
+check("写成了、校验通过：--delete-original 删了源（下面「不删源」那条的对照）",
+      FileManager.default.fileExists(atPath: plainSource.path), false)
+check("没有 XMP 包的源：产物 XMP 里的 dc:description 是说明", embeddedCaption(at: plainDest), captionText)
+// 一个属性都没有的源：ImageIO 第一遍写出的 HEIF 里没有 XMP 项，第二遍的 CopyImageSource 也就加不进去。
+// 读回核对把它认作没写成，不静默。
+var bareOptions = captionOptions
+bareOptions.verify = true
+if case .converted(let r) = convert(captionSource("没有属性", bare: true), opts: bareOptions,
+                                    dest: captionRoot.appendingPathComponent("没有属性.heic")) {
+    check("没有属性的源：-v 说没写成", r.caption, .failed)
+    check("没有属性的源：--verify 的结果里有那一条", r.verification, .differences([CaptionOutcome.failureIssue]))
+} else {
+    fail("没有属性的源：转换没有成功")
+}
+// 第 5 项：注入一个第二遍不带说明的编码步骤（扔掉传进来的 XMP，按源自己的 XMP 编码）。
+let dropCaption: HEIFEncoder = { src, props, _, url in
+    encodeHEIF(src, properties: props, xmp: CGImageSourceCopyMetadataAtIndex(src, 0, nil), to: url)
+}
+let droppedSource = captionSource("没写成")
+var droppedOptions = captionOptions
+droppedOptions.deleteOriginal = true
+if case .converted(let r) = convert(droppedSource, opts: droppedOptions, dest: captionRoot.appendingPathComponent("没写成.heic"),
+                                    encode: dropCaption) {
+    pass("没写成：转换算成功")
+    check("没写成：-v 说没写成", r.caption, .failed)
+    check("没写成：--verify 的结果里有那一条", r.verification.hasDifferences
+              && { if case .differences(let d) = r.verification { return d.contains(CaptionOutcome.failureIssue) }; return false }(),
+          true)
+} else {
+    fail("没写成：转换算成功"); fail("没写成：-v 说没写成"); fail("没写成：--verify 的结果里有那一条")
+}
+check("没写成：--delete-original 不删源", FileManager.default.fileExists(atPath: droppedSource.path), true)
+let unverifiedSource = captionSource("没写成没校验")
+if case .converted(let r) = convert(unverifiedSource, opts: captionOptions,
+                                    dest: captionRoot.appendingPathComponent("没写成没校验.heic"), encode: dropCaption) {
+    check("没写成、没校验：状态说明里说了", r.note?.contains(CaptionOutcome.failureIssue), true)
+} else {
+    fail("没写成、没校验：转换没有成功")
+}
+try? FileManager.default.removeItem(at: captionRoot)
+check("-v 那一行：写了", CaptionOutcome.written(characters: 12).description,
+      "「照片」的说明：写进了 XMP 的 dc:description（12 个字符）")
+check("-v 那一行：没写", CaptionOutcome.skipped("文件里已有说明").description, "「照片」的说明：没写（文件里已有说明）")
+check("-v 那一行：没写成", CaptionOutcome.failed.description, "「照片」的说明：没写成")
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args) else { return nil }
@@ -1893,6 +1980,8 @@ check("-q 读出质量", parsed(["-q", "0.95", "a.jpg"])?.quality, 0.95)
 check("-j 读出并发数", parsed(["-j", "4", "a.jpg"])?.jobs, 4)
 check("默认整块照搬 EXIF", parsed(["a.jpg"])?.rawExif, true)
 check("--no-raw-exif 关掉整块照搬", parsed(["--no-raw-exif", "a.jpg"])?.rawExif, false)
+check("默认不写「照片」的说明", parsed(["a.jpg"])?.embedCaption, false)
+check("--embed-caption 打开写说明", parsed(["--embed-caption", "a.jpg"])?.embedCaption, true)
 check("-- 之后的横杠开头当文件名",
       parsed(["--", "-奇怪的文件名.jpg"])?.inputs, ["-奇怪的文件名.jpg"])
 check("-o 展开 ~", parsed(["-o", "~/out", "a.jpg"])?.output?.path.hasPrefix("/"), true)

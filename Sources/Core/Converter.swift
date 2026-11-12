@@ -36,6 +36,9 @@ struct ConversionOptions: Equatable {
     /// ImageIO 写完 HEIC 后，把产物里的 EXIF 换成源文件 EXIF 段的原始字节（见 carryRawExif）。
     /// 命令行 --no-raw-exif 关掉它；关掉时 EXIF 全由 ImageIO 从属性字典重写。
     var rawExif = true
+    /// 把源文件扩展属性里「照片」App 的说明写进产物 XMP 的 dc:description（见 captionPlan）。
+    /// 命令行 --embed-caption 打开；界面没有这个开关。
+    var embedCaption = false
     var jobs = ProcessInfo.processInfo.activeProcessorCount
     var inputs: [String] = []
 
@@ -255,6 +258,8 @@ struct ConversionReport {
     let rawExif: RawExifOutcome?
     /// 产物比原图大而重编过一次时，两遍的大小；没重编是 nil。只在 -v 时显示。
     let reencode: Reencode?
+    /// 「照片」的说明写进文件了没有；没开 --embed-caption 或预演时是 nil。只在 -v 时显示。
+    let caption: CaptionOutcome?
 
     /// 与元数据差异无关的状态说明：产物比原图大，以及请求了删除源文件却没删的原因
     /// （校验未通过、产物比原图大）。几句用「；」连成一行。没有要说的就是 nil。
@@ -339,7 +344,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
 
     let inBytes = fileSize(input)   // 要在可能删除源文件之前读
     let props = propertiesToWrite(repairedProperties(src, url: input), source: input)
-    let xmp = CGImageSourceCopyMetadataAtIndex(src, 0, nil)
+    let sourceXMP = CGImageSourceCopyMetadataAtIndex(src, 0, nil)
 
     var flatProps: [String: String] = [:]
     flatten(props, into: &flatProps)
@@ -349,7 +354,18 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
         return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: 0,
                                           tagCount: tagCount, xattrCount: 0,
                                           verification: .notVerified, rawExif: nil, reencode: nil,
-                                          note: nil))
+                                          caption: nil, note: nil))
+    }
+
+    // 要写说明时，要合并进产物的 XMP 换成带说明的那份（源里没有 XMP 时是只有说明的一份）。
+    var xmp = sourceXMP
+    let caption = opts.embedCaption ? captionPlan(source: input, properties: imageProperties(src), xmp: sourceXMP) : nil
+    var captionOutcome: CaptionOutcome?
+    switch caption {
+    case .write(let text)?:
+        if let merged = xmpWithCaption(sourceXMP, caption: text) { xmp = merged } else { captionOutcome = .failed }
+    case .skip(let why)?: captionOutcome = .skipped(why)
+    case nil: break
     }
 
     // 先写临时文件，成功后再原子替换，避免中断留下半个文件。
@@ -396,8 +412,13 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
         return .failed("写入目标失败: \(error.localizedDescription)")
     }
 
+    // 读回核对：产物 XMP 里的 dc:description（x-default）与说明不同或没有，算没写成。
+    if case .write(let text)? = caption, captionOutcome == nil {
+        captionOutcome = embeddedCaption(at: dest) == text ? .written(characters: text.count) : .failed
+    }
+    let captionIssues = captionOutcome == .failed ? [CaptionOutcome.failureIssue] : []
     let verification = opts.verifyEnabled
-        ? Verification(comparing: metadataDiff(source: input, dest: dest)) : .notVerified
+        ? Verification(comparing: metadataDiff(source: input, dest: dest) + captionIssues) : .notVerified
     let outBytes = fileSize(dest)
 
     // 删源文件的前提是逐条比对确认无损，而且产物不比原图大——换成更大的文件不是
@@ -405,6 +426,8 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     var notes: [String] = []
     let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
     if let growth { notes.append("HEIF 比原图大 \(growth)") }
+    // 没校验时差异列表不存在，没写成的说明放进状态说明，不让它静默。
+    if !opts.verifyEnabled, let issue = captionIssues.first { notes.append(issue) }
     if opts.deleteOriginal {
         if verification != .passed {
             notes.append("因元数据校验未通过，保留了源文件")
@@ -418,7 +441,92 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: outBytes,
                                       tagCount: tagCount, xattrCount: xattrs,
                                       verification: verification, rawExif: rawExif,
-                                      reencode: reencode, note: notes.isEmpty ? nil : notes.joined(separator: "；")))
+                                      reencode: reencode, caption: captionOutcome,
+                                      note: notes.isEmpty ? nil : notes.joined(separator: "；")))
+}
+
+// MARK: - 把「照片」的说明写进文件（--embed-caption）
+
+/// 「照片」App 把照片的说明存在文件的这个扩展属性里（UTF-8 文本），不在图像文件内部。
+let photosCaptionXattr = "com.apple.assetsd.description"
+
+/// 一张图要不要写说明。
+enum CaptionPlan: Equatable {
+    case write(String)
+    case skip(String)
+}
+
+/// 说明写进文件了没有（-v 那一行）。
+enum CaptionOutcome: Equatable {
+    case written(characters: Int)
+    /// 不写，附带原因。
+    case skipped(String)
+    /// 该写而没写成：读回的产物 XMP 里没有这段说明。
+    case failed
+
+    /// 没写成时 --verify 结果里加的那一条差异。
+    static let failureIssue = "没能把「照片」的说明写进文件"
+
+    /// -v 时显示的那一行（不含缩进）。
+    var description: String {
+        switch self {
+        case .written(let n): return "「照片」的说明：写进了 XMP 的 dc:description（\(n) 个字符）"
+        case .skipped(let why): return "「照片」的说明：没写（\(why)）"
+        case .failed: return "「照片」的说明：没写成"
+        }
+    }
+}
+
+/// 要不要把源文件扩展属性里的说明写进产物。依次：
+/// 1. 扩展属性没有、不是合法的 UTF-8、去掉首尾空白后为空：不写。
+/// 2. 源的元数据里已经有说明字段——XMP 里有 dc:description（任何语言，值空不空都算）、
+///    `{IPTC}/Caption/Abstract` 或 `{TIFF}/ImageDescription` 在（空的也算）：不写，不覆盖也不追加。
+///    这一条也是在挡崩溃：XMP 里已经有 dc:description 时再往要合并的 XMP 上设说明，
+///    CGImageDestinationCopyImageSource 抛 ObjC 异常，Swift 接不住，进程直接退出。
+///    空字段也挡，是因为写第一遍时它照样会落进产物。
+/// 3. 否则写，写的是扩展属性里的原文（不去首尾空白）。
+/// `properties` 是源的 imageProperties，`xmp` 是源的 XMP。
+func captionPlan(source: URL, properties: [CFString: Any], xmp: CGImageMetadata?) -> CaptionPlan {
+    guard let raw = extendedAttributeValue(source.path, photosCaptionXattr) else { return .skip("没有说明") }
+    guard let text = String(validatingUTF8Bytes: raw) else { return .skip("不是合法的 UTF-8") }
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .skip("没有说明") }
+    func field(_ dictionary: CFString, _ key: CFString) -> String? {
+        guard let value = (properties[dictionary] as? [CFString: Any])?[key] else { return nil }
+        return trimPadding(String(describing: value)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    let fields = [field(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFImageDescription),
+                  field(kCGImagePropertyIPTCDictionary, kCGImagePropertyIPTCCaptionAbstract)]
+        + [xmpDescription(xmp)]
+    let present = fields.compactMap { $0 }
+    if present.contains(where: { !$0.isEmpty }) { return .skip("文件里已有说明") }
+    if !present.isEmpty { return .skip("文件里已有说明字段（空的）") }
+    return .write(text)
+}
+
+/// XMP 里 dc:description 的全部文本（各语言连起来）；没有这个标签是 nil，有标签而没有文本是空串。
+func xmpDescription(_ xmp: CGImageMetadata?) -> String? {
+    guard let xmp, CGImageMetadataCopyTagWithPath(xmp, nil, "dc:description" as CFString) != nil else { return nil }
+    return xmpTags(xmp).filter { $0.key.hasPrefix(xmpKey("dc:description")) }.values.sorted().joined()
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// 要合并进产物的 XMP：`base`（源的 XMP，没有时从空的开始）的一份拷贝，dc:description 设成
+/// `caption`。`base` 里已经有 dc:description 时不设，是 nil（见 captionPlan 第 2 条的崩溃）；
+/// 设不上也是 nil。只动 XMP，EXIF 不碰。
+func xmpWithCaption(_ base: CGImageMetadata?, caption: String) -> CGImageMetadata? {
+    if let base, CGImageMetadataCopyTagWithPath(base, nil, "dc:description" as CFString) != nil { return nil }
+    let md = base.flatMap { CGImageMetadataCreateMutableCopy($0) } ?? CGImageMetadataCreateMutable()
+    guard CGImageMetadataSetValueMatchingImageProperty(md, kCGImagePropertyIPTCDictionary,
+                                                       kCGImagePropertyIPTCCaptionAbstract, caption as CFString)
+    else { return nil }
+    return md
+}
+
+/// 产物 XMP 里 dc:description 的 x-default 文本；读不出是 nil。
+func embeddedCaption(at url: URL) -> String? {
+    guard let image = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let md = CGImageSourceCopyMetadataAtIndex(image, 0, nil) else { return nil }
+    return CGImageMetadataCopyStringValueWithPath(md, nil, "dc:description[x-default]" as CFString) as String?
 }
 
 // MARK: - EXIF 整块照搬

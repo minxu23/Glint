@@ -68,9 +68,10 @@ jpeg2heif -r ~/Pictures/2024 -o ~/Pictures/2024-heic
 | `--verify` | 转换后逐条比对元数据，报告任何丢失或变化 |
 | `--delete-original` | 删除源 JPEG。会自动先做 `--verify`，只有完全无损、且 HEIF 不比原图大才删 |
 | `--no-raw-exif` | EXIF 交给系统重写，不整块照搬源文件的 EXIF（见「保留了哪些元数据」）。遇到读不了产物的软件时用 |
+| `--embed-caption` | 把「照片」App 的说明（文件扩展属性里的那段）写进 HEIF 的 XMP 说明字段 `dc:description`，让它离开 Mac 也跟着文件走。文件里已有说明时不写（见「把「照片」的说明写进文件」）。默认关，图形界面没有这个开关 |
 | `-n, --dry-run` | 只打印将要做什么，完全不碰磁盘（连输出目录也不建） |
 | `-j, --jobs <n>` | 并发数，默认为 CPU 核心数 |
-| `-v, --verbose` | 打印每张图保留的元数据条目数，以及 EXIF 整块照搬了没有（照搬了多少字节，或没照搬的原因）；产物比原图大而重编过一次的，再说明两次的大小 |
+| `-v, --verbose` | 打印每张图保留的元数据条目数，以及 EXIF 整块照搬了没有（照搬了多少字节，或没照搬的原因）；产物比原图大而重编过一次的，再说明两次的大小；开了 `--embed-caption` 的，再说明说明写了没有 |
 
 想在替换原图前确认万无一失：
 
@@ -96,7 +97,8 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
    （「照片」App 的说明 `com.apple.assetsd.description` 和别的 `com.apple.assetsd.*`、
    访达备注 `kMDItemFinderComment`、访达标签 `kMDItemUserTags` 等），只有隔离标记
    `com.apple.quarantine` 和资源分支 `com.apple.ResourceFork` 不拷。扩展属性由 `--verify`
-   逐个核对（见「`--verify` 到底比什么」）。
+   逐个核对（见「`--verify` 到底比什么」）。加 `--embed-caption` 时「照片」的说明另写进 XMP
+   （见下面「把「照片」的说明写进文件」）。
    相册类 App 在 EXIF 缺失时会回退到文件时间，所以这一层同样影响"拍摄时间"。
 
 ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：产物会变成 RGB、
@@ -192,6 +194,36 @@ HEIC 和 JPEG 两种容器里读法一样；ImageIO 读回时去掉 BOM。条件
 大时写「（两次一样大）」，第二遍失败时写「重编失败（用了第一份）」；不带 `-v` 和界面
 里不显示。重编之后仍比原图大的，命令行和界面都会提示「HEIF 比原图大 N%」，批量汇总里
 单列变大的个数，`--delete-original` 也不删这样的源。
+
+### 把「照片」的说明写进文件
+
+「照片」App 里给照片写的说明不在图像文件里，存在文件的扩展属性 `com.apple.assetsd.description`
+里（UTF-8 文本）。扩展属性照常拷到产物上，但它离开 macOS 很容易丢（非苹果文件系统、网盘、
+发到别的设备）。加 `--embed-caption`，说明同时写进产物 XMP 的 `dc:description`（`x-default`
+那一项）：ImageIO 读产物时 `{IPTC}/Caption/Abstract`、`{TIFF}/ImageDescription` 也是这段文本，
+exiftool 读到的是 `XMP-dc:Description`。写的是扩展属性里的原文。只动 XMP，EXIF 一个字节不碰，
+EXIF 整块照搬照常（照搬的自检把产物里多出来的说明当作照搬前后都有、源里没有的键，不算退步）。
+默认关；图形界面没有这个开关。
+
+不写的情形：
+
+- 扩展属性没有、去掉首尾空白后为空、不是合法的 UTF-8；
+- 源的元数据里已经有说明：XMP 里有 `dc:description`（任何语言）、`{IPTC}/Caption/Abstract` 或
+  `{TIFF}/ImageDescription` 三者有任何一个。不覆盖、不追加，与扩展属性里的相同也不写。字段在
+  而值是空的也不写（第一遍会把它写进产物）。这一条同时挡住一个崩溃：源里已有 `dc:description`
+  时再往要合并的 XMP 上设说明，ImageIO 在合并时抛 Objective-C 异常，进程直接退出。
+
+写完读回核对：产物 XMP 里 `dc:description` 的 `x-default` 必须等于那段文本，不等或没有算没写成。
+没写成时 `--verify` 的结果里多一条差异 `没能把「照片」的说明写进文件`，`--delete-original` 因此
+不删源；没开校验时这句写进状态说明。实测会没写成的一种：源里几乎没有元数据（比如只有色彩
+空间和像素尺寸，没有拍摄时间、修改时间这类会进 XMP 的字段）时，ImageIO 第一遍写出的 HEIF 里
+没有 XMP 项，第二遍合并 XMP 时也加不进去。
+
+`-v` 时每张图多一行：`「照片」的说明：写进了 XMP 的 dc:description（N 个字符）`、
+`「照片」的说明：没写（没有说明 / 文件里已有说明 / 文件里已有说明字段（空的） / 不是合法的 UTF-8）`
+或 `「照片」的说明：没写成`。没开选项时不出这一行。
+
+`dc:description` 是 XMP 的标准说明字段，没在鸿蒙、安卓的图库上验证过它们读不读得出。
 
 ## `--verify` 到底比什么
 
@@ -480,6 +512,9 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
 
 ## 已知限制
 
+- **`--embed-caption` 写进的 `dc:description` 没在鸿蒙、安卓的图库上验证过**读不读得出；量过的是
+  ImageIO（照片、预览、访达）和 exiftool。源里几乎没有元数据时写不进去（见「把「照片」的说明写进
+  文件」），会报出来，不会静默。
 - **EXIF 整块照搬的产物没在 libheif、Windows、安卓的读取器上量过**。量过的是 ImageIO
   （照片、预览、访达都走它）：照搬前后像素、按方向转正的缩略图、HDR 解码、辅助图都相同，
   属性只多不少（多出 MakerNote 解析出的 `{MakerCanon}` 等，GPS 的值变回源的精确值）。
@@ -638,7 +673,7 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 
 | 路径 | 说明 |
 | --- | --- |
-| `Sources/Core/Converter.swift` | 单张图的转换：读元数据、编码 HEIF、搬运文件层属性 |
+| `Sources/Core/Converter.swift` | 单张图的转换：读元数据、编码 HEIF、搬运文件层属性、把「照片」的说明写进 XMP |
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
 | `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：按原始字节读 `UserComment`（分可靠的文本与猜的），按标签读原始值 |

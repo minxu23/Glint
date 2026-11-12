@@ -54,6 +54,7 @@ func parseArguments(_ arguments: [String]) throws -> ParsedArguments {
         case "--delete-original": o.deleteOriginal = true
         case "--verify": o.verify = true
         case "--no-raw-exif": o.rawExif = false
+        case "--embed-caption": o.embedCaption = true
         case "-n", "--dry-run": o.dryRun = true
         case "-v", "--verbose": o.verbose = true
         case "-j", "--jobs":

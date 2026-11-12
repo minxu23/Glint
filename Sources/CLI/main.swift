@@ -20,10 +20,14 @@ GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间�
       --verify             转换后逐条比对元数据，报告任何丢失或变化的条目
       --no-raw-exif        EXIF 交给系统重写，不整块照搬源文件的 EXIF。
                            遇到读不了产物的软件时用
+      --embed-caption      把「照片」App 的说明（文件扩展属性里的那段）写进 HEIF 的
+                           XMP 说明字段 dc:description，让它离开 Mac 也跟着文件走。
+                           文件里已有说明时不写（不覆盖、不追加）
   -n, --dry-run            只打印将要做什么，不实际写文件
   -j, --jobs <n>           并发任务数，默认 \(ProcessInfo.processInfo.activeProcessorCount)
   -v, --verbose            输出每张图保留的元数据条目数，以及 EXIF 整块照搬了没有；
-                           产物比原图大而重编过一次的，再说明两次的大小
+                           产物比原图大而重编过一次的，再说明两次的大小；
+                           开了 --embed-caption 的，再说明说明写了没有
   -h, --help               显示本帮助
 
 示例:
@@ -97,6 +101,7 @@ let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result 
             case nil: break
             }
             if let reencode = r.reencode { print("    \(reencode.description)") }
+            if let caption = r.caption { print("    \(caption.description)") }
         }
         switch r.verification {
         case .differences(let issues):
