@@ -166,15 +166,34 @@ HEIC 和 JPEG 两种容器里读法一样；ImageIO 读回时去掉 BOM。条件
 - 换完以后在落盘之前自检：重新取出 Exif 项，与打算照搬的那份（源 TIFF，或改写过备注的
   源 TIFF）逐字节相同；ImageIO 打得开，图像数、宽高、方向不变；**视图不退步**——用
   `--verify` 的那把尺子，照搬前与源一致的键，照搬后一个都不许变得不一致、读不出，也不许
-  多出源里没有的键。EXIF 与 IPTC-IIM 打架的源图靠这一条退回系统重写（ImageIO 读 JPEG 时用
-  IIM 的值调和出标题、作者等，写进了产物的 EXIF 和 XMP；照搬后产物里的 EXIF 是源的原值，
-  HEIC 里 EXIF 压过 XMP，视图里的值就变了），备注改写过也一样；缺字符集头而没能改写的
-  `UserComment`（照搬原样过去 ImageIO 读不出，系统重写那条路的修补读得出）也是。
+  多出源里没有的键。只有一种例外，见下面「EXIF 与 IPTC 打架的说明、作者、版权」。时间字段
+  打架的源图（ImageIO 用 IIM 的时间调和出 EXIF 的拍摄时间）靠这一条退回系统重写，备注改写过
+  也一样；缺字符集头而没能改写的 `UserComment`（照搬原样过去 ImageIO 读不出，系统重写那条路
+  的修补读得出）也是。
+
+**EXIF 与 IPTC 打架的说明、作者、版权：照搬，保留 EXIF 的原值。** ImageIO 读 JPEG 时用 IPTC-IIM
+的值调和说明、作者、版权（IIM 摘要对不上时，视图里显示 IIM 的值；IIM 的字符集标记坏了时就是
+乱码），系统重写把这个调和出的值写进产物的 EXIF 和 XMP。照搬的产物里 EXIF 是源的原值，HEIC 里
+EXIF 压过 XMP，ImageIO 显示的值就变回 EXIF 的原值；调和出的那个值留在产物的 XMP 里。三组是：
+
+| 组 | EXIF 标签（IFD0） | 视图里的键 |
+|---|---|---|
+| 说明 | ImageDescription 0x010E | `{TIFF}/ImageDescription`、`{IPTC}/Caption/Abstract`、`XMP/dc:description[…]` |
+| 作者 | Artist 0x013B | `{TIFF}/Artist`、`{IPTC}/Byline[…]`、`XMP/dc:creator[…]` |
+| 版权 | Copyright 0x8298 | `{TIFF}/Copyright`、`{IPTC}/CopyrightNotice`、`XMP/dc:rights[…]` |
+
+自检里照搬后新变得不一致的键，属于其中一组、且照搬后的值等于源 EXIF 里该标签的原文（值字节
+去掉尾部的 NUL 与空白后是 ASCII 或合法 UTF-8 的文本；按 `--verify` 的值比较规则比），不算
+退步：产物只是如实显示了源自己 EXIF 里写的东西。原文不是可靠文本的（如 GBK 字节）不放行；
+别的键的退步照旧退回。EXIF 里的字节一个不改。显示的值变了，`--verify` 照实报出来（见
+「`--verify` 到底比什么」里「EXIF 与 IPTC 打架」那条），所以这样的产物校验不通过，
+`--delete-original` 不删源。
 
 `-v` 时每张图多一行：`EXIF 整块照搬（N 字节）`，改写过备注时是
-`EXIF 整块照搬（N 字节，备注改写成 ImageIO 读得出的写法）`（N 是源 TIFF 的字节数），或
-`EXIF 没有照搬：原因`（例如 `照搬后 {Exif}/DateTimeOriginal 会与源不一致`、
-`源里的 EXIF 段不止一个`）。
+`EXIF 整块照搬（N 字节，备注改写成 ImageIO 读得出的写法）`（N 是源 TIFF 的字节数），保留了
+EXIF 原值的组写在分号后面，例如 `EXIF 整块照搬（786 字节；说明、作者与 IPTC 不一致，保留 EXIF 的原值）`，
+与备注改写可以同时出现；没照搬时是 `EXIF 没有照搬：原因`（例如
+`照搬后 {Exif}/DateTimeOriginal 会与源不一致`、`源里的 EXIF 段不止一个`）。
 
 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，或上面退回时），EXIF 由 ImageIO 从属性
 字典写出，丢的东西见「已知限制」。这条路上本工具补两处 ImageIO 读不出的写法：
@@ -354,6 +373,33 @@ UTF-8」写成「按 JIS 头解不出」「按 UNICODE 头解不出」。显示�
 有；这一条只补它们看不见的那种）。产物的 EXIF 读不出时也不报（原始清点已经有「无法核对」
 那一行）。
 
+**EXIF 与 IPTC 打架的说明、作者、版权，每组合成一行。** 三组和它们的键见「EXIF 整块照搬」里
+「EXIF 与 IPTC 打架的说明、作者、版权」那张表。某一组满足下面全部条件时，就是照搬保留了 EXIF
+原值的情形：源 EXIF 里该标签的原文 A 是可靠的文本（去掉尾部 NUL 与空白后是 ASCII 或合法
+UTF-8）；源视图里该组某个键的值 V 与 A 不同；产物视图里那个键的值等于 A。这时不逐键报
+`变化 键: V → A`，改出一行
+`变化 说明：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「V」，产物显示 EXIF 的原值「A」`
+（「说明」换成「作者」「版权」）。这一行算差异：显示的值变了，校验不通过，`--delete-original`
+不删源。组里不同的键 V 不同时各出一行；组里别的变法（既不是 V 也不是 A，或者键丢了）照旧由
+键空间比对逐条报。
+
+**说明、作者、版权的原文按原始字节核对。** 系统重写把 EXIF 里这三个标签换成 ImageIO 调和出的值
+（IIM 读成乱码时就是乱码）时，两边视图显示的是同一个调和值，键空间比对一行都没有。所以另按两边
+IFD0 里 `ImageDescription`（`0x010E`）、`Artist`（`0x013B`）、`Copyright`（`0x8298`）的原始值字节
+各读一遍（源读 JPEG 的 EXIF 段，产物读 HEIF 的 Exif 项），比之前去掉尾部的 NUL 与空白，全空的当作
+没有。源里有这个标签时，判定与措辞和上面备注原文核对的同一套：
+
+| 源的值 | 产物必须 | 否则报 |
+|---|---|---|
+| 可靠的文本 A | 也是可靠的文本，且等于 A | `变化 EXIF 说明 ImageDescription 的原文：A → B`；产物没有是 `丢失 EXIF 说明 ImageDescription 的原文 = A` |
+| 不是合法的 UTF-8（如 GBK） | 去掉填充后的字节与源的相同 | `变化 EXIF 说明 ImageDescription：源里的字节不是合法的 UTF-8（N 字节），产物里换了一种写法，原文无法核对`；产物没有是 `丢失 EXIF 说明 ImageDescription（N 字节，不是合法的 UTF-8）` |
+
+（作者是 `EXIF 作者 Artist`，版权是 `EXIF 版权 Copyright`。）`Copyright` 可以写成「摄影师\0编辑者\0」
+两段，两段都是原文，中间的 NUL 照留、显示成 `\0`；实测系统重写只留第一段，这一条报
+`变化 EXIF 版权 Copyright 的原文：摄影师\0编辑者 → 摄影师`。同一处只出一行：原始清点报了这个标签
+丢失、键空间比对为对应的 `{TIFF}/…` 键报了丢失或变化、或者上一条为它合成了一行，这一条就不报。
+产物的 EXIF 读不出时也不报。整块照搬的产物两边字节相同，这一条恒过。
+
 **GPS 的分数按原始值比。** 源文件常把坐标的「秒」存成分母 1000000 的分数，ImageIO
 写 HEIF 时一律存成分母 100。ImageIO 视图里的 `{GPS}/Latitude` 在源一侧就已经按 XMP 的
 `度,分.分` 形式四舍五入过，只有截断恰好跨过它的舍入档时才看得出来。所以 GPS IFD 里的
@@ -527,7 +573,7 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   它把 HEIC 里 IFD1 的偏移基址加了两遍（报出的偏移 = 真实位置 + Exif 项的文件偏移），是
   exiftool 的算法问题，`exiftool -b -ThumbnailImage` 取出的缩略图与源逐字节相同。
 - 下面标着「（系统重写时）」的几条——MakerNote、读不出的标签、GPS 精度、Windows XP 标签、
-  IFD1 缩略图、非 ASCII 备注的写法——只发生在 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，
+  IFD1 缩略图、说明作者版权的调和值、非 ASCII 备注的写法——只发生在 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，
   或「EXIF 整块照搬」一节里退回的那几种情形）。默认的整块照搬下它们原样在产物里。
 - **（系统重写时）厂商私有数据 MakerNote 无法保留**。EXIF 里的 `MakerNote`（标签 0x927C）是相机
   厂商的私有块，佳能/松下等机型能占好几 KB，装着对焦点位置、照片风格、防抖状态、
@@ -590,6 +636,12 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   `Rating`、`RatingPercent`（`0x4746`、`0x4749`）。ImageIO 不读也不写它们，信息
   只有在同时写了同值的标准字段时才跟着标准字段走。没有同值的标准字段时
   `--verify` 逐个报出，`--delete-original` 不会删源。
+- **（系统重写时）EXIF 的说明、作者、版权会被换成 ImageIO 调和出的值**。ImageIO 读 JPEG 时用
+  IPTC-IIM 的值调和这三个字段（IIM 摘要对不上时用 IIM 的；IIM 的字符集标记坏了时就是乱码），
+  系统重写把调和出的值写进产物的 EXIF，源 EXIF 里的原文没了；`Copyright` 写成两段（摄影师、
+  编辑者）的只留第一段。两边视图显示的是同一个值，`--verify` 由说明、作者、版权的原文核对报出来
+  （见「`--verify` 到底比什么」），`--delete-original` 不删源。默认的整块照搬保留 EXIF 的原值，
+  ImageIO 显示的值随之变回 EXIF 的原值，校验照样报出来（打架的那一组一行）。
 - **（系统重写时）EXIF 的 IFD1 缩略图不会保留；Photoshop 资源里的缩略图无论哪条路都
   不保留。`--verify` 对两者有意不报**：它们是从像素派生的预览（见「`--verify` 到底比什么」
   的有意忽略），`{FileContents}` 里的 `ThumbnailImages` 那组键同样不报。原始 EXIF 清点也不比 IFD1。
@@ -680,6 +732,7 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
 | `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：按原始字节读 `UserComment`（分可靠的文本与猜的），按标签读原始值 |
+| `Sources/Core/ExifText.swift` | 说明、作者、版权三组调和字段：EXIF 原文的读法、照搬自检的放行、打架合成一行、原文核对 |
 | `Sources/Core/HEIFExif.swift` | 从 HEIF 的 `meta` 盒子里取出 Exif 项的原始 TIFF，供原始 EXIF 清点读产物一侧；`iloc` 的逐项读取 |
 | `Sources/Core/RawExifCarry.swift` | EXIF 整块照搬的闸门与改写（纯函数：进产物字节与源 EXIF，出新字节或不换的原因），以及照搬块上的备注改写与校验认改写的规则 |
 | `Sources/Core/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）、GPS 原始分数比对、`ImageUniqueID` 的补写规则与按原始字节比值，含不报清单 |
