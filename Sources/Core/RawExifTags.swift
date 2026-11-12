@@ -386,10 +386,12 @@ func describeExifValue(_ e: RawExifEntry) -> String {
 // MARK: - 比对
 
 /// 源与产物原始 EXIF 的比对结果：差异行，以及这些行已经替键空间比对说过的视图键
-/// （键空间比对跳过它们，免得一处变化报两行）。
+/// （键空间比对跳过它们，免得一处变化报两行）。`lostMainTags` 是报了「丢失 EXIF 标签」的
+/// 主命名空间（IFD0 / Exif 子 IFD）标签号，备注原文核对据此让位。
 struct RawExifComparison {
     var issues: [String] = []
     var coveredViewKeys: Set<String> = []
+    var lostMainTags: Set<Int> = []
 }
 
 /// 比较源与产物的原始 EXIF 条目。纯函数，单测直接喂条目。
@@ -430,6 +432,7 @@ func compareRawExif(source: [RawExifEntry], dest: [RawExifEntry]?, viewLosses: S
         if key.space == .main, key.tag == 0x927C, makerNoteReported { continue }
         if viewKeys(key.space, key.tag).contains(where: viewLosses.contains) { continue }
         result.issues.append(lostTagLine(groups[key]!))
+        if key.space == .main { result.lostMainTags.insert(key.tag) }
     }
 
     // ImageUniqueID：源的视图里没有它时，产物里的值只可能来自转换时按原始字节的补写，两边

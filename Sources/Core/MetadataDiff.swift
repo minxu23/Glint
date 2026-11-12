@@ -676,11 +676,20 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
                           viewLosses: keySpaceLosses(before: before, after: after),
                           makerNoteReported: makerNoteLost(before: before, after: after),
                           sourceViewHasImageUniqueID: before[exifKey(kCGImagePropertyExifImageUniqueID)] != nil)
+    // 备注原文：产物的 EXIF 读不出时原始清点已经报了「无法核对」，这里不再说。
+    var commentIssues: [String] = []
+    if case .tiff(let destTIFF) = heifExif(destBytes) {
+        commentIssues = userCommentOriginalIssues(
+            source: TIFFStructure(jpeg: bytes).flatMap(rawUserCommentValue), product: rawUserCommentValue(destTIFF),
+            reportedElsewhere: userCommentReportedElsewhere(before: before, after: after, covered: raw.coveredViewKeys,
+                                                            rawLostTags: raw.lostMainTags))
+    }
     // 后几项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
     return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
         + raw.issues
         + carriedExifIssues(source: bytes, dest: destBytes,
                             comment: SourceUserComment(imageProperties(sourceImage), reading: rawExifUserComment(in: bytes)))
+        + commentIssues
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
         + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
                              isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
@@ -715,6 +724,68 @@ func carriedTIFFMatches(source: [UInt8], product: [UInt8], comment: SourceUserCo
     if source == product { return true }
     guard let text = comment.toRepair else { return false }
     return isUserCommentRewrite(source: source, product: product, text: text)
+}
+
+/// 备注原文核对：按两边 0x9286 的原始值字节（含字符集头；没有这一条是 nil）各读一遍
+/// （readUserComment），源里有备注时：
+///
+/// | 源的备注 | 产物必须 | 否则报 |
+/// |---|---|---|
+/// | 可靠的文本 T | 也是可靠的文本，过了 normalizedUserComment 后等于 T | 原文变化；产物没有备注是原文丢失 |
+/// | 猜的 | 0x9286 的值字节与源的逐字节相同 | 换了写法、原文无法核对；产物没有备注是丢失 |
+///
+/// 键空间比对比的是 ImageIO 两边读出来的值：ImageIO 把源读错、又把读错的写进产物，两边一样，
+/// 它看不见。这一条看的是原文。`reportedElsewhere`（userCommentReportedElsewhere）为真时同一处
+/// 已经有一行了，不再报。纯函数，单测直接喂字节。
+func userCommentOriginalIssues(source: [UInt8]?, product: [UInt8]?, reportedElsewhere: Bool) -> [String] {
+    guard !reportedElsewhere else { return [] }
+    let p = product.map(readUserComment) ?? .absent
+    /// 猜的那种值为什么不可靠。
+    func unreadable(_ header: UserCommentHeader) -> String {
+        switch header {
+        case .jis: return "按 JIS 头解不出"
+        case .unicode: return "按 UNICODE 头解不出"
+        case .ascii, .undefined, .none: return "不是合法的 UTF-8"
+        }
+    }
+    switch source.map(readUserComment) ?? .absent {
+    case .absent:
+        return []
+    case .reliable(let decoded, _):
+        let text = normalizedUserComment(decoded)
+        let other: String
+        switch p {
+        case .absent: return ["丢失 备注 UserComment 的原文 = \(truncate(text))"]
+        case .reliable(let d, _):
+            other = normalizedUserComment(d)
+            guard other != text else { return [] }
+        case .guessed(_, let raw, let header):
+            return ["变化 备注 UserComment 的原文：\(truncate(text)) → （\(raw.count) 字节，\(unreadable(header))）"]
+        }
+        var line = "变化 备注 UserComment 的原文：\(truncate(text)) → \(truncate(other))"
+        if truncate(text) == truncate(other) {
+            let a = Array(text), b = Array(other)
+            let at = (0..<min(a.count, b.count)).first { a[$0] != b[$0] } ?? min(a.count, b.count)
+            line += "（显示相同，第 \(at + 1) 个字符起不同）"
+        }
+        return [line]
+    case .guessed(_, let raw, let header):
+        if product == raw { return [] }
+        if p == .absent { return ["丢失 备注 UserComment（\(raw.count) 字节，\(unreadable(header))）"] }
+        return ["变化 备注 UserComment：源里的字节\(unreadable(header))（\(raw.count) 字节），产物里换了一种写法，原文无法核对"]
+    }
+}
+
+/// 备注这一处是不是已经有一行了：键空间比对为 `{Exif}/UserComment` 报了丢失或变化（没被原始清点
+/// 盖掉，`covered`），或者原始清点报了 0x9286 丢失（`rawLostTags`）。备注原文核对向它们让位：
+/// 它们早就有、写的是用户在别的软件里看得到的值；原文核对只补它们看不见的那种（两边读法一样错）。
+func userCommentReportedElsewhere(before: [String: String], after: [String: String], covered: Set<String>,
+                                  rawLostTags: Set<Int>) -> Bool {
+    if rawLostTags.contains(0x9286) { return true }
+    let key = exifKey(kCGImagePropertyExifUserComment)
+    guard !covered.contains(key), let value = before[key] else { return false }
+    let verdict = keyVerdict(key, value, after: after)
+    return verdict == .lost || verdict == .changed
 }
 
 /// 源和产物里都有 ISO 增益图。系统低于 macOS 15 时 ImageIO 不认这一类，一律是 false。

@@ -1511,6 +1511,77 @@ for _ in 0..<5000 {
 check("截断到每个长度、每个字节改成 00/FF/翻最高位都不崩，改写了的都认得出；随机改坏 5000 次不崩",
       rewriteCrashes, 0)
 
+print("备注原文核对：可靠的文本要相等，猜的要逐字节相同")
+let luWenNoHead = Array("鲁汶市政厅".utf8)
+let luWenUnicodeBOM = unicodeHead + [0xFE, 0xFF] + utf16Bytes("鲁汶市政厅", bigEndian: true) + [0, 0, 0, 0]
+func originalIssues(_ s: [UInt8]?, _ p: [UInt8]?, elsewhere: Bool = false) -> [String] {
+    userCommentOriginalIssues(source: s, product: p, reportedElsewhere: elsewhere)
+}
+check("源里没有备注：产物怎样都不报", [originalIssues(nil, luWenNoHead), originalIssues(asciiHead + [0, 0], nil)], [[], []])
+check("可靠：换了写法（无前缀 → UNICODE + BOM + 尾部 NUL）而原文相同，不报",
+      originalIssues(luWenNoHead, luWenUnicodeBOM), [])
+check("可靠：比之前去掉开头的 BOM（产物 UNICODE + 大端 BOM，小端 BOM）",
+      [originalIssues(luWenNoHead, unicodeHead + [0xFE, 0xFF] + utf16Bytes("鲁汶市政厅", bigEndian: true)),
+       originalIssues(luWenNoHead, unicodeHead + [0xFF, 0xFE] + utf16Bytes("鲁汶市政厅", bigEndian: false))], [[], []])
+check("可靠：比之前去掉尾部的 NUL 与空白（两边各自）",
+      [originalIssues(luWenNoHead + [0, 0, 0], unicodeHead + utf16Bytes("鲁汶市政厅", bigEndian: true) + [0, 0x20]),
+       originalIssues(asciiHead + Array("Leuven \n".utf8), asciiHead + Array("Leuven".utf8) + [0, 0])], [[], []])
+check("可靠：原文变了，报出两边的原文",
+      originalIssues(asciiHead + utf8LuWen, asciiHead + Array("é²".utf8)),
+      ["变化 备注 UserComment 的原文：鲁汶 → é²"])
+check("可靠：产物没有 0x9286、或只有头和填充，报原文丢失",
+      [originalIssues(luWenNoHead, nil), originalIssues(luWenNoHead, unicodeHead + [0, 0, 0, 0])],
+      [["丢失 备注 UserComment 的原文 = 鲁汶市政厅"], ["丢失 备注 UserComment 的原文 = 鲁汶市政厅"]])
+check("可靠：产物里的值解不出可靠的文本，报原文变化",
+      originalIssues(luWenNoHead, gbkXiHu), ["变化 备注 UserComment 的原文：鲁汶市政厅 → （4 字节，不是合法的 UTF-8）"])
+let longComment = String(repeating: "长", count: 70)
+check("可靠：差别在显示截断之后，注明从第几个字符起不同",
+      originalIssues(Array((longComment + "甲").utf8), Array((longComment + "乙").utf8)),
+      ["变化 备注 UserComment 的原文：\(truncate(longComment)) → \(truncate(longComment))（显示相同，第 71 个字符起不同）"])
+check("猜的：产物的值字节与源逐字节相同，不报",
+      [originalIssues(gbkXiHu, gbkXiHu), originalIssues(asciiHead + gbkXiHu, asciiHead + gbkXiHu)], [[], []])
+check("猜的：产物换成 UNICODE 写的 Latin-1 猜测串，报换了写法",
+      originalIssues(gbkXiHu, unicodeHead + [0xFE, 0xFF] + utf16Bytes(gbkGuess, bigEndian: true)),
+      ["变化 备注 UserComment：源里的字节不是合法的 UTF-8（4 字节），产物里换了一种写法，原文无法核对"])
+check("猜的：产物的猜测串与源相同、字节不同（换了头）也报：比的是字节不是文本",
+      originalIssues(gbkXiHu, asciiHead + gbkXiHu),
+      ["变化 备注 UserComment：源里的字节不是合法的 UTF-8（4 字节），产物里换了一种写法，原文无法核对"])
+check("猜的：产物没有备注，报丢失",
+      [originalIssues(asciiHead + gbkXiHu, nil), originalIssues(asciiHead + gbkXiHu, asciiHead + [0x20])],
+      [["丢失 备注 UserComment（12 字节，不是合法的 UTF-8）"], ["丢失 备注 UserComment（12 字节，不是合法的 UTF-8）"]])
+check("猜的：JIS 头解不出的照报，写明是按 JIS 头解不出",
+      originalIssues(jisHeadBytes + [0xFF, 0xFF], jisHeadBytes + [0xFF, 0xFE]),
+      ["变化 备注 UserComment：源里的字节按 JIS 头解不出（10 字节），产物里换了一种写法，原文无法核对"])
+check("让位：同一处已经有一行时，表里每一种该报的都不报",
+      [originalIssues(luWenNoHead, nil, elsewhere: true), originalIssues(luWenNoHead, gbkXiHu, elsewhere: true),
+       originalIssues(gbkXiHu, luWenNoHead, elsewhere: true), originalIssues(gbkXiHu, nil, elsewhere: true)], [[], [], [], []])
+let commentViewKey = "{Exif}/UserComment"
+check("让位的条件：键空间比对报了备注丢失或变化，或者原始清点报了 0x9286 丢失",
+      [userCommentReportedElsewhere(before: [commentViewKey: "鲁汶"], after: [:], covered: [], rawLostTags: []),
+       userCommentReportedElsewhere(before: [commentViewKey: "鲁汶"], after: [commentViewKey: "乱码"], covered: [], rawLostTags: []),
+       userCommentReportedElsewhere(before: [:], after: [:], covered: [], rawLostTags: [0x9286]),
+       userCommentReportedElsewhere(before: [commentViewKey: "鲁汶"], after: [commentViewKey: "鲁汶"], covered: [], rawLostTags: []),
+       userCommentReportedElsewhere(before: [:], after: [commentViewKey: "乱码"], covered: [], rawLostTags: [0x9208]),
+       userCommentReportedElsewhere(before: [commentViewKey: "鲁汶"], after: [:], covered: [commentViewKey], rawLostTags: [])],
+      [true, true, true, false, false, false])
+// 同一处只出一行：源的备注 ImageIO 读得对，产物里没了。键空间比对报丢失，原文核对让位。
+let viewBefore = [commentViewKey: "鲁汶市政厅"]
+let oneLine = keySpaceDiff(before: viewBefore, after: [:])
+    + originalIssues(luWenNoHead, nil, elsewhere: userCommentReportedElsewhere(before: viewBefore, after: [:], covered: [],
+                                                                              rawLostTags: []))
+check("同一处的备注差异只出一行", oneLine.filter { $0.contains("UserComment") }.count, 1)
+var commentCrashes = 0
+for _ in 0..<5000 {
+    let a = (0..<carryRandom(30)).map { _ in UInt8(carryRandom(256)) }
+    var b = luWenUnicodeBOM
+    for _ in 0...carryRandom(3) { b[carryRandom(b.count)] = UInt8(carryRandom(256)) }
+    for (s, p) in [(a, b), (b, a), (Array(b.prefix(carryRandom(b.count + 1))), a)] {
+        let lines = originalIssues(s, p)
+        if s == p, !lines.isEmpty { commentCrashes += 1 }
+    }
+}
+check("随机字节、截断 5000 组都不崩，两边字节相同时从不报", commentCrashes, 0)
+
 print("不一致键集合：照搬 EXIF 的自检与 keySpaceDiff 用同一把尺子")
 let sourceView = ["{TIFF}/Model": "Canon", "{Exif}/UserComment": "备注", "{IPTC}/DateCreated": "20240915"]
 check("等价字段同值承载的键不算不一致，源里没有的承载者本身照算",

@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=422
-EXPECTED_UNIT=614
+EXPECTED_ASSERTIONS=454
+EXPECTED_UNIT=631
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1087,16 +1087,19 @@ for endian in 大端 小端; do
     esac
     expect_repaired "$endian ASCII 头 + UTF-8" "$f" "$NOTE" "$([ "$endian" = 大端 ] && echo 通过 || echo 无备注行)"
     # 2–4. 字节不是合法 UTF-8 的：无前缀 GBK、ASCII 头 GBK、无前缀 Latin-1（café）。
-    while IFS='|' read -r name value hex; do
+    #    交给系统重写时按 Latin-1 猜出来的那串写进产物，备注原文核对报出来、不删源。
+    while IFS='|' read -r name value hex n; do
         f="$d/$name.jpg"
         comment_sample "$f" "$endian" "$value"
         check "$endian $name：前提，源里 0x9286 的值是造的那些字节" \
             "$(./Tests/probe --raw-exif "$f" 9286 | cut -d' ' -f4 | cut -c1-${#hex})" "$hex"
         expect_untouched "$endian $name" "$f"
+        XFLAGS=--no-raw-exif expect_reported "$endian $name（--no-raw-exif）" "${f%.jpg}-重写.jpg" \
+            "变化 备注 UserComment：源里的字节不是合法的 UTF-8（$n 字节），产物里换了一种写法，原文无法核对"
     done <<EOF
-无前缀GBK|$GBK|cef7bafec3c0beb0
-ASCII头GBK|ASCII\\0\\0\\0$GBK|4153434949000000cef7bafe
-无前缀Latin1|caf\\xE9 au lait|636166e9
+无前缀GBK|$GBK|cef7bafec3c0beb0|8
+ASCII头GBK|ASCII\\0\\0\\0$GBK|4153434949000000cef7bafe|16
+无前缀Latin1|caf\\xE9 au lait|636166e9|12
 EOF
 done
 # 5. 纯中文的 UNICODE 备注（普通夹具）：系统重写时带 BOM。
@@ -1118,6 +1121,47 @@ case "$seen" in
     *) pass "小端 UNICODE 无 BOM：前提，ImageIO 读成乱码" ;;
 esac
 expect_untouched "小端 UNICODE 无 BOM" "$f"
+# 6–7. 备注原文核对对正常样本零噪声：两条路的校验都没有「备注 UserComment」那几行。
+# 用法：expect_no_comment_line 描述 文件（两条断言）：默认路径、--no-raw-exif 各转一份拷贝。
+expect_no_comment_line() {
+    local what=$1 flags out copy
+    for flags in "" --no-raw-exif; do
+        copy="${2%.jpg}${flags:+-重写}.jpg"
+        [ -f "$copy" ] || cp "$2" "$copy"
+        # shellcheck disable=SC2086  # flags 为空时不能变成一个空参数
+        out=$("$BIN" -v --verify -f $flags "$copy" 2>&1)
+        if grep -q "元数据校验" <<< "$out" && ! grep -q "备注 UserComment" <<< "$out"; then
+            pass "$what${flags:+（$flags）}：校验了，没有备注原文的行"
+        else
+            fail "$what${flags:+（$flags）}：没校验，或报了备注原文"; sed 's/^/     /' <<< "$out"
+        fi
+    done
+}
+expect_no_comment_line "小端 UNICODE 无 BOM" "${f%.jpg}-重写.jpg"
+mkdir -p "$WORK/备注读法/零噪声"
+z="$WORK/备注读法/零噪声"
+./Tests/fixture "$z/普通.jpg" >/dev/null
+while IFS='|' read -r name text; do
+    ./Tests/fixture "$z/$name.jpg" >/dev/null
+    make_sample ./Tests/mangle-tool --unicode-comment "$z/$name.jpg" "$text"
+done <<'EOF'
+UNICODE备注|备注：带合规头的中文备注
+中英混排|鲁汶市政厅 City Hall 2024
+ASCII开头的中文|Leuven 鲁汶 City Hall 市政厅
+EOF
+while IFS='|' read -r name value; do
+    ./Tests/fixture "$z/$name.jpg" >/dev/null
+    make_sample ./Tests/mangle-tool --tags "$z/$name.jpg" "exif:9286:undef=$value"
+done <<'EOF'
+纯ASCII|ASCII\0\0\0Leuven City Hall 2024
+尾部NUL填充|ASCII\0\0\0Leuven\0\0\0\0\0\0
+尾部空格填充|鲁汶市政厅\x20\x20\x20\x20\x20\x20
+EOF
+cp test_pic/IMG_1225.JPG "$z/IMG_1225.jpg"
+cp test_pic/P1130939.JPG "$z/P1130939.jpg"
+for name in 普通 UNICODE备注 中英混排 ASCII开头的中文 纯ASCII 尾部NUL填充 尾部空格填充 IMG_1225 P1130939; do
+    expect_no_comment_line "零噪声 $name" "$z/$name.jpg"
+done
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，
