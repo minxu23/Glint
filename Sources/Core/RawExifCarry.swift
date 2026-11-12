@@ -2,8 +2,9 @@
 // 原始字节。ImageIO 从属性字典重写 EXIF 时，它不认识的东西（各家 MakerNote、规范新标签、
 // 不合规范的写法、GPS 秒的精度）一读一写就没了；照搬让它们原样留在产物里。
 //
-// 照搬的是源的 TIFF 原样，或者只改了备注那一条的源 TIFF：ImageIO 读不出源里的 UserComment
-// （缺字符集头）而自己解析解得出时，备注改写成 ImageIO 读得出的写法（rewritingUserComment）。
+// 照搬的是源的 TIFF 原样，或者只改了备注那一条的源 TIFF：源里的 UserComment 要修补时
+// （SourceUserComment.toRepair：ImageIO 读不出而自己解析出可靠的文本，或 `ASCII` 头里装着
+// 非 ASCII 的 UTF-8），备注改写成 ImageIO 读得对的写法（rewritingUserComment）。
 //
 // 这里是纯函数部分：闸门与改写，进字节、出字节，不碰文件也不碰 ImageIO。改写完的自检
 // （读回、视图不退步）和落盘在 Converter.swift 的 carryRawExif。

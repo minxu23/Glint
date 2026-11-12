@@ -705,8 +705,8 @@ if let jpegSource = tinyJPEGSource() {
     for (label, comment) in commentSamples {
         let text = withoutTrailingNUL(comment)
         let ascii = text.utf16.allSatisfy { $0 <= 0x7F }
-        // 产物字段应是：前缀 + 文本（ASCII 打头的非 ASCII 文本前面加 BOM）的编码，后面只有 NUL。
-        let units = (!ascii && text.utf16.first! <= 0x7F ? [0xFEFF] : []) + Array(text.utf16)
+        // 产物字段应是：前缀 + 文本（非 ASCII 文本前面一律加 BOM）的编码，后面只有 NUL。
+        let units = (ascii ? [] : [0xFEFF]) + Array(text.utf16)
         for (branch, xmp) in [("单遍", nil), ("两遍", xmpForSecondPass)] as [(String, CGImageMetadata?)] {
             let url = dir.appendingPathComponent("\(label)-\(branch).heic")
             let props = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: comment]] as [CFString: Any]
@@ -1265,6 +1265,92 @@ check("ImageIO 那种布局（Exif 项在 mdat 靠前）：不管与源同不同
 check("Exif 项结束在文件末尾的判定：照搬过的是，ImageIO 那种布局不是",
       [heifExifEndsAtFileEnd(carriedSample), heifExifEndsAtFileEnd(buildHEIF(HEIFSpec()).bytes)], [true, false])
 
+print("备注的读法：可靠的文本与猜的分开")
+let gbkXiHu: [UInt8] = [0xCE, 0xF7, 0xBA, 0xFE]   // 「西湖」的 GBK 字节，不是合法的 UTF-8
+let gbkGuess = "\u{CE}\u{F7}\u{BA}\u{FE}"          // 它的 Latin-1 解读
+let utf8LuWen = Array("鲁汶".utf8)
+for (name, head, header) in [("ASCII 头", Array("ASCII\0\0\0".utf8), UserCommentHeader.ascii),
+                             ("8 个 0 的头", [UInt8](repeating: 0, count: 8), .undefined),
+                             ("没有头", [], .none)] as [(String, [UInt8], UserCommentHeader)] {
+    check("\(name)：ASCII 是可靠的文本，照解码原样（尾部填充还在）",
+          readUserComment(head + Array("Leuven\0 ".utf8)), .reliable("Leuven\0 ", header: header))
+    check("\(name)：合法的 UTF-8 是可靠的文本", readUserComment(head + utf8LuWen), .reliable("鲁汶", header: header))
+    check("\(name)：含高位字节又不是合法 UTF-8 的是猜的，带 Latin-1 猜测串和全部值字节",
+          readUserComment(head + gbkXiHu + [0, 0x20]), .guessed(gbkGuess, raw: head + gbkXiHu + [0, 0x20], header: header))
+    check("\(name)：正文是空的算没有", readUserComment(head), .absent)
+    check("\(name)：只有填充算没有", readUserComment(head + [0, 0x20, 0, 0x0A]), .absent)
+}
+check("值不足 8 字节时没有头，按正文读", readUserComment(Array("ASCII".utf8)), .reliable("ASCII", header: .none))
+let unicodeHeadBytes = Array("UNICODE\0".utf8)
+check("UNICODE 头、大端 BOM：按大端解，BOM 和尾部 NUL 照原样留在文本里",
+      readUserComment(unicodeHeadBytes + [0xFE, 0xFF, 0x9C, 0x81, 0x6C, 0x76, 0, 0]),
+      .reliable("\u{FEFF}鲁汶\0", header: .unicode))
+check("UNICODE 头、小端 BOM：按小端解",
+      readUserComment(unicodeHeadBytes + [0xFF, 0xFE, 0x81, 0x9C, 0x76, 0x6C]), .reliable("\u{FEFF}鲁汶", header: .unicode))
+check("UNICODE 头、没有 BOM 的大端：读对",
+      readUserComment(unicodeHeadBytes + [0x9C, 0x81, 0x6C, 0x76]), .reliable("鲁汶", header: .unicode))
+check("UNICODE 头、没有 BOM 的小端：两种都像文本时打平取大端（这一支的字节序判断不变）",
+      readUserComment(unicodeHeadBytes + [0x48, 0x00, 0x69, 0x00]), .reliable("\u{4800}\u{6900}", header: .unicode))
+check("UNICODE 头、正文是空的或只有 NUL：没有",
+      [readUserComment(unicodeHeadBytes), readUserComment(unicodeHeadBytes + [0, 0, 0, 0])], [.absent, .absent])
+check("UNICODE 头、两种字节序都解不出（落单的代理项）：猜的，没有猜测串",
+      readUserComment(unicodeHeadBytes + [0xD8, 0xD8]), .guessed(nil, raw: unicodeHeadBytes + [0xD8, 0xD8], header: .unicode))
+let jisHeadBytes = Array("JIS\0\0\0\0\0".utf8)
+check("JIS 头：Shift-JIS 解得出是可靠的文本", readUserComment(jisHeadBytes + [0x82, 0xA0]), .reliable("あ", header: .jis))
+check("JIS 头：Shift-JIS 解不出是猜的，没有猜测串",
+      readUserComment(jisHeadBytes + [0xFF, 0xFF, 0x80]), .guessed(nil, raw: jisHeadBytes + [0xFF, 0xFF, 0x80], header: .jis))
+check("比较用的尺子：去掉开头一个 BOM 和尾部的 NUL 与空白，中间的不动",
+      ["\u{FEFF}鲁汶\0 \n", "\u{FEFF}\u{FEFF}x", "a\u{FEFF} b\0\0"].map(normalizedUserComment), ["鲁汶", "\u{FEFF}x", "a\u{FEFF} b"])
+
+print("备注的修补条件：ImageIO 读不出且可靠，或 ASCII 头里装着非 ASCII 的 UTF-8；猜的不修补")
+// 行：自己解析的结果；列：ImageIO 读成 没有 / 只有填充 / Latin-1 乱码 / 读对。格子里是
+// toRepair（「-」是 nil）和 guessToWrite（「-」是 nil），用「/」隔开。
+let imageIOSeen: [String?] = [nil, "\0\0 ", "é²\u{81}æ±\u{B6}", "鲁汶"]
+let repairTable: [(String, UserCommentReading, [String])] = [
+    ("没有", .absent, ["-/-", "-/-", "-/-", "-/-"]),
+    ("无前缀 UTF-8", .reliable("鲁汶", header: .none), ["鲁汶/-", "鲁汶/-", "-/-", "-/-"]),
+    ("ASCII 头 + 非 ASCII 的 UTF-8", .reliable("鲁汶\0", header: .ascii), ["鲁汶/-", "鲁汶/-", "鲁汶/-", "鲁汶/-"]),
+    ("ASCII 头 + 纯 ASCII", .reliable("Leuven", header: .ascii), ["Leuven/-", "Leuven/-", "-/-", "-/-"]),
+    ("8 个 0 的头 + 非 ASCII 的 UTF-8", .reliable("鲁汶", header: .undefined), ["鲁汶/-", "鲁汶/-", "-/-", "-/-"]),
+    ("UNICODE 头带 BOM", .reliable("\u{FEFF}鲁汶\0", header: .unicode), ["鲁汶/-", "鲁汶/-", "-/-", "-/-"]),
+    ("猜的（Latin-1）", .guessed(gbkGuess, raw: gbkXiHu, header: .none), ["-/\(gbkGuess)", "-/\(gbkGuess)", "-/-", "-/-"]),
+    ("猜的（没有猜测串）", .guessed(nil, raw: jisHeadBytes + [0xFF], header: .jis), ["-/-", "-/-", "-/-", "-/-"]),
+]
+for (name, reading, want) in repairTable {
+    let got = imageIOSeen.map { seen -> String in
+        let c = SourceUserComment(seenByImageIO: seen, reading: reading)
+        return "\(c.toRepair ?? "-")/\(c.guessToWrite ?? "-")"
+    }
+    check("\(name)：修补成的文本 / 写入用的猜测串", got, want)
+}
+
+print("系统重写时含非 ASCII 的备注总是带 BOM")
+/// BOM + 文本 + 与（BOM + 文本）同样多的 NUL 单元。
+func writerForm(_ text: String) -> String { "\u{FEFF}" + text + String(repeating: "\0", count: text.utf16.count + 1) }
+check("纯中文、中英混排、ASCII 开头：前面加 BOM，补等长的 NUL",
+      ["鲁汶市政厅", "鲁汶 City Hall", "Note: 鲁汶"].map(userCommentForHEIFWriter),
+      [writerForm("鲁汶市政厅"), writerForm("鲁汶 City Hall"), writerForm("Note: 鲁汶")])
+check("已带 BOM 的不再加；尾部 NUL 先去掉再补",
+      [userCommentForHEIFWriter("\u{FEFF}鲁汶"), userCommentForHEIFWriter("鲁汶\0\0\0")], [writerForm("鲁汶"), writerForm("鲁汶")])
+check("纯 ASCII 原样返回（连尾部 NUL 也不动）", userCommentForHEIFWriter("Leuven\0"), "Leuven\0")
+
+print("备注的读法：任意字节不崩")
+var readerSamples: [[UInt8]] = []
+for head in [Array("ASCII\0\0\0".utf8), unicodeHeadBytes, jisHeadBytes, [UInt8](repeating: 0, count: 8), []] {
+    let full = head + utf8LuWen + gbkXiHu + [0xFE, 0xFF, 0xD8, 0x00, 0, 0x20]
+    for n in 0...full.count { readerSamples.append(Array(full.prefix(n))) }
+}
+for _ in 0..<5000 { readerSamples.append((0..<carryRandom(40)).map { _ in UInt8(carryRandom(256)) }) }
+var readerBroken = 0
+for sample in readerSamples {
+    switch readUserComment(sample) {
+    case .absent: break
+    case .reliable(let text, _): if normalizedUserComment(text).isEmpty { readerBroken += 1 }
+    case .guessed(_, let raw, _): if raw != sample { readerBroken += 1 }
+    }
+}
+check("每种头截断到每个长度、随机字节 5000 段都不崩；可靠的文本非空，猜的带着原样的值字节", readerBroken, 0)
+
 print("备注改写：只动 0x9286 那一条的 10 个字节，新值接在块末尾")
 /// 手搭的 TIFF：IFD0 只有一个 ExifIFD 指针（指向偏移 26），ExifIFD 的条目是（标签, 类型, 个数,
 /// 4 字节值域），表后接 `tail`。`exifPointer` 改写指针，`ifd0Tag` 改写 IFD0 那一条的标签号。
@@ -1338,18 +1424,16 @@ check("不改写：ExifIFD 指针越出块",
 check("不改写：文本是空的", rewritingUserComment(mmSource, text: ""), nil)
 
 print("照搬过的产物认备注改写：P 与 S 逐字节相同，或恰好是 S 按源侧文本做的备注改写")
-/// 源侧：ImageIO 读不出、自己解出了 `text`。
-func unread(_ text: String) -> SourceUserComment { SourceUserComment(seenByImageIO: nil, decoded: text) }
-let noComment = SourceUserComment(seenByImageIO: nil, decoded: nil)
+/// 源侧：ImageIO 读不出、自己解出了可靠的文本 `text`（无前缀）。
+func unread(_ text: String) -> SourceUserComment {
+    SourceUserComment(seenByImageIO: nil, reading: .reliable(text, header: .none))
+}
+let noComment = SourceUserComment(seenByImageIO: nil, reading: .absent)
 let mmRewrite = expectedRewrite(mmSource, bigEndian: true, value: mmEmojiValue)
 let iiRewrite = expectedRewrite(iiSource, bigEndian: false, value: iiEmojiValue)
 let mmAsciiRewrite = expectedRewrite(mmSource, bigEndian: true, value: asciiHead + Array("Leuven".utf8))
 let iiAsciiRewrite = expectedRewrite(iiSource, bigEndian: false, value: asciiHead + Array("Leuven".utf8))
 check("接受：逐字节相同（源侧没有要修补的备注）", carriedTIFFMatches(source: mmSource, product: mmSource, comment: noComment), true)
-check("源侧条件：ImageIO 读不出（没有、只有填充）才修补，读得出的不算",
-      [SourceUserComment(seenByImageIO: nil, decoded: "x").toRepair, SourceUserComment(seenByImageIO: "\0\0 ", decoded: "x").toRepair,
-       SourceUserComment(seenByImageIO: "备注", decoded: "x").toRepair, SourceUserComment(seenByImageIO: nil, decoded: nil).toRepair],
-      ["x", "x", nil, nil])
 check("接受：逐字节相同（源侧有要修补的备注，照原样照搬的）",
       carriedTIFFMatches(source: mmSource, product: mmSource, comment: unread(emojiText)), true)
 check("接受：标准的改写，MM、II、ASCII、非 ASCII",
@@ -1365,7 +1449,7 @@ check("接受：改写函数自己的输出（MM、II）",
 func rejected(_ product: [UInt8], source: [UInt8] = mmSource, text: String = emojiText,
               seenByImageIO: String? = nil) -> Bool {
     !carriedTIFFMatches(source: source, product: product,
-                        comment: SourceUserComment(seenByImageIO: seenByImageIO, decoded: text))
+                        comment: SourceUserComment(seenByImageIO: seenByImageIO, reading: .reliable(text, header: .none)))
 }
 var extraByte = mmRewrite
 extraByte[13] ^= 0x01   // IFD0 那一条的类型

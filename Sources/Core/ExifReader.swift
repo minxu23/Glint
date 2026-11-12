@@ -130,21 +130,29 @@ struct TIFFStructure {
 // MARK: - 直接解析 EXIF UserComment
 
 // EXIF 规定 UserComment(0x9286) 以 8 字节字符集标识开头（ASCII/UNICODE/JIS/全零）。
-// 但不少安卓机型（如 vivo + MediaTek 相机）不写这个前缀，直接塞裸 UTF-8。
-// ImageIO 认不出这种写法，会当作该字段不存在——于是备注在转码时被静默丢掉，
-// 而 --verify 比的属性视图里同样没有它。
-// 这里自己扫一遍 JPEG 的 EXIF 段把它捞出来，补进要写入的属性里。
+// 但不少安卓机型（如 vivo + MediaTek 相机）不写这个前缀，直接塞裸 UTF-8，ImageIO 认不出这种
+// 写法，当作该字段不存在；`ASCII` 头里装着 UTF-8 的，ImageIO 按 Latin-1 读成乱码。
+// 这里自己解析 0x9286 的原始字节（readUserComment），分清读出来的是可靠的文本还是猜的：
+// 转换时的修补、照搬时的备注改写（SourceUserComment.toRepair）和 --verify 的备注原文核对
+// （userCommentOriginalIssues）都以它为准。
 
-/// 从 JPEG 文件里直接读出 EXIF UserComment 的文本；不是 JPEG 或没有该字段时返回 nil。
-func rawExifUserComment(of url: URL) -> String? {
-    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+/// 从 JPEG 文件里直接读出 EXIF UserComment；读不出文件时是 `.absent`。
+func rawExifUserComment(of url: URL) -> UserCommentReading {
+    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return .absent }
     return rawExifUserComment(in: [UInt8](data))
 }
 
-/// 同 rawExifUserComment(of:)，读的是已经在内存里的 JPEG 字节。
-func rawExifUserComment(in bytes: [UInt8]) -> String? {
-    guard let tiff = TIFFStructure(jpeg: bytes), let range = tiff.range(in: tiff.exifIFD, tag: 0x9286) else { return nil }
-    return decodeUserComment(Array(bytes[range]))
+/// 同 rawExifUserComment(of:)，读的是已经在内存里的 JPEG 字节。不是带 EXIF 的 JPEG 时是 `.absent`。
+func rawExifUserComment(in bytes: [UInt8]) -> UserCommentReading {
+    guard let tiff = TIFFStructure(jpeg: bytes), let value = rawUserCommentValue(tiff) else { return .absent }
+    return readUserComment(value)
+}
+
+/// Exif 子 IFD 里（第一个）0x9286 条目的全部值字节，含字符集头；没有这一条或值读不出是 nil。
+/// JPEG 的 EXIF 段和 HEIF 的 Exif 项都用它取。
+func rawUserCommentValue(_ tiff: TIFFStructure) -> [UInt8]? {
+    guard let range = tiff.range(in: tiff.exifIFD, tag: 0x9286) else { return nil }
+    return Array(tiff.bytes[range])
 }
 
 /// 定位 JPEG 里 EXIF UserComment 字段的字节范围（相对文件起点）。
@@ -156,13 +164,56 @@ func exifUserCommentRange(in data: Data) -> Range<Int>? {
 }
 
 
-private func decodeUserComment(_ raw: [UInt8]) -> String? {
-    func cleaned(_ s: String?) -> String? {
-        guard let s else { return nil }
-        let t = trimPadding(s)
-        return t.isEmpty ? nil : t
+/// UserComment 值开头的 8 字节字符集头。
+enum UserCommentHeader: Equatable {
+    case ascii, unicode, jis
+    /// 8 个 0（EXIF 的「未定义」字符集）。
+    case undefined
+    /// 没有合规的头：整段值都是正文。
+    case none
+}
+
+/// 自己解析一段 UserComment 原始值（readUserComment）的结果。
+enum UserCommentReading: Equatable {
+    /// 没有 0x9286，或正文去掉填充（normalizedUserComment）后是空的。
+    case absent
+    /// 可靠的文本，照解码的原样：开头的 BOM、尾部的 NUL 与空白都还在，比较和修补之前一律过
+    /// normalizedUserComment。`header` 是值开头的字符集头。
+    case reliable(String, header: UserCommentHeader)
+    /// 解不出可靠的文本。`raw` 是 0x9286 的全部值字节（含头）。`guess`：ASCII 头、8 个 0 的头、
+    /// 没有头的值按 Latin-1 解出、过了 normalizedUserComment 的那串（Latin-1 什么字节都解得出，
+    /// 所以只是猜测）；JIS 头、UNICODE 头解不出时是 nil。
+    case guessed(String?, raw: [UInt8], header: UserCommentHeader)
+}
+
+/// 比较、修补备注文本用的那把尺子：去掉开头的一个 BOM（U+FEFF），再去掉尾部的 NUL 与空白
+/// （trimPadding，与键空间比对同一把）。
+func normalizedUserComment(_ s: String) -> String {
+    var scalars = Substring(s).unicodeScalars
+    if scalars.first == "\u{FEFF}" { scalars.removeFirst() }
+    return trimPadding(String(scalars))
+}
+
+/// 解析一段 UserComment 原始值（含字符集头）。
+///
+/// - `UNICODE\0` 头：正文以 BOM 开头时按 BOM 的字节序解；没有 BOM 时大端、小端各解一遍，取更像
+///   正常文本的那个（打平取大端）。两种都解不出（如落单的代理项）是猜的，没有猜测串。
+/// - `JIS\0\0\0\0\0` 头：按 Shift-JIS 解，解不出是猜的，没有猜测串。
+/// - `ASCII\0\0\0` 头、8 个 0 的头、没有头：正文是合法的 UTF-8（全是 ASCII 也算）才是可靠的文本；
+///   含 ≥ 0x80 的字节又不是合法 UTF-8 的（GBK、Latin-1 写的西欧文字……）是猜的，猜测串按 Latin-1 解。
+/// 值不足 8 字节时没有头。解出来去掉填充后是空的，是 `.absent`。
+func readUserComment(_ raw: [UInt8]) -> UserCommentReading {
+    let headers: [([UInt8], UserCommentHeader)] = [
+        (Array("ASCII\0\0\0".utf8), .ascii), (Array("UNICODE\0".utf8), .unicode),
+        (Array("JIS\0\0\0\0\0".utf8), .jis), ([UInt8](repeating: 0, count: 8), .undefined),
+    ]
+    var header = UserCommentHeader.none
+    var body = raw
+    if raw.count >= 8, let found = headers.first(where: { $0.0 == Array(raw[0..<8]) }) {
+        header = found.1
+        body = Array(raw[8...])
     }
-    /// UNICODE 前缀没规定字节序，两种都解一遍，取更像正常文本的那个。
+    /// 没有 BOM 的 UTF-16 两种都解一遍，取更像正常文本的那个。
     func moreReadable(_ a: String?, _ b: String?) -> String? {
         func score(_ s: String?) -> Int {
             guard let s else { return Int.min }
@@ -170,21 +221,26 @@ private func decodeUserComment(_ raw: [UInt8]) -> String? {
         }
         return score(a) >= score(b) ? a : b
     }
-    func text(_ bytes: [UInt8]) -> String? {
-        String(bytes: bytes, encoding: .utf8) ?? String(bytes: bytes, encoding: .isoLatin1)
-    }
-
-    if raw.count > 8 {
-        let head = Array(raw[0..<8])
-        let body = Array(raw[8...])
-        if head == Array("ASCII\0\0\0".utf8) { return cleaned(text(body)) }
-        if head == Array("UNICODE\0".utf8) {
-            return cleaned(moreReadable(String(bytes: body, encoding: .utf16BigEndian),
-                                        String(bytes: body, encoding: .utf16LittleEndian)))
+    let decoded: String?
+    switch header {
+    case .unicode:
+        if body.starts(with: [0xFE, 0xFF]) {
+            decoded = String(bytes: body, encoding: .utf16BigEndian)
+        } else if body.starts(with: [0xFF, 0xFE]) {
+            decoded = String(bytes: body, encoding: .utf16LittleEndian)
+        } else {
+            decoded = moreReadable(String(bytes: body, encoding: .utf16BigEndian),
+                                   String(bytes: body, encoding: .utf16LittleEndian))
         }
-        if head == Array("JIS\0\0\0\0\0".utf8) { return cleaned(String(bytes: body, encoding: .shiftJIS)) }
-        if head.allSatisfy({ $0 == 0 }) { return cleaned(text(body)) }
+    case .jis:
+        decoded = String(bytes: body, encoding: .shiftJIS)
+    case .ascii, .undefined, .none:
+        decoded = String(bytes: body, encoding: .utf8)
     }
-    // 没有合规前缀：按裸文本解，这正是 ImageIO 会整条丢弃的情况。
-    return cleaned(text(raw))
+    if let decoded {
+        return normalizedUserComment(decoded).isEmpty ? .absent : .reliable(decoded, header: header)
+    }
+    let guess = header == .unicode || header == .jis
+        ? nil : String(bytes: body, encoding: .isoLatin1).map(normalizedUserComment)
+    return .guessed(guess, raw: raw, header: header)
 }

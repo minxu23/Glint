@@ -88,7 +88,7 @@ if args.first == "--exif-same", args.count == 3 {
     if x == y { print("相同"); exit(0) }
     if let image = CGImageSourceCreateWithData(Data(a) as CFData, nil),
        carriedTIFFMatches(source: x, product: y,
-                          comment: SourceUserComment(imageProperties(image), decoded: rawExifUserComment(in: a))) {
+                          comment: SourceUserComment(imageProperties(image), reading: rawExifUserComment(in: a))) {
         print("只差备注改写"); exit(0)
     }
     let k = (0..<min(x.count, y.count)).first { x[$0] != y[$0] } ?? min(x.count, y.count)

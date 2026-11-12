@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=368
-EXPECTED_UNIT=578
+EXPECTED_ASSERTIONS=422
+EXPECTED_UNIT=614
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1017,6 +1017,107 @@ for what in 普通 UNICODE头 没有备注; do
         && pass "$what：照搬了，-v 里没有「改写」" || { fail "$what：没照搬，或说了改写"; sed 's/^/     /' <<< "$out"; }
     check "$what：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --exif-same "${f%.jpg}-源.jpg" "${f%.jpg}.heic")" "相同"
 done
+
+round "7n. 备注的读法：可靠的文本照原文修补，猜的原样照搬"
+# 备注的各种存法，大端（夹具）、小端（相机照片）各一份。`ASCII` 头里装 UTF-8 的，ImageIO 按
+# Latin-1 读成乱码，要修补；字节不是合法 UTF-8 的（GBK、Latin-1 写的西欧文字），工具分不出是
+# 哪种编码，默认路径原样照搬、一个字节不动。
+mkdir -p "$WORK/备注读法"
+# 用法：comment_sample 文件 大端|小端 值（--tags 的 undef 写法，`\0` 是 NUL、`\xHH` 是一个字节）
+comment_sample() {
+    if [ "$2" = 大端 ]; then
+        ./Tests/fixture "$1" >/dev/null || fail "造不出样本：$1"
+    else
+        cp test_pic/P1130939.JPG "$1"
+        make_sample ./Tests/mangle-tool --strip-trailer "$1"
+    fi
+    make_sample ./Tests/mangle-tool --tags "$1" "exif:9286:undef=$3"
+}
+# 用法：expect_repaired 描述 文件 原文 通过|无备注行（七条断言）。默认路径与 --no-raw-exif 各转一份；第四个参数是 --no-raw-exif 的校验要求。
+expect_repaired() {
+    local what=$1 f=$2 text=$3 out rw="${2%.jpg}-重写.jpg" ref="${2%.jpg}-源副本.jpg"
+    cp "$f" "$rw"; cp "$f" "$ref"
+    out=$("$BIN" -v --verify "$f" 2>&1)
+    grep -qE "EXIF 整块照搬（[0-9]+ 字节，备注改写成 ImageIO 读得出的写法）" <<< "$out" \
+        && pass "$what：-v 说照搬了并改写了备注" || { fail "$what：-v 没说改写了备注"; sed 's/^/     /' <<< "$out"; }
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过" || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    check "$what：产物里 ImageIO 读出的备注等于原文" \
+        "$(./Tests/probe --no-repair "${f%.jpg}.heic" '{Exif}/UserComment')" "$text"
+    check "$what：产物的 EXIF 只差备注改写" "$(./Tests/probe --exif-same "$ref" "${f%.jpg}.heic")" "只差备注改写"
+    out=$("$BIN" -v --verify --no-raw-exif "$rw" 2>&1)
+    # 相机照片交给系统重写本来就丢 MakerNote 等，那时只要求校验里没有关于备注的行。
+    if [ "$4" = 通过 ]; then
+        grep -q "元数据校验通过" <<< "$out" \
+            && pass "$what（--no-raw-exif）：校验通过" || { fail "$what（--no-raw-exif）：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    elif grep -q "元数据校验" <<< "$out" && ! grep -q "UserComment" <<< "$out"; then
+        pass "$what（--no-raw-exif）：校验了，没有关于备注的差异行"
+    else
+        fail "$what（--no-raw-exif）：没校验，或报了备注"; sed 's/^/     /' <<< "$out"
+    fi
+    check "$what（--no-raw-exif）：产物里 ImageIO 读出的备注等于原文" \
+        "$(./Tests/probe --no-repair "${rw%.jpg}.heic" '{Exif}/UserComment')" "$text"
+    check "$what（--no-raw-exif）：产物的备注是 UNICODE 头加 BOM" \
+        "$(./Tests/probe --raw-exif "${rw%.jpg}.heic" 9286 | cut -d' ' -f4 | cut -c1-20)" "$UNICODE_MM"
+}
+# 用法：expect_untouched 描述 文件（四条断言）。默认路径原样照搬、不改写，校验通过，删了源。
+# 转换之前先拷一份 <文件>-重写.jpg 留给 --no-raw-exif。
+expect_untouched() {
+    local what=$1 f=$2 out st ref="${2%.jpg}-源副本.jpg"
+    cp "$f" "$ref"; cp "$f" "${f%.jpg}-重写.jpg"
+    out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+    grep -qE "^    EXIF 整块照搬（[0-9]+ 字节）$" <<< "$out" \
+        && pass "$what：照搬了，-v 里没有「改写」" || { fail "$what：没照搬，或说了改写"; sed 's/^/     /' <<< "$out"; }
+    check "$what：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --exif-same "$ref" "${f%.jpg}.heic")" "相同"
+    grep -q "元数据校验通过" <<< "$out" \
+        && pass "$what：校验通过" || { fail "$what：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+    refute "$what：校验通过后删了源" "$st" test -e "$f"
+}
+GBK='\xCE\xF7\xBA\xFE\xC3\xC0\xBE\xB0'   # 「西湖美景」的 GBK 字节
+for endian in 大端 小端; do
+    d="$WORK/备注读法/$endian"
+    mkdir -p "$d"
+    # 1. ASCII 头 + UTF-8 中文。
+    f="$d/ASCII头UTF8.jpg"
+    comment_sample "$f" "$endian" "ASCII\\0\\0\\0$NOTE"
+    seen=$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')
+    case "$seen" in
+        ""|"<无>"|"<无法读取>"|"$NOTE") fail "$endian ASCII 头 + UTF-8：前提，ImageIO 把源里的备注读成乱码（实际 [$seen]）" ;;
+        *) pass "$endian ASCII 头 + UTF-8：前提，ImageIO 把源里的备注读成乱码" ;;
+    esac
+    expect_repaired "$endian ASCII 头 + UTF-8" "$f" "$NOTE" "$([ "$endian" = 大端 ] && echo 通过 || echo 无备注行)"
+    # 2–4. 字节不是合法 UTF-8 的：无前缀 GBK、ASCII 头 GBK、无前缀 Latin-1（café）。
+    while IFS='|' read -r name value hex; do
+        f="$d/$name.jpg"
+        comment_sample "$f" "$endian" "$value"
+        check "$endian $name：前提，源里 0x9286 的值是造的那些字节" \
+            "$(./Tests/probe --raw-exif "$f" 9286 | cut -d' ' -f4 | cut -c1-${#hex})" "$hex"
+        expect_untouched "$endian $name" "$f"
+    done <<EOF
+无前缀GBK|$GBK|cef7bafec3c0beb0
+ASCII头GBK|ASCII\\0\\0\\0$GBK|4153434949000000cef7bafe
+无前缀Latin1|caf\\xE9 au lait|636166e9
+EOF
+done
+# 5. 纯中文的 UNICODE 备注（普通夹具）：系统重写时带 BOM。
+f="$WORK/备注读法/普通.jpg"
+./Tests/fixture "$f" >/dev/null
+out=$("$BIN" -v --verify --no-raw-exif "$f" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "普通夹具（--no-raw-exif）：校验通过" || { fail "普通夹具（--no-raw-exif）：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+check "普通夹具（--no-raw-exif）：产物的备注是 UNICODE 头加 BOM" \
+    "$(./Tests/probe --raw-exif "${f%.jpg}.heic" 9286 | cut -d' ' -f4 | cut -c1-20)" "$UNICODE_MM"
+check_same "普通夹具（--no-raw-exif）：产物里 ImageIO 读出的备注与源相同" \
+    "$(./Tests/probe --no-repair "${f%.jpg}.heic" '{Exif}/UserComment')" "$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')"
+# 7. 小端 EXIF 里没有 BOM 的小端 UNICODE 备注：ImageIO 当大端读成乱码，这一轮不改，默认路径照旧原样照搬。
+f="$WORK/备注读法/小端UNICODE无BOM.jpg"
+comment_sample "$f" 小端 'UNICODE\0\x81\x9C\x76\x6C\x02\x5E\x3F\x65\x85\x53'
+seen=$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')
+case "$seen" in
+    ""|"<无>"|"<无法读取>"|"鲁汶市政厅") fail "小端 UNICODE 无 BOM：前提，ImageIO 读成乱码（实际 [$seen]）" ;;
+    *) pass "小端 UNICODE 无 BOM：前提，ImageIO 读成乱码" ;;
+esac
+expect_untouched "小端 UNICODE 无 BOM" "$f"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

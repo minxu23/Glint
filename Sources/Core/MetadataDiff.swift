@@ -584,13 +584,29 @@ func xmpTags(_ md: CGImageMetadata) -> [String: String] {
 /// Tests/probe 的 `--no-repair` 用，那一轮的前提恰恰是"ImageIO 自己读不出来"。
 /// 做成参数而不是让调用方自己拼一份：自己拼就可能漏掉某一层，而漏掉是静默的
 /// ——漏了 XMP 层的探针对每个 XMP 键都答「无」。
+///
+/// 修补了 UserComment 时，XMP 层里与 ImageIO 原来读出的 `{Exif}/UserComment` 同值的
+/// `exif:UserComment` 也换成修补后的文本：那是 ImageIO 从同一段 EXIF 字节合成的同一个误读
+/// （`ASCII` 头里的 UTF-8 按 Latin-1 读出的乱码），产物里它跟着 EXIF 变对，不换就会被报成变化。
+/// 值不同的（XMP 包里自己写的备注）不动。
 func metadataKeySpace(of image: CGImageSource, url: URL,
                       repairing: Bool = true) -> [String: String] {
     var flat: [String: String] = [:]
-    flatten(repairing ? repairedProperties(image, url: url) : imageProperties(image), into: &flat)
+    let original = imageProperties(image)
+    let props = repairing ? repairedProperties(original, url: url) : original
+    flatten(props, into: &flat)
     flat = keyingAuxiliaryDataByType(flat)
     if let m = CGImageSourceCopyMetadataAtIndex(image, 0, nil) {
-        flat.merge(xmpTags(m)) { a, _ in a }
+        var xmp = xmpTags(m)
+        let key = xmpKey("exif:UserComment")
+        func comment(_ p: [CFString: Any]) -> String? {
+            ((p[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifUserComment] as? String)
+                .map(trimPadding)
+        }
+        if let seen = comment(original), let repaired = comment(props), repaired != seen, xmp[key] == seen {
+            xmp[key] = repaired
+        }
+        flat.merge(xmp) { a, _ in a }
     }
     return flat
 }
@@ -664,7 +680,7 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
         + raw.issues
         + carriedExifIssues(source: bytes, dest: destBytes,
-                            comment: SourceUserComment(imageProperties(sourceImage), decoded: rawExifUserComment(in: bytes)))
+                            comment: SourceUserComment(imageProperties(sourceImage), reading: rawExifUserComment(in: bytes)))
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
         + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
                              isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
@@ -692,9 +708,9 @@ func carriedExifIssues(source: [UInt8], dest: [UInt8], comment: SourceUserCommen
 }
 
 /// carriedExifIssues 认的两种关系：源 TIFF `source` 与产物 TIFF `product` 逐字节相同；或者
-/// 源满足改写条件（`comment.toRepair` 不是 nil：ImageIO 读不出源的备注、自己解析解得出），
-/// 且 `product` 是 `source` 按解出的文本做的备注改写（isUserCommentRewrite）。源的备注 ImageIO
-/// 读得出却被改写了，不认。
+/// 源满足修补条件（`comment.toRepair` 不是 nil，条件见 SourceUserComment.toRepair），且 `product`
+/// 是 `source` 按修补的文本做的备注改写（isUserCommentRewrite）。不满足修补条件的备注（ImageIO
+/// 读得对的、猜的）被改写了，不认。
 func carriedTIFFMatches(source: [UInt8], product: [UInt8], comment: SourceUserComment) -> Bool {
     if source == product { return true }
     guard let text = comment.toRepair else { return false }

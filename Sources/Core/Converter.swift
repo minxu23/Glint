@@ -61,13 +61,18 @@ func imageProperties(_ src: CGImageSource) -> [CFString: Any] {
     return props
 }
 
-/// 在 ImageIO 给出的属性之上，补回它读不出来的字段。目前只有一处：
-/// 缺少字符集前缀的 EXIF UserComment（见 rawExifUserComment 的说明）。它同时是 --verify
-/// 源侧的视图；不进视图的 ImageUniqueID 另在 propertiesToWrite 里补。
+/// 在 ImageIO 给出的属性之上，补回它读错或读不出的字段。目前只有一处：UserComment，
+/// 满足 SourceUserComment.toRepair 时换成自己解析出的文本。它同时是 --verify 源侧的视图；
+/// 不进视图的 ImageUniqueID 和猜出来的备注另在 propertiesToWrite 里补。
 func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
-    var props = imageProperties(src)
+    repairedProperties(imageProperties(src), url: url)
+}
+
+/// 同上，`props` 是已经取好的 imageProperties。
+func repairedProperties(_ props: [CFString: Any], url: URL) -> [CFString: Any] {
+    var props = props
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-    guard let recovered = userCommentImageIOMisses(props, raw: rawExifUserComment(of: url)) else { return props }
+    guard let recovered = SourceUserComment(props, reading: rawExifUserComment(of: url)).toRepair else { return props }
     // 这里放的是备注本身。为 HEIC 写入器做的改写只在 encodeHEIF 里做一次，
     // 这个函数的结果同时是 --verify 源侧的视图，不能掺进写入用的填充。
     exif[kCGImagePropertyExifUserComment] = recovered
@@ -75,51 +80,70 @@ func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
     return props
 }
 
-/// 源里的 UserComment，两种读法：ImageIO 视图里的值，和自己解析（rawExifUserComment）解出的文本。
+/// 源里的 UserComment，两种读法：ImageIO 视图里的值，和自己解析原始字节（readUserComment）的结果。
 struct SourceUserComment: Equatable {
     var seenByImageIO: String?
-    var decoded: String?
+    var reading: UserCommentReading
 
     /// 由 ImageIO 的视图（imageProperties）和自己解析的结果构造。
-    init(_ props: [CFString: Any], decoded: String?) {
+    init(_ props: [CFString: Any], reading: UserCommentReading) {
         let exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-        self.init(seenByImageIO: exif[kCGImagePropertyExifUserComment] as? String, decoded: decoded)
+        self.init(seenByImageIO: exif[kCGImagePropertyExifUserComment] as? String, reading: reading)
     }
 
-    init(seenByImageIO: String?, decoded: String?) {
+    init(seenByImageIO: String?, reading: UserCommentReading) {
         self.seenByImageIO = seenByImageIO
-        self.decoded = decoded
+        self.reading = reading
     }
 
     /// ImageIO 读不出：视图里没有，或去掉填充后为空。
     static func imageIOMisses(_ seen: String?) -> Bool { trimPadding(seen ?? "").isEmpty }
 
-    /// ImageIO 读不出、自己解得出时是解出的文本；否则 nil。转换时的修补（repairedProperties）、
-    /// 照搬时的备注改写（carryRawExif）、校验认这种改写（carriedTIFFMatches）都以它为准。
-    var toRepair: String? { SourceUserComment.imageIOMisses(seenByImageIO) ? decoded : nil }
+    /// 要修补成的文本（过了 normalizedUserComment）；不修补是 nil。修补的条件，两条满足一条：
+    /// 1. ImageIO 读不出，且自己解析出的是可靠的文本；
+    /// 2. 值是 `ASCII\0\0\0` 头、正文含非 ASCII 的合法 UTF-8——ImageIO 按 Latin-1 把它读成乱码，
+    ///    不管它读成什么都修补。
+    /// 猜的备注不修补。转换时的修补（repairedProperties）、照搬时的备注改写（carryRawExif）、
+    /// 校验认这种改写（carriedTIFFMatches）都以它为准。
+    var toRepair: String? {
+        guard case .reliable(let decoded, let header) = reading else { return nil }
+        let text = normalizedUserComment(decoded)
+        if SourceUserComment.imageIOMisses(seenByImageIO) { return text }
+        if header == .ascii, !text.unicodeScalars.allSatisfy(\.isASCII) { return text }
+        return nil
+    }
+
+    /// ImageIO 读不出、自己解析出的是猜的且有猜测串时，是那串（只给系统重写写入用）；否则 nil。
+    var guessToWrite: String? {
+        guard SourceUserComment.imageIOMisses(seenByImageIO), case .guessed(let guess?, _, _) = reading else { return nil }
+        return guess
+    }
 }
 
-/// SourceUserComment.toRepair，`raw`（自己解析）只在 ImageIO 读不出时才算。`props` 是 ImageIO
-/// 的视图（imageProperties）。
-func userCommentImageIOMisses(_ props: [CFString: Any], raw: @autoclosure () -> String?) -> String? {
-    let seen = SourceUserComment(props, decoded: nil).seenByImageIO
-    guard SourceUserComment.imageIOMisses(seen) else { return nil }
-    return SourceUserComment(seenByImageIO: seen, decoded: raw()).toRepair
-}
-
-/// 要写进产物的属性：在 repairedProperties 的结果上补回 ImageIO 读不出的 ImageUniqueID
-/// （33 字节以外的写法，规则见 restorableImageUniqueID）。视图里已经有它时原样返回同一个字典。
+/// 要写进产物的属性：在 repairedProperties 的结果上补回两样不进 --verify 源侧视图的东西——
+/// ImageIO 读不出的 ImageUniqueID（33 字节以外的写法，规则见 restorableImageUniqueID），和 ImageIO
+/// 读不出、自己解析也只能猜的备注的猜测串（SourceUserComment.guessToWrite）。都不用补时原样
+/// 返回同一个字典。
 ///
-/// 补回的值只用于写入，不进 --verify 的源侧视图：产物一侧的 ImageIO 视图同样读不出这类值，
-/// 放进源侧视图就会被键空间比对报成丢失。值写对没有，由原始清点按两边的原始字节核对
-/// （compareRawExif）。
+/// ImageUniqueID 不进源侧视图：产物一侧的 ImageIO 视图同样读不出这类值，放进源侧视图就会被
+/// 键空间比对报成丢失。值写对没有，由原始清点按两边的原始字节核对（compareRawExif）。
+/// 猜测串不进源侧视图：它不是可靠的原文。Latin-1 一个字节对一个码位，原字节还能从产物里一一
+/// 还原，所以照写；写了以后由备注原文核对（userCommentOriginalIssues）报出来。
 func propertiesToWrite(_ props: [CFString: Any], source url: URL) -> [CFString: Any] {
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-    guard exif[kCGImagePropertyExifImageUniqueID] == nil,
-          let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-          let tiff = TIFFStructure(jpeg: [UInt8](data)),
-          let id = restorableImageUniqueID(rawExifEntries(tiff)) else { return props }
-    exif[kCGImagePropertyExifImageUniqueID] = id
+    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return props }
+    let bytes = [UInt8](data)
+    var changed = false
+    if exif[kCGImagePropertyExifImageUniqueID] == nil, let tiff = TIFFStructure(jpeg: bytes),
+       let id = restorableImageUniqueID(rawExifEntries(tiff)) {
+        exif[kCGImagePropertyExifImageUniqueID] = id
+        changed = true
+    }
+    if let guess = SourceUserComment(props, reading: rawExifUserComment(in: bytes)).guessToWrite {
+        exif[kCGImagePropertyExifUserComment] = guess
+        changed = true
+    }
+    guard changed else { return props }
     var result = props
     result[kCGImagePropertyExifDictionary] = exif
     return result
@@ -132,17 +156,18 @@ func propertiesToWrite(_ props: [CFString: Any], source url: URL) -> [CFString: 
 ///   单元都换成 `?`。
 /// - 否则：用 `UNICODE\0` 前缀，字段留 2×(L+1) 字节，只写进前 ⌊L/2⌋ 个
 ///   UTF-16 单元，其余是 NUL。
-/// 读取时 ImageIO 去掉开头的 BOM，尾部 NUL 原样返回。
+/// 读取时 ImageIO 去掉开头的 BOM，尾部 NUL 原样返回。写进去的 UTF-16 是大端；没有 BOM 时
+/// exiftool 等别的读取器要自己猜字节序，纯中文的备注会被猜成小端、读成乱码。
 ///
-/// 所以含非 ASCII 的备注：去掉已有的尾部 NUL；首单元是 ASCII 就在前面加 BOM，
-/// 让写入器选 UNICODE；再补上与此时单元数相等的 NUL，写进去的前 ⌊2L/2⌋ = L 个
-/// 单元正好是完整文本，字段尾部剩 L+1 个 NUL 单元（写入器总会留下的那一个，加上
-/// 本该装文本的后一半）。纯 ASCII 的备注原样返回。
+/// 所以含非 ASCII 的备注：去掉已有的尾部 NUL；开头还没有 BOM 就加一个——首单元是 ASCII 时
+/// 它让写入器选 UNICODE，任何时候它都让别的读取器认得出字节序；再补上与此时单元数相等的
+/// NUL，写进去的前 ⌊2L/2⌋ = L 个单元正好是 BOM 加完整文本，字段尾部剩 L+1 个 NUL 单元
+/// （写入器总会留下的那一个，加上本该装文本的后一半）。纯 ASCII 的备注原样返回。
 func userCommentForHEIFWriter(_ comment: String) -> String {
     var units = Array(comment.utf16)
     guard units.contains(where: { $0 > 0x7F }) else { return comment }
     while units.last == 0 { units.removeLast() }
-    if units[0] <= 0x7F { units.insert(0xFEFF, at: 0) }
+    if units[0] != 0xFEFF { units.insert(0xFEFF, at: 0) }
     return String(decoding: units + [UInt16](repeating: 0, count: units.count), as: UTF16.self)
 }
 
@@ -394,8 +419,8 @@ enum RawExifOutcome: Equatable {
 
 /// 把 `product`（ImageIO 刚写好的 HEIC）里 Exif 项的内容换成源 JPEG 的 EXIF 原始字节。
 ///
-/// 打算照搬的那份 TIFF：源 TIFF 原样；ImageIO 读不出源里的 UserComment、自己解析解得出
-/// （userCommentImageIOMisses）且 rewritingUserComment 肯改写时，是改写过备注的源 TIFF。
+/// 打算照搬的那份 TIFF：源 TIFF 原样；源里的 UserComment 要修补（SourceUserComment.toRepair）
+/// 且 rewritingUserComment 肯改写时，是改写过备注的源 TIFF。猜的备注不改写，原样照搬。
 ///
 /// 闸门与改写见 carryingExif（RawExifCarry.swift）。改写得到的新字节先写进同目录的另一个
 /// 临时文件，过了 rawExifRegression 的自检才原子地替换 `product`；闸门或自检不过，`product`
@@ -412,7 +437,7 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
     }
     var rewritten: [UInt8]?
     if let image = CGImageSourceCreateWithURL(source as CFURL, nil),
-       let text = userCommentImageIOMisses(imageProperties(image), raw: rawExifUserComment(in: sourceBytes)) {
+       let text = SourceUserComment(imageProperties(image), reading: rawExifUserComment(in: sourceBytes)).toRepair {
         rewritten = rewritingUserComment(tiff, text: text)
     }
     let intended = rewritten ?? tiff
