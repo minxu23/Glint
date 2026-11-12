@@ -26,12 +26,13 @@ Status: ready-for-agent
 
 ## 1.1 名字
 
-应用叫**显影**（暗房术语：让底片上看不见的影像显现出来——这个应用把照片里看不见的时间、位置、
-备注摆出来）。用户看得到应用名的地方都用它：`Info.plist` 的 `CFBundleName` /
-`CFBundleDisplayName`、应用菜单、关于面板、没有选中条目时的窗口标题、README。应用包是 `显影.app`。
-`CFBundleIdentifier`、可执行文件名、命令行工具 `jpeg2heif` 都不变。
+应用叫**吉光**（取自「吉光片羽」：留存下来的珍贵片段——照片，连同它的拍摄时间、位置和备注）。
+用户看得到应用名的地方都用它：`Info.plist` 的 `CFBundleName` / `CFBundleDisplayName`、应用菜单
+（关于吉光、隐藏吉光、退出吉光）、关于面板、没有选中条目时的窗口标题、README。应用包是 `吉光.app`。
+`CFBundleIdentifier`、可执行文件名、命令行工具 `jpeg2heif`、仓库名都不变。
 
-实现上改名只动两处：代码里一个常量，`Makefile` 里一个变量。
+实现上改名只动两处：代码里一个常量（菜单、关于面板、窗口标题都引用它），`Makefile` 里一个变量
+（应用包名，`Info.plist` 的 `CFBundleName` / `CFBundleDisplayName` 与它一致）。
 
 ## 2. 约束
 
