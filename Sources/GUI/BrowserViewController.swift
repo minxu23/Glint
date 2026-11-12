@@ -92,9 +92,9 @@ final class BrowserViewController: NSViewController {
     }
     private let columns = [
         Column(id: "name", title: "名称", width: 220, min: 120, sort: .name),
-        Column(id: "captured", title: "拍摄时间", width: 118, min: 90, sort: .captured),
+        Column(id: "captured", title: "拍摄时间", width: 128, min: 90, sort: .captured),
         Column(id: "format", title: "格式", width: 44, min: 40, sort: .format),
-        Column(id: "dims", title: "尺寸", width: 80, min: 60, sort: nil),
+        Column(id: "dims", title: "尺寸", width: 92, min: 60, sort: nil),
         Column(id: "size", title: "大小", width: 60, min: 50, sort: .size),
         Column(id: "notes", title: "备注", width: 160, min: 60, sort: nil),
         Column(id: "conv", title: "转换", width: 84, min: 70, sort: nil),
