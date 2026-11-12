@@ -130,11 +130,12 @@ ImageIO 写 EXIF 走的是「读成属性字典 → 从字典写出去」，它�
 源的值就是对的）。产物会比 ImageIO 自己写的大一个 EXIF 的大小（带 MakerNote 的相机照片
 约 2–4%）。ImageMagick 也是这么做的（EXIF 当不透明字节块整块交给 libheif）。
 
-**带无前缀备注的照片，块上只改备注这一条。** 不少安卓机型的 `UserComment` 没有 8 字节
-字符集头、直接塞裸 UTF-8，ImageIO 当它不存在（见「已知限制」里「不合规范的
-`UserComment`」那条）。ImageIO 在源里读不出 `UserComment`（去掉填充后为空）、本工具自己
-解析解得出文本，而且 Exif 子 IFD 里恰好一个 `0x9286` 条目、整张表都在块内时，照搬的那份
-TIFF 是改写过备注的源 TIFF：
+**ImageIO 读错或读不出的备注，块上只改备注这一条。** 不少安卓机型的 `UserComment` 没有
+8 字节字符集头、直接塞裸 UTF-8，ImageIO 当它不存在；`ASCII` 头里装着 UTF-8 中文的，ImageIO
+按 Latin-1 读成乱码（见「已知限制」里「不合规范的 `UserComment`」那条）。源里的备注要修补
+（条件见那一条：ImageIO 读不出而本工具读出的是可靠的文本，或者 `ASCII` 头里装着非 ASCII 的
+UTF-8），而且 Exif 子 IFD 里恰好一个 `0x9286` 条目、整张表都在块内时，照搬的那份 TIFF 是
+改写过备注的源 TIFF：
 
 - 新值接在 TIFF 块末尾（块长为奇数时先补一个 0）：文本全是 ASCII 时是 `ASCII\0\0\0`
   加文本；否则是 `UNICODE\0` 加 BOM 加文本的 UTF-16，字节序（BOM 也一样）与 TIFF 头相同。
@@ -145,7 +146,8 @@ TIFF 是改写过备注的源 TIFF：
 BOM 不能省：ImageIO 读 `UNICODE` 备注时有 BOM 认 BOM，没有就一律当大端，小端（`II`）块里
 不带 BOM 的 UTF-16 会读成乱码。非 ASCII 文本也不能用 `ASCII` 头，ImageIO 按 Latin-1 解。
 HEIC 和 JPEG 两种容器里读法一样；ImageIO 读回时去掉 BOM。条件不满足（比如有两个 `0x9286`）
-就照原样照搬，由下面的自检决定去留。
+就照原样照搬，由下面的自检决定去留。字节不是合法 UTF-8 的备注（本工具分不出是 GBK 还是
+别的编码，只能猜）不改写，原样照搬，一个字节不动。
 
 下面任何一条不满足就不照搬，产物保持 ImageIO 写出来的样子（也就是 `--no-raw-exif` 的
 产物，逐字节相同），不算错误：
@@ -171,8 +173,8 @@ HEIC 和 JPEG 两种容器里读法一样；ImageIO 读回时去掉 BOM。条件
 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，或上面退回时），EXIF 由 ImageIO 从属性
 字典写出，丢的东西见「已知限制」。这条路上本工具补两处 ImageIO 读不出的写法：
 
-- 缺字符集头的 `UserComment`（见「已知限制」里「不合规范的 `UserComment`」那条，以及它
-  前面那条非 ASCII 备注的写法）。
+- ImageIO 读错或读不出的 `UserComment`（见「已知限制」里「不合规范的 `UserComment`」那条，
+  以及它前面那条非 ASCII 备注的写法）。
 - `ImageUniqueID`：ImageIO 只读长度恰好 33 字节（32 个字符加 NUL，规范的定长）的值，
   别的长度（如 24 字节的 `J12LLKF00SM J12LLKL01GM`、26 字节的 `OPPO_20201019_204116_0001`）
   它当作不存在，与内容无关。本工具从源 JPEG 的原始字节里取出值（取到第一个 NUL 为止）
@@ -273,20 +275,40 @@ HEIC 和 JPEG 两种容器里读法一样；ImageIO 读回时去掉 BOM。条件
 TIFF 字节（P）与源 EXIF 段的（S）之间只认两种关系：
 
 1. P 与 S 逐字节相同。
-2. P 是 S 的备注改写（见「EXIF 整块照搬」），下面全部满足：ImageIO 读不出源的备注、本工具
-   自己解析解得出文本、Exif 子 IFD 里恰好一个 `0x9286`（源的备注 ImageIO 本来读得出却被改写了，
-   不算）；P 的前 |S| 个字节与 S 相同，只有那一条的类型、个数、偏移这 10 个字节可以不同；那一条
+2. P 是 S 的备注改写（见「EXIF 整块照搬」），下面全部满足：源的备注满足修补条件（见「已知
+   限制」里「不合规范的 `UserComment`」那条；ImageIO 本来读得对的、字节只能猜的备注被改写了，
+   不算）、Exif 子 IFD 里恰好一个 `0x9286`；P 的前 |S| 个字节与 S 相同，只有那一条的类型、个数、偏移这 10 个字节可以不同；那一条
    在 P 里是类型 7，值恰好占满 S 之后（补齐到偶数之后）到 P 末尾的全部字节，补的那个字节是 0；
    这段值解出来正是规定的写法——文本全是 ASCII 时是 `ASCII\0\0\0` 加文本，否则是 `UNICODE\0`
-   加 BOM 加 UTF-16（字节序与 TIFF 头相同），解出的文本与源侧解出的逐字相同。这段值是解出来
+   加 BOM 加 UTF-16（字节序与 TIFF 头相同），解出的文本与源侧修补的文本逐字相同。这段值是解出来
    逐项核对的，不拿写的那一侧的函数算一遍来比，写的一侧写错了这里不会跟着错。
 
 别的情形都报
 `变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（N 字节 → M 字节，第 K 个字节起不同）`（K 从 1 数起；
 源里没有 EXIF 段时按 0 字节比）。`--verify` 只看两个文件，不知道转换时走了哪条路，认的就是
-这个结构。系统重写的产物永远不触发它。备注的值本身由键空间比对管（源侧视图里是修补后的
-文本，产物侧是 ImageIO 读回的值）。逐字节相同或只差备注改写的产物，原始清点、GPS 分数、
-`ImageUniqueID` 各条自然都过。
+这个结构。系统重写的产物永远不触发它。备注的值由键空间比对（源侧视图里是修补后的文本，
+产物侧是 ImageIO 读回的值）和下一条的备注原文核对管。逐字节相同或只差备注改写的产物，
+原始清点、GPS 分数、`ImageUniqueID`、备注原文各条自然都过。
+
+**备注的原文按原始字节核对。** 键空间比对比的是 ImageIO 两边读出来的值：ImageIO 把源里的
+备注读错、又把读错的那串写进产物（`ASCII` 头里的 UTF-8 中文被读成 Latin-1 乱码，系统重写
+时就以乱码为正文写进产物），两边一样，它看不见。所以另按两边 `0x9286` 的原始字节各读一遍
+（源读 JPEG 的 EXIF 段，产物读 HEIF 的 Exif 项；读法见「已知限制」里「不合规范的
+`UserComment`」那条，分「可靠的文本」和「猜的」），源里有备注时：
+
+| 源的备注 | 产物必须 | 否则报 |
+|---|---|---|
+| 可靠的文本 T | 也是可靠的文本，且等于 T | `变化 备注 UserComment 的原文：T → …`；产物没有备注是 `丢失 备注 UserComment 的原文 = T` |
+| 猜的 | `0x9286` 的值字节与源的逐字节相同 | `变化 备注 UserComment：源里的字节不是合法的 UTF-8（N 字节），产物里换了一种写法，原文无法核对`；产物没有备注是 `丢失 备注 UserComment（N 字节，不是合法的 UTF-8）` |
+
+比文本之前两边都去掉开头的一个 BOM、尾部的 NUL 和空白（与键空间比对的尾部填充规则同一把
+尺子），所以换了字符集头、换了字节序、多了填充都不算变。产物里的值解不出可靠的文本时，
+「…」写成 `（N 字节，不是合法的 UTF-8）`；`JIS`、`UNICODE` 头的值按头解不出时，「不是合法的
+UTF-8」写成「按 JIS 头解不出」「按 UNICODE 头解不出」。显示截断后两边一样时注明从第几个
+字符起不同。同一处只出一行：键空间比对已经为 `{Exif}/UserComment` 报了丢失或变化、或原始
+清点报了 `UserComment` 标签丢失，这一条就不再报（那两行写的是别的软件里看得到的值，早就
+有；这一条只补它们看不见的那种）。产物的 EXIF 读不出时也不报（原始清点已经有「无法核对」
+那一行）。
 
 **GPS 的分数按原始值比。** 源文件常把坐标的「秒」存成分母 1000000 的分数，ImageIO
 写 HEIF 时一律存成分母 100。ImageIO 视图里的 `{GPS}/Latitude` 在源一侧就已经按 XMP 的
@@ -509,19 +531,42 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
 - **（系统重写时）非 ASCII 的 EXIF `UserComment` 在产物里多占一倍空间**。ImageIO 的 HEIC 写入器
   对含非 ASCII 的备注只写进前一半（按 UTF-16 单元算），ASCII 打头的还会被整条当成
   ASCII 写、非 ASCII 字符全变成 `?`。本工具写之前把这类备注改写一次（见
-  [`userCommentForHEIFWriter`](Sources/Core/Converter.swift)）：ASCII 打头的在前面加
-  一个 BOM，再补上等长的 NUL。产物里的备注与源逐字相同，代价是字段尾部跟着比正文
-  多 2 字节的 NUL 填充；ImageIO 读出来的字符串尾部也带着这些 NUL（它读源 JPEG 的
-  填充时也一样），`--verify` 按尾部填充规则不计较它们。纯 ASCII 的备注原样写入。
+  [`userCommentForHEIFWriter`](Sources/Core/Converter.swift)）：在前面加一个 BOM（已经有
+  就不加），再补上与（BOM 加文本）等长的 NUL。BOM 一律要加：首字符是 ASCII 时它让写入器
+  选 `UNICODE` 头；写入器写的是大端 UTF-16，没有 BOM 时 exiftool 等别的读取器得自己猜字节序，
+  纯中文的备注会被猜成小端、读成乱码（ImageIO 自己读得对）。产物里的备注与源逐字相同，
+  代价是字段尾部跟着一段比正文还长一个单元的 NUL 填充；ImageIO 读出来的字符串尾部也带着
+  这些 NUL（它读源 JPEG 的填充时也一样），`--verify` 按尾部填充规则不计较它们。纯 ASCII
+  的备注原样写入。
 - **不合规范的 `UserComment` 由本工具自己解析**。EXIF 要求该字段以 8 字节字符集
   标识开头（`ASCII\0\0\0` / `UNICODE\0` / `JIS…` / 全零），但不少安卓机型直接写
-  裸 UTF-8。ImageIO 认不出这种写法，会当作字段不存在，备注就在转码时被静默丢掉。
-  本工具因此额外自己扫一遍 JPEG 的 EXIF 段（见
-  [`rawExifUserComment`](Sources/Core/ExifReader.swift)），把 ImageIO 漏掉的内容
-  补回去：整块照搬时在照搬的块上把备注改写成 ImageIO 读得出的写法（见「EXIF 整块照搬」，
-  旧的备注字节留在块里），系统重写时把文本放进要写入的属性。注意有些机型往这个字段塞的
-  是整段相机调试信息而非人写的备注，工具会一并原样保留——判断哪些算"噪音"不是转换
-  工具该替你做的决定。
+  裸 UTF-8，ImageIO 认不出这种写法，当作字段不存在；`ASCII` 头里装着 UTF-8 中文的，
+  ImageIO 按 Latin-1 读成一串乱码（`è¥¿æ¹…`）。本工具因此自己解析 EXIF 段里 `0x9286`
+  的原始字节（见 [`readUserComment`](Sources/Core/ExifReader.swift)），读出来的分两种：
+  - **可靠的文本**：`UNICODE` 头（有 BOM 认 BOM，没有就大端、小端各解一遍取更像文本的）；
+    `JIS` 头且 Shift-JIS 解得出；`ASCII` 头、全零头、没有头，且字节全是 ASCII 或是合法的 UTF-8。
+  - **猜的**：`ASCII` 头、全零头、没有头而字节含高位又不是合法 UTF-8 的（GBK、Latin-1 写的
+    西欧文字……），以及 `JIS` / `UNICODE` 头解不出的。本工具分不出这些字节是哪种编码，不猜。
+
+  **修补**（`--verify` 源侧视图里的值、整块照搬时块上的备注改写、系统重写时写进去的文本，
+  三处同一个条件）在两种情况下做：ImageIO 读不出（去掉填充后为空）而备注是可靠的文本；
+  或者备注是 `ASCII` 头、字节含非 ASCII 的合法 UTF-8——不管 ImageIO 读成什么。修补时
+  `--verify` 源侧 XMP 层里与 ImageIO 原读值相同的 `exif:UserComment`（ImageIO 从同一段字节
+  合成的同一个误读）也换成修补后的文本。整块照搬时在照搬的块上把备注改写成 ImageIO 读得
+  对的写法（见「EXIF 整块照搬」，旧的备注字节留在块里），系统重写时把文本放进要写入的属性。
+
+  **猜的备注不修补**：默认路径原样照搬，字节一个不动，ImageIO 读它和读源一样（读不出，或读成
+  同一串 Latin-1）。系统重写那条路上，ImageIO 读不出的猜的备注按 Latin-1 解出的那串写进产物
+  （一个字节对一个码位，原字节还能从产物里一一还原，比不写强），ImageIO 读成 Latin-1 的照它
+  读的写；这样写过之后原字节没了，`--verify` 的备注原文核对把它报出来（见「`--verify` 到底
+  比什么」），`--delete-original` 不删源。
+
+  注意有些机型往这个字段塞的是整段相机调试信息而非人写的备注，工具会一并原样保留——
+  判断哪些算"噪音"不是转换工具该替你做的决定。
+- **小端 EXIF 里没有 BOM 的 `UNICODE` 备注，ImageIO 读成乱码**。`UNICODE` 头的备注没有 BOM
+  时 ImageIO 一律按大端读；小端（`II`）EXIF 里按小端写的这种备注它读成一串乱码，转换前后
+  一样（默认路径字节原样照搬，完好无损；系统重写时把那串乱码写进产物，`--verify` 两边读法一样，
+  不报）。本工具不替它判断字节序：纯中文的 UTF-16 两种字节序解出来都像文本，分不出来。
 - 需要 macOS 与 Xcode 命令行工具（`swiftc`）来构建。
 
 ## 测试
@@ -555,7 +600,7 @@ make snapshot OUT=/tmp/ui.png ARGS="--convert ~/Pictures/测试"
 | `Sources/Core/Converter.swift` | 单张图的转换：读元数据、编码 HEIF、搬运文件层属性 |
 | `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
 | `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
-| `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：捞回 ImageIO 读不出的 `UserComment`，按标签读原始值 |
+| `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：按原始字节读 `UserComment`（分可靠的文本与猜的），按标签读原始值 |
 | `Sources/Core/HEIFExif.swift` | 从 HEIF 的 `meta` 盒子里取出 Exif 项的原始 TIFF，供原始 EXIF 清点读产物一侧；`iloc` 的逐项读取 |
 | `Sources/Core/RawExifCarry.swift` | EXIF 整块照搬的闸门与改写（纯函数：进产物字节与源 EXIF，出新字节或不换的原因），以及照搬块上的备注改写与校验认改写的规则 |
 | `Sources/Core/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）、GPS 原始分数比对、`ImageUniqueID` 的补写规则与按原始字节比值，含不报清单 |
