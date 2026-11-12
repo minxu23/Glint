@@ -77,6 +77,8 @@ func iptcKey(_ name: CFString) -> String { metadataKey(kCGImagePropertyIPTCDicti
 
 /// XMP 侧没有 ImageIO 常量，键路径是「命名空间前缀 + 标签名」，再由展开时统一
 /// 冠上 `XMP/` 这一层。`path` 形如 `photoshop:DateCreated`。这一层前缀只在这里定义。
+/// 键里的命名空间前缀由命名空间 URI 定（xmpKeyPrefixes），规则里写的前缀都在
+/// standardXMPPrefixes 里，认的是那个 URI。
 func xmpKey(_ path: String) -> String { "XMP/\(path)" }
 
 /// 描述文件本身（编码方式、体积、色深）而非照片内容的键——转换后变化属正常，
@@ -559,20 +561,171 @@ private extension String {
     }
 }
 
-/// 把 XMP 数据包里的所有标签（含嵌套结构与数组）展开成 "路径 = 值"。
+/// 把 XMP 数据包里的所有标签（含嵌套结构与数组）展开成 "路径 = 值"，键的前缀按命名空间定
+/// （xmpKeys）。枚举时顺手记下每个标签的前缀与命名空间 URI，就是这个文件的「前缀 → URI」表。
 func xmpTags(_ md: CGImageMetadata) -> [String: String] {
-    final class Box { var dict: [String: String] = [:] }
+    final class Box {
+        var tags: [(path: String, value: String)] = []
+        var namespaces: [(prefix: String, uri: String)] = []
+    }
     let box = Box()
     let options = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
     CGImageMetadataEnumerateTagsUsingBlock(md, nil, options) { path, tag in
+        if let prefix = CGImageMetadataTagCopyPrefix(tag) as String?,
+           let uri = CGImageMetadataTagCopyNamespace(tag) as String? {
+            box.namespaces.append((prefix, uri))
+        }
         if let value = CGImageMetadataTagCopyValue(tag) as? String {
-            box.dict[xmpKey(path as String)] = trimPadding(value)
+            box.tags.append((path as String, trimPadding(value)))
         } else if let value = CGImageMetadataTagCopyValue(tag) as? NSNumber {
-            box.dict[xmpKey(path as String)] = value.stringValue
+            box.tags.append((path as String, value.stringValue))
         }
         return true
     }
-    return box.dict
+    return xmpKeys(box.tags, namespaces: box.namespaces)
+}
+
+// MARK: - XMP 的键：前缀按命名空间 URI 定
+
+// XMP 里一个命名空间由 URI 认，前缀只是文件里的简写。ImageIO 读 XMP 时标准 URI 一律用它自己的
+// 标准前缀；文件声明的前缀已被别的 URI 占着时改叫 `前缀_1_`、`前缀_2_`……而要不要加、加几，
+// 取决于同一进程里同时还有哪些 XMP 对象（批量并发时同一个文件读两次可能拿到不同的前缀）。
+// 所以键里的前缀不用 ImageIO 给的，由 URI 定（xmpKeyPrefixes）。
+
+/// 命名空间 URI → 键里用的标准前缀：ImageIO 公开的十个命名空间（kCGImageMetadataNamespace* 与
+/// kCGImageMetadataPrefix*），加上规则里引用到而不在其中的 MicrosoftPhoto、iio（URI 是 ImageIO
+/// 读 `Tests/fixture --ms-rating` 的样本时报出的命名空间）。规则里写的每个 XMP 前缀都必须在这里：
+/// 不在的话那条规则认的就是「恰好叫这个名字的任何命名空间」。
+let standardXMPPrefixes: [String: String] = {
+    let pairs: [(CFString, CFString)] = [
+        (kCGImageMetadataNamespaceExif, kCGImageMetadataPrefixExif),
+        (kCGImageMetadataNamespaceExifAux, kCGImageMetadataPrefixExifAux),
+        (kCGImageMetadataNamespaceExifEX, kCGImageMetadataPrefixExifEX),
+        (kCGImageMetadataNamespaceDublinCore, kCGImageMetadataPrefixDublinCore),
+        (kCGImageMetadataNamespaceIPTCCore, kCGImageMetadataPrefixIPTCCore),
+        (kCGImageMetadataNamespaceIPTCExtension, kCGImageMetadataPrefixIPTCExtension),
+        (kCGImageMetadataNamespacePhotoshop, kCGImageMetadataPrefixPhotoshop),
+        (kCGImageMetadataNamespaceTIFF, kCGImageMetadataPrefixTIFF),
+        (kCGImageMetadataNamespaceXMPBasic, kCGImageMetadataPrefixXMPBasic),
+        (kCGImageMetadataNamespaceXMPRights, kCGImageMetadataPrefixXMPRights),
+    ]
+    var table = Dictionary(uniqueKeysWithValues: pairs.map { ($0.0 as String, $0.1 as String) })
+    table["http://ns.microsoft.com/photo/1.0/"] = "MicrosoftPhoto"
+    table["http://ns.apple.com/ImageIO/1.0/"] = "iio"
+    return table
+}()
+
+/// ImageIO 给的前缀去掉末尾所有的 `_数字_`（可能叠了几层）：`photoshop_1__1_` → `photoshop`，
+/// `_1_` → 空串。`_` 之间至少一位 ASCII 数字才算。
+func xmpPrefixBase(_ prefix: String) -> String {
+    var scalars = Array(prefix.unicodeScalars)
+    while scalars.last == "_" {
+        var i = scalars.count - 2
+        while i >= 0, scalars[i].isASCII, ("0"..."9").contains(scalars[i]) { i -= 1 }
+        guard i >= 0, i < scalars.count - 2, scalars[i] == "_" else { break }
+        scalars.removeSubrange(i...)
+    }
+    var base = ""
+    base.unicodeScalars.append(contentsOf: scalars)
+    return base
+}
+
+/// 键里写 URI 时的转义：URI 的 UTF-8 字节里，ASCII 字母、数字和 `-._~` 原样，其余（含 `%`、
+/// `/`、`:`、`[`、`]`、`{`、`}`、空格、控制字符、非 ASCII）一律写成 `%XX`（大写十六进制）。
+/// 不同的 URI 得出不同的结果；结果里没有键的语法用到的 `/`、`:`、`[`、`]`、`{`、`}`。
+func escapedXMPNamespace(_ uri: String) -> String {
+    let hex = Array("0123456789ABCDEF")
+    var out = ""
+    for byte in uri.utf8 {
+        let c = Character(Unicode.Scalar(byte))
+        if byte < 0x80, c.isLetter || c.isNumber || "-._~".contains(c) {
+            out.append(c)
+        } else {
+            out += "%\(hex[Int(byte >> 4)])\(hex[Int(byte & 0xF)])"
+        }
+    }
+    return out
+}
+
+/// 一个文件的「ImageIO 给的前缀 → 键里用的前缀」。`namespaces` 是枚举到的每个标签的前缀与 URI。
+///
+/// 1. URI 在 standardXMPPrefixes 里 → 表里的标准前缀。
+/// 2. 不在 → 去掉 `_N_` 的基名（xmpPrefixBase）。基名是某个标准前缀、或这个文件里还有别的不在表里
+///    的 URI 落到同一个基名时，写成 `基名{转义过的 URI}`（escapedXMPNamespace），如
+///    `photoshop{http%3A%2F%2Fns.adobe.com%2Fphotoshop%2F1.1%2F}`；否则就是基名。
+///
+/// 同一个前缀报出不止一个 URI 时，分不清路径里那个前缀指哪一个，这个前缀不进表（路径里原样保留），
+/// 它的几个 URI 照样参与「同基名」的判断。
+func xmpKeyPrefixes(_ namespaces: [(prefix: String, uri: String)]) -> [String: String] {
+    // URI 一律按转义后的写法认：转义结果是 ASCII，不同的字节就是不同的 URI。
+    var urisByPrefix: [String: Set<String>] = [:]
+    var standardByEscaped: [String: String] = [:]
+    for (prefix, uri) in namespaces {
+        let escaped = escapedXMPNamespace(uri)
+        urisByPrefix[prefix, default: []].insert(escaped)
+        if let standard = standardXMPPrefixes[uri] { standardByEscaped[escaped] = standard }
+    }
+    let standardNames = Set(standardXMPPrefixes.values)
+    var urisByBase: [String: Set<String>] = [:]
+    for (prefix, uris) in urisByPrefix {
+        for uri in uris where standardByEscaped[uri] == nil {
+            urisByBase[xmpPrefixBase(prefix), default: []].insert(uri)
+        }
+    }
+    var result: [String: String] = [:]
+    for (prefix, uris) in urisByPrefix {
+        guard uris.count == 1, let uri = uris.first else { continue }
+        if let standard = standardByEscaped[uri] { result[prefix] = standard; continue }
+        let base = xmpPrefixBase(prefix)
+        let shared = standardNames.contains(base) || urisByBase[base, default: []].count > 1
+        result[prefix] = shared ? "\(base){\(uri)}" : base
+    }
+    return result
+}
+
+/// 把 ImageIO 的路径里的前缀换成键里用的前缀（`prefixes`，xmpKeyPrefixes 给的）。路径的每一段
+/// （开头，以及方括号外的每个 `.` 之后）如果以表里的某个前缀加 `:` 开头就换掉，几个都对得上时取最长
+/// 的；对不上的段原样保留。方括号里的下标（`[0]`、`[x-default]`）不动。
+func xmpKeyPath(_ path: String, prefixes: [String: String]) -> String {
+    guard !prefixes.isEmpty else { return path }
+    // 按 Unicode 标量逐个比，不按 String 的等价规则（那会把写法不同的两个前缀当成一个）。
+    let candidates = prefixes.map { (from: Array($0.key.unicodeScalars) + [":"], to: $0.value) }
+        .sorted { $0.from.count > $1.from.count }
+    let scalars = Array(path.unicodeScalars)
+    var out = String.UnicodeScalarView()
+    var i = 0, depth = 0, segmentStart = true
+    while i < scalars.count {
+        if segmentStart {
+            segmentStart = false
+            if let hit = candidates.first(where: { i + $0.from.count <= scalars.count
+                                                   && Array(scalars[i..<(i + $0.from.count)]) == $0.from }) {
+                out.append(contentsOf: hit.to.unicodeScalars)
+                out.append(":")
+                i += hit.from.count
+                continue
+            }
+        }
+        let c = scalars[i]
+        out.append(c)
+        if c == "[" { depth += 1 } else if c == "]" { depth = max(0, depth - 1) } else if c == ".", depth == 0 { segmentStart = true }
+        i += 1
+    }
+    return String(out)
+}
+
+/// 一组「路径 + 值」和这个文件的「前缀 → URI」→ 键空间里的 XMP 键（`XMP/` 开头）与值。纯函数，
+/// 单测直接喂。两条路径改写后撞成同一个键时取路径排在前面的那条，结果不随枚举顺序变。
+func xmpKeys(_ tags: [(path: String, value: String)],
+             namespaces: [(prefix: String, uri: String)]) -> [String: String] {
+    let prefixes = xmpKeyPrefixes(namespaces)
+    var result: [String: String] = [:]
+    let ordered = tags.map { (scalars: $0.path.unicodeScalars.map(\.value), tag: $0) }
+        .sorted { $0.scalars.lexicographicallyPrecedes($1.scalars) }
+    for (_, (path, value)) in ordered {
+        let key = xmpKey(xmpKeyPath(path, prefixes: prefixes))
+        if result[key] == nil { result[key] = value }
+    }
+    return result
 }
 
 /// 一个文件的全部元数据键空间，摊平成「键路径 → 值」。
