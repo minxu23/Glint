@@ -534,9 +534,11 @@ check("前缀里带点：整个前缀一起换", xmpKeyOf("a.b_1_:x", [("a", jt1
 check("几个前缀都对得上时取最长的", xmpKeyOf("a_1_:b_1_:x", [("a_1_", jt1), ("a_1_:b_1_", jt2)]), "XMP/a_1_:b:x")
 // URI 里有键的语法字符、空格、控制字符、非 ASCII：单射，键处理函数照常工作
 let oddURIs = ["u/a", "u%2Fa", "u:a", "u%3Aa", "u.a", "u[a]", "u{a}", "u a", "u\na", "u\u{1}a", "u\u{FF}a",
-               "u\u{FFFD}a", "u%25a", "u%a", "", "u]a[", "u}a{"]
+               "u\u{FFFD}a", "u%25a", "u%a", "", "u]a[", "u}a{", "u[1]/a", "u[1]"]
 let oddKeys = oddURIs.map { xmpKeyOf("photoshop_1_:City[3]", [("photoshop", psURI), ("photoshop_1_", $0)]) }
 check("URI 里的特殊字符：\(oddURIs.count) 个 URI 写成 \(oddURIs.count) 个不同的键", Set(oddKeys).count, oddURIs.count)
+check("URI 里的特殊字符：去掉下标之后仍是 \(oddURIs.count) 个不同的键",
+      Set(oddKeys.map(strippingAllArrayIndices)).count, oddURIs.count)
 let syntaxFree = oddKeys.allSatisfy { key in
     guard let open = key.firstIndex(of: "{"), let close = key.lastIndex(of: "}"), open < close else { return false }
     return !key[key.index(after: open)..<close].unicodeScalars.contains { !$0.isASCII || $0.value < 0x21 || "/:[]{}".unicodeScalars.contains($0) }
