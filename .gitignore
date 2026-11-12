@@ -1,5 +1,6 @@
 # 构建产物（Makefile 的 clean 目标清的就是这些）
 /jpeg2heif
+/吉光.app/
 /JPEG2HEIF.app/
 /Tests/fixture
 /Tests/probe

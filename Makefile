@@ -4,12 +4,19 @@ DEPLOY ?= $(shell uname -m)-apple-macos13.0
 SWIFTFLAGS ?= -O -swift-version 5 -target $(DEPLOY)
 
 BIN  := jpeg2heif
-APP  := JPEG2HEIF.app
+# 应用的名字（应用包名、Info.plist 的 CFBundleName / CFBundleDisplayName 都由它来）。
+# 改名只改这里和 Sources/GUI/AppName.swift。
+APP_NAME := 吉光
+APP  := $(APP_NAME).app
 CORE := $(wildcard Sources/Core/*.swift)
 CLI  := $(wildcard Sources/CLI/*.swift)
+# GUI_MODEL 是界面里不依赖 AppKit 的模型层，Tests/guimodel 直接链它。
 # GUI_LIB 是界面代码里不含入口的部分，截图工具要用自己的 main。
-GUI_LIB := Sources/GUI/MainViewController.swift Sources/GUI/Views.swift Sources/GUI/Model.swift
-GUI     := Sources/GUI/main.swift $(GUI_LIB)
+GUI_MODEL := Sources/GUI/Model.swift Sources/GUI/PhotoInfo.swift Sources/GUI/Library.swift \
+             Sources/GUI/ConversionRecord.swift Sources/GUI/Settings.swift Sources/GUI/AppName.swift
+GUI_VIEWS := $(filter-out Sources/GUI/main.swift $(GUI_MODEL),$(wildcard Sources/GUI/*.swift))
+GUI_LIB   := $(GUI_VIEWS) $(GUI_MODEL)
+GUI       := Sources/GUI/main.swift $(GUI_LIB)
 
 .PHONY: all cli app install install-cli install-app uninstall test run snapshot clean \
         print-artifacts
@@ -26,6 +33,8 @@ $(APP): $(CORE) $(GUI) Sources/GUI/Info.plist
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	$(SWIFTC) $(SWIFTFLAGS) -o $(APP)/Contents/MacOS/JPEG2HEIF $(CORE) $(GUI)
 	@cp Sources/GUI/Info.plist $(APP)/Contents/Info.plist
+	@plutil -insert CFBundleName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
+	@plutil -insert CFBundleDisplayName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
 	@codesign --force --sign - $(APP) 2>/dev/null || true
 	@touch $(APP)
 	@echo "已生成 $(APP)"
@@ -67,8 +76,8 @@ Tests/uisnapshot:    TOOL_SRC := $(GUI_LIB) Tests/snapshot/main.swift
 # 好断言命令行与界面的默认值没跑偏。
 Tests/unit-test:     TOOL_SRC := Sources/GUI/Model.swift Sources/CLI/Arguments.swift \
                                   Tests/harness.swift Tests/unit/main.swift
-# 界面模型的集成测试：只需 Core + Model（都不依赖 AppKit）。
-Tests/guimodel-test: TOOL_SRC := Sources/GUI/Model.swift Tests/harness.swift Tests/guimodel/main.swift
+# 界面模型的测试：只需 Core + 模型层（都不依赖 AppKit）。
+Tests/guimodel-test: TOOL_SRC := $(GUI_MODEL) Tests/harness.swift Tests/guimodel/main.swift Tests/guimodel/browsing.swift
 Tests/mangle-tool:   TOOL_SRC := Tests/mangle/main.swift
 
 $(TEST_TOOLS): $(CORE) $$(TOOL_SRC)

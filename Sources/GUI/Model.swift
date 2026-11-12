@@ -38,6 +38,10 @@ struct FileRow {
     var note = ""
     var tagCount = 0
     var xattrCount = 0
+    /// 以下三项照抄 ConversionReport，信息栏的「转换结果」一组显示；没有就是 nil。
+    var rawExif: RawExifOutcome?
+    var reencode: Reencode?
+    var caption: CaptionOutcome?
     /// 列表里同时存在多个来源文件夹时置位，副标题才带上来源名——
     /// 只拖进一个文件夹时带上它纯属噪声。
     var showsRoot = false
@@ -80,11 +84,16 @@ struct FileRow {
 final class ConversionModel {
     /// 状态有任何变化时在主线程回调，视图据此刷新。
     var onChange: (() -> Void)?
+    /// 某一行的状态变了（开始转、转完）时在主线程回调，先于 onChange。
+    /// 视图据此只刷新那一张图，不必整个重载。
+    var onRowChange: ((FileRow) -> Void)?
 
     private(set) var rows: [FileRow] = []
     private(set) var isRunning = false
     private(set) var completedCount = 0
     private(set) var warning: String?
+    /// 最近一次跑批是被取消的（结束时还有没转的行）。开始下一批时清掉。
+    private(set) var wasCancelled = false
 
     // MARK: 设置项
 
@@ -163,6 +172,20 @@ final class ConversionModel {
         excluded = []
         completedCount = 0
         warning = nil
+        notify()
+    }
+
+    /// 换上新的一批：清掉旧的行，按给定的 Job 建行。界面每次从转换面板开始都走这里——
+    /// Job 由调用方算好，带着来源根目录，输出到指定文件夹时 Core 据此镜像子目录。
+    /// 转换进行中不换。
+    func replaceJobs(_ jobs: [Job]) {
+        guard !isRunning else { return }
+        roots = []
+        excluded = []
+        rows = jobs.map { FileRow(job: $0) }
+        warning = nil
+        wasCancelled = false
+        recount()
         notify()
     }
 
@@ -247,6 +270,7 @@ final class ConversionModel {
         cancellation = token
         isRunning = true
         warning = nil
+        wasCancelled = false
         notify()
 
         let jobs = targets.map(\.job)
@@ -265,6 +289,7 @@ final class ConversionModel {
                 for i in self.rows.indices where self.rows[i].status == .running {
                     self.rows[i].status = .pending
                 }
+                self.wasCancelled = token.isCancelled && self.rows.contains { $0.status == .pending }
                 self.recount()
                 self.notify()
             }
@@ -280,6 +305,7 @@ final class ConversionModel {
     private func mark(_ job: Job, _ status: RowStatus) {
         guard let i = index(of: job) else { return }
         rows[i].status = status
+        onRowChange?(rows[i])
         notify()
     }
 
@@ -295,12 +321,16 @@ final class ConversionModel {
             rows[i].tagCount = r.tagCount
             rows[i].xattrCount = r.xattrCount
             rows[i].verification = r.verification
+            rows[i].rawExif = r.rawExif
+            rows[i].reencode = r.reencode
+            rows[i].caption = r.caption
         case .skipped(let why):
             rows[i].status = .skipped(why)
         case .failed(let why):
             rows[i].status = .failed(why)
         }
         recount()
+        onRowChange?(rows[i])
         notify()
     }
 }

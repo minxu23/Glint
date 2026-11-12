@@ -2,10 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>JPEG 转 HEIF</string>
-	<key>CFBundleDisplayName</key>
-	<string>JPEG 转 HEIF</string>
 	<key>CFBundleExecutable</key>
 	<string>JPEG2HEIF</string>
 	<key>CFBundleIdentifier</key>

@@ -272,4 +272,8 @@ if growing.count == 1 {
     fail("「变大」目录里应当恰好有一张 --noise 夹具（实际 \(growing.count) 张）")
 }
 
+// MARK: - 9. 图库、条目信息、转换的对象、转换记录、设置
+
+runBrowsingTests(work: work)
+
 finish("界面模型测试")
