@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=454
-EXPECTED_UNIT=631
+EXPECTED_ASSERTIONS=456
+EXPECTED_UNIT=638
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1148,6 +1148,7 @@ done <<'EOF'
 UNICODE备注|备注：带合规头的中文备注
 中英混排|鲁汶市政厅 City Hall 2024
 ASCII开头的中文|Leuven 鲁汶 City Hall 市政厅
+大端无BOM带emoji|🎉拍照😀好看👍今天天气很好适合出门啊啊
 EOF
 while IFS='|' read -r name value; do
     ./Tests/fixture "$z/$name.jpg" >/dev/null
@@ -1159,7 +1160,7 @@ done <<'EOF'
 EOF
 cp test_pic/IMG_1225.JPG "$z/IMG_1225.jpg"
 cp test_pic/P1130939.JPG "$z/P1130939.jpg"
-for name in 普通 UNICODE备注 中英混排 ASCII开头的中文 纯ASCII 尾部NUL填充 尾部空格填充 IMG_1225 P1130939; do
+for name in 普通 UNICODE备注 中英混排 ASCII开头的中文 大端无BOM带emoji 纯ASCII 尾部NUL填充 尾部空格填充 IMG_1225 P1130939; do
     expect_no_comment_line "零噪声 $name" "$z/$name.jpg"
 done
 

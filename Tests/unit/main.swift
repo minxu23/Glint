@@ -1538,6 +1538,26 @@ let longComment = String(repeating: "长", count: 70)
 check("可靠：差别在显示截断之后，注明从第几个字符起不同",
       originalIssues(Array((longComment + "甲").utf8), Array((longComment + "乙").utf8)),
       ["变化 备注 UserComment 的原文：\(truncate(longComment)) → \(truncate(longComment))（显示相同，第 71 个字符起不同）"])
+// UNICODE 头没有 BOM 的源：字节序没有声明，产物等于大端、小端两种解法里任何一种都算一致。
+// 产物取「ImageIO 按大端读出、带 BOM 写回」的样子。
+func imageIOBigEndianRewrite(_ body: [UInt8]) -> [UInt8] {
+    let seen = String(bytes: body, encoding: .utf16BigEndian)!
+    return unicodeHead + [0xFE, 0xFF] + utf16Bytes(seen, bigEndian: true) + [0, 0, 0, 0]
+}
+let noBOMSources: [(String, [UInt8])] = [
+    ("大端无 BOM + emoji", utf16Bytes("🎉拍照😀好看👍今天", bigEndian: true)),
+    ("小端无 BOM + 中文", utf16Bytes("鲁汶市政厅", bigEndian: false)),
+    ("大端无 BOM + 纯中文", utf16Bytes("鲁汶市政厅", bigEndian: true)),
+]
+for (name, body) in noBOMSources {
+    check("\(name)：产物是 ImageIO 按大端读出再带 BOM 写回的，不报",
+          originalIssues(unicodeHead + body, imageIOBigEndianRewrite(body)), [])
+    let other = originalIssues(unicodeHead + body, unicodeHead + [0xFE, 0xFF] + utf16Bytes("别的文字", bigEndian: true))
+    check("\(name)：产物文本与两种解法都不同，报一行原文变化",
+          other.count == 1 && other[0].hasPrefix("变化 备注 UserComment 的原文：") && other[0].hasSuffix(" → 别的文字"), true)
+}
+check("产物一侧是没有 BOM 的 UNICODE：两种解法里有一种与源相等就不报",
+      originalIssues(luWenNoHead, unicodeHead + utf16Bytes("鲁汶市政厅", bigEndian: false)), [])
 check("猜的：产物的值字节与源逐字节相同，不报",
       [originalIssues(gbkXiHu, gbkXiHu), originalIssues(asciiHead + gbkXiHu, asciiHead + gbkXiHu)], [[], []])
 check("猜的：产物换成 UNICODE 写的 Latin-1 猜测串，报换了写法",
