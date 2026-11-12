@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=587
-EXPECTED_UNIT=727
+EXPECTED_ASSERTIONS=599
+EXPECTED_UNIT=829
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1481,6 +1481,50 @@ for name in 普通 no-exif-offset lossy rich-xmp no-text IMG_1225 P1130939; do
             fail "零噪声 $name${flags:+（$flags）}：没校验，或报了这一轮的行"; sed 's/^/     /' <<< "$out"
         fi
     done
+done
+
+round "7q. XMP 的键按命名空间认，不按 ImageIO 临时给的前缀"
+# 富 XMP 的样本改出四种：photoshop 前缀配两种非标准 URI（p1、p2），jt 前缀配两种 URI（j1 原样、j2）。
+# ImageIO 给前缀时，前缀被别的 URI 占着就改叫 `前缀_N_`，要不要加、加几取决于同一进程里同时还有
+# 哪些 XMP 对象；并发转换时源读一次、产物读一次可能拿到不同的前缀。键按 URI 定才对得上。
+N="$WORK/命名空间"
+mkdir -p "$N/源"
+./Tests/fixture --rich-xmp "$N/源/j1.jpg" >/dev/null
+for n in 1 2; do
+    cp "$N/源/j1.jpg" "$N/源/p$n.jpg"
+    make_sample ./Tests/mangle-tool --replace "$N/源/p$n.jpg" \
+        'xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"' "xmlns:photoshop=\"http://ns.adobe.com/photoshop/1.$n/\""
+done
+cp "$N/源/j1.jpg" "$N/源/j2.jpg"
+make_sample ./Tests/mangle-tool --replace "$N/源/j2.jpg" \
+    'xmlns:jt="http://example.com/jpeg2heif/test/1.0/"' 'xmlns:jt="http://example.com/jpeg2heif/test/2.0/"'
+ps_key() { printf 'XMP/photoshop{http%%3A%%2F%%2Fns.adobe.com%%2Fphotoshop%%2F1.%s%%2F}:City' "$1"; }
+# 1. 确定性的见证：非标准 URI 借用标准前缀的那张单独转。键里带 URI，产物上同一个键同值；
+#    URI 换成另一个的那张，产物上没有这个键。
+mkdir -p "$N/单张"
+cp "$N/源/p1.jpg" "$N/源/p2.jpg" "$N/源/j2.jpg" "$N/单张/"
+out=$("$BIN" -v --verify "$N/单张/p1.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "借用标准前缀的命名空间：单独转，校验通过" || { fail "借用标准前缀的命名空间：单独转，校验报了差异"; sed 's/^/     /' <<< "$out"; }
+check "借用标准前缀的命名空间：源的键带 URI" "$(./Tests/probe "$N/单张/p1.jpg" "$(ps_key 1)")" "杭州"
+check_same "借用标准前缀的命名空间：产物上同一个键同值" \
+    "$(./Tests/probe "$N/单张/p1.heic" "$(ps_key 1)")" "$(./Tests/probe "$N/单张/p1.jpg" "$(ps_key 1)")"
+"$BIN" "$N/单张/p2.jpg" >/dev/null 2>&1 || fail "p2 转换失败"
+check "URI 不同的那张：自己的键读得出" "$(./Tests/probe "$N/单张/p2.heic" "$(ps_key 2)")" "杭州"
+check "URI 不同的那张：产物上没有 p1 的键" "$(./Tests/probe "$N/单张/p2.heic" "$(ps_key 1)")" "<无>"
+check "jt 前缀配另一个 URI：键仍是 XMP/jt:Custom" "$(./Tests/probe "$N/单张/j2.jpg" 'XMP/jt:Custom')" "自定义命名空间的值"
+# 2. 并发见证：四种各 10 份，-j 18 跑 3 批，每一批每一张都校验通过、都整块照搬。
+for b in 1 2 3; do
+    mkdir -p "$N/批$b"
+    for i in $(seq 1 10); do for v in p1 p2 j1 j2; do cp "$N/源/$v.jpg" "$N/批$b/${v}_$i.jpg"; done; done
+    out=$("$BIN" -v --verify -j 18 "$N/批$b" 2>&1)
+    ok=$(grep -c "元数据校验通过" <<< "$out")
+    check "并发第 $b 批：40 张都校验通过" "$ok" "40"
+    [ "$ok" = 40 ] || grep -E "丢失|变化" <<< "$out" | sort | uniq -c | sed 's/^/     /'
+    carried=$(grep -cE "^    EXIF 整块照搬（[0-9]+ 字节）$" <<< "$out")
+    check "并发第 $b 批：40 张都整块照搬" "$carried" "40"
+    [ "$carried" = 40 ] || grep -F "EXIF 没有照搬" <<< "$out" | sort | uniq -c | sed 's/^/     /'
+    rm -rf "$N/批$b"
 done
 
 round "8. 界面模型：指定输出文件夹与取消"

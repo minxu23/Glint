@@ -480,6 +480,122 @@ check("承载字段的下标按数字排", carrierValues("XMP/dc:subject",
 check("嵌套的子字段不算这个字段的值", carrierValues("XMP/dc:subject",
       in: ["XMP/dc:subject[0]/x": "a"]), [])
 
+print("XMP 的键：前缀按命名空间 URI 定，不按 ImageIO 临时给的前缀")
+// ImageIO 给的前缀（要不要加 `_N_`、N 是几）同一个文件读两次可能不同；键由 URI 定才对得上。
+let psURI = "http://ns.adobe.com/photoshop/1.0/"
+let ps11 = "http://ns.adobe.com/photoshop/1.1/", ps12 = "http://ns.adobe.com/photoshop/1.2/"
+let jt1 = "http://example.com/jpeg2heif/test/1.0/", jt2 = "http://example.com/jpeg2heif/test/2.0/"
+let dcURI = "http://purl.org/dc/elements/1.1/"
+func xmpKeySpace(_ tags: [(String, String)], _ ns: [(String, String)]) -> [String: String] {
+    xmpKeys(tags.map { (path: $0.0, value: $0.1) }, namespaces: ns.map { (prefix: $0.0, uri: $0.1) })
+}
+/// 单个路径改写后的键；`ns` 是这个文件的「ImageIO 给的前缀 → URI」。
+func xmpKeyOf(_ path: String, _ ns: [(String, String)]) -> String {
+    let space = xmpKeySpace([(path, "值")], ns)
+    return space.count == 1 ? space.keys.first! : "<\(space.count) 个键>"
+}
+// 标准命名空间
+check("标准 URI 配标准前缀：键不变", xmpKeyOf("photoshop:City", [("photoshop", psURI)]), "XMP/photoshop:City")
+check("标准 URI 配别的前缀（photoshoq）：用标准前缀", xmpKeyOf("photoshoq:City", [("photoshoq", psURI)]), "XMP/photoshop:City")
+check("标准 URI 配加了 _N_ 的前缀：用标准前缀", xmpKeyOf("dc_1_:title[x-default]", [("dc_1_", dcURI)]),
+      "XMP/dc:title[x-default]")
+// 自定义前缀：几种 _N_ 配同一个 URI 是同一个键
+for p in ["jt", "jt_1_", "jt_2_", "jt_1__1_"] {
+    check("自定义前缀 \(p) 配同一个 URI → XMP/jt:Custom", xmpKeyOf("\(p):Custom", [(p, jt1)]), "XMP/jt:Custom")
+}
+check("自定义前缀：同一文件里别的命名空间不影响它", xmpKeyOf("jt_1_:Custom", [("jt_1_", jt1), ("lr", "http://ns.adobe.com/lightroom/1.0/")]),
+      "XMP/jt:Custom")
+// 非标准 URI 借用标准前缀：带 URI，且不等于标准字段的键
+let borrowed11 = "XMP/photoshop{http%3A%2F%2Fns.adobe.com%2Fphotoshop%2F1.1%2F}:City"
+for p in ["photoshop", "photoshop_1_", "photoshop_2_", "photoshop_1__1_"] {
+    check("非标准 URI 借用标准前缀（\(p)）→ 带 URI 的同一个键",
+          xmpKeyOf("\(p):City", p == "photoshop" ? [(p, ps11)] : [("photoshop", psURI), (p, ps11)]), borrowed11)
+}
+let borrowed12 = xmpKeyOf("photoshop_1_:City", [("photoshop", psURI), ("photoshop_1_", ps12)])
+check(borrowed12 != borrowed11, "借用标准前缀的两个不同 URI → 不同的键（\(borrowed12)）")
+check(![borrowed11, borrowed12].contains("XMP/photoshop:City"), "借用标准前缀的键都不等于 XMP/photoshop:City")
+// 同一文件里两个不在表里的 URI 同基名：都带 URI，互不相同
+let twoJT = xmpKeySpace([("jt:Custom", "甲"), ("jt_1_:Custom", "乙")], [("jt", jt1), ("jt_1_", jt2)])
+check("同基名的两个 URI 都带上 URI", twoJT,
+      ["XMP/jt{http%3A%2F%2Fexample.com%2Fjpeg2heif%2Ftest%2F1.0%2F}:Custom": "甲",
+       "XMP/jt{http%3A%2F%2Fexample.com%2Fjpeg2heif%2Ftest%2F2.0%2F}:Custom": "乙"])
+// 嵌套路径、数组下标、语言下标
+let mwgURI = "http://www.metadataworkinggroup.com/schemas/regions/", areaURI = "http://ns.adobe.com/xmp/sType/Area#"
+check("嵌套路径的每一段都换（其中两层的前缀被改名）",
+      xmpKeyOf("mwg-rs:Regions.mwg-rs_1_:RegionList[0].mwg-rs:Area.stArea_1_:x",
+               [("mwg-rs", mwgURI), ("mwg-rs_1_", mwgURI), ("stArea_1_", areaURI)]),
+      "XMP/mwg-rs:Regions.mwg-rs:RegionList[0].mwg-rs:Area.stArea:x")
+check("ImageIO 实际的嵌套写法（只有第一段带前缀）",
+      xmpKeyOf("mwg-rs_2_:Regions.RegionList[0].Name", [("mwg-rs_2_", mwgURI)]), "XMP/mwg-rs:Regions.RegionList[0].Name")
+check("方括号里的东西不动", xmpKeyOf("jt_1_:Bag[jt_1_:x.jt_1_:y]", [("jt_1_", jt1)]), "XMP/jt:Bag[jt_1_:x.jt_1_:y]")
+check("路径里的前缀不在表里：原样保留", xmpKeyOf("zz_1_:x", [("jt_1_", jt1)]), "XMP/zz_1_:x")
+check("同一个前缀报出两个 URI：分不清，原样保留", xmpKeyOf("jt_1_:x", [("jt_1_", jt1), ("jt_1_", jt2)]), "XMP/jt_1_:x")
+check("前缀里带点：整个前缀一起换", xmpKeyOf("a.b_1_:x", [("a", jt1), ("a.b_1_", jt2)]), "XMP/a.b:x")
+check("几个前缀都对得上时取最长的", xmpKeyOf("a_1_:b_1_:x", [("a_1_", jt1), ("a_1_:b_1_", jt2)]), "XMP/a_1_:b:x")
+// URI 里有键的语法字符、空格、控制字符、非 ASCII：单射，键处理函数照常工作
+let oddURIs = ["u/a", "u%2Fa", "u:a", "u%3Aa", "u.a", "u[a]", "u{a}", "u a", "u\na", "u\u{1}a", "u\u{FF}a",
+               "u\u{FFFD}a", "u%25a", "u%a", "", "u]a[", "u}a{"]
+let oddKeys = oddURIs.map { xmpKeyOf("photoshop_1_:City[3]", [("photoshop", psURI), ("photoshop_1_", $0)]) }
+check("URI 里的特殊字符：\(oddURIs.count) 个 URI 写成 \(oddURIs.count) 个不同的键", Set(oddKeys).count, oddURIs.count)
+let syntaxFree = oddKeys.allSatisfy { key in
+    guard let open = key.firstIndex(of: "{"), let close = key.lastIndex(of: "}"), open < close else { return false }
+    return !key[key.index(after: open)..<close].unicodeScalars.contains { !$0.isASCII || $0.value < 0x21 || "/:[]{}".unicodeScalars.contains($0) }
+}
+check(syntaxFree, "转义过的 URI 里没有 / : [ ] { }、空白、控制字符、非 ASCII")
+for (uri, key) in zip(oddURIs, oddKeys) {
+    let base = xmpKeyOf("photoshop_1_:City", [("photoshop", psURI), ("photoshop_1_", uri)])
+    let shown = uri.debugDescription
+    check(strippingAllArrayIndices(key) == base && strippingArrayIndex(key) == base,
+          "URI \(shown)：去掉下标得到同一字段的键")
+    check("URI \(shown)：carrierValues 认得出这个字段的各个值", carrierValues(base, in: [key: "杭州"]), ["杭州"])
+    check(makerNoteGroup(of: key) == nil && !isIgnoredKey(key) && ReconciledGroup(viewKey: key) == nil,
+          "URI \(shown)：不是 MakerNote、不被忽略、不属于说明作者版权三组")
+}
+check("标准 dc 配别的前缀：仍属于说明那一组",
+      ReconciledGroup(viewKey: xmpKeyOf("dcx:description[x-default]", [("dcx", dcURI)])), .description)
+check("非标准 URI 借用 dc 前缀：不属于说明那一组",
+      ReconciledGroup(viewKey: xmpKeyOf("dc_1_:description[x-default]", [("dc", dcURI), ("dc_1_", jt1)])), nil)
+let iioURI = "http://ns.apple.com/ImageIO/1.0/"
+check(isIgnoredKey(xmpKeyOf("iio_1_:hasIIM", [("iio_1_", iioURI)])), "ImageIO 的标记配了别的前缀：照样不比")
+check(!isIgnoredKey(xmpKeyOf("iio:hasIIM", [("iio", jt1)])), "非标准 URI 借用 iio 前缀：要比，不当 ImageIO 的标记")
+check("非标准 URI 借用 MicrosoftPhoto 前缀：承载不了 RatingPercent",
+      windowsTagLosses([0x4749: "99"], after: xmpKeySpace([("MicrosoftPhoto:Rating", "99")], [("MicrosoftPhoto", jt1)]), destRaw: [:]),
+      ["丢失 Windows 评级百分比 RatingPercent（IFD0 0x4749） = 99"])
+// 表：规则里引用到的每个前缀都在表里，认的是它的 URI
+for (prefix, uri) in [("dc", dcURI), ("exif", "http://ns.adobe.com/exif/1.0/"), ("photoshop", psURI),
+                      ("tiff", "http://ns.adobe.com/tiff/1.0/"), ("xmp", "http://ns.adobe.com/xap/1.0/"),
+                      ("MicrosoftPhoto", "http://ns.microsoft.com/photo/1.0/"), ("iio", iioURI)] {
+    check("标准表：规则里的前缀 \(prefix) 认 \(uri)", standardXMPPrefixes[uri], prefix)
+}
+check("标准表：ImageIO 公开的十个命名空间都在", [kCGImageMetadataNamespaceExif, kCGImageMetadataNamespaceExifAux,
+      kCGImageMetadataNamespaceExifEX, kCGImageMetadataNamespaceDublinCore, kCGImageMetadataNamespaceIPTCCore,
+      kCGImageMetadataNamespaceIPTCExtension, kCGImageMetadataNamespacePhotoshop, kCGImageMetadataNamespaceTIFF,
+      kCGImageMetadataNamespaceXMPBasic, kCGImageMetadataNamespaceXMPRights].filter { standardXMPPrefixes[$0 as String] == nil }.count, 0)
+// 键空间比对：同 URI、前缀不同 → 无差异；URI 不同 → 报丢失
+check("键空间比对：源 jt:、产物 jt_1_:（同 URI）→ 无差异",
+      keySpaceDiff(before: xmpKeySpace([("jt:Custom", "值")], [("jt", jt1)]),
+                   after: xmpKeySpace([("jt_1_:Custom", "值")], [("jt_1_", jt1)])), [])
+check("键空间比对：源 photoshop_1_:、产物 photoshop_2_:（同 URI）→ 无差异",
+      keySpaceDiff(before: xmpKeySpace([("photoshop_1_:City", "杭州")], [("photoshop", psURI), ("photoshop_1_", ps11)]),
+                   after: xmpKeySpace([("photoshop_2_:City", "杭州")], [("photoshop", psURI), ("photoshop_2_", ps11)])), [])
+check("键空间比对：URI 不同 → 报丢失",
+      keySpaceDiff(before: xmpKeySpace([("photoshop_1_:City", "杭州")], [("photoshop", psURI), ("photoshop_1_", ps11)]),
+                   after: xmpKeySpace([("photoshop_1_:City", "杭州")], [("photoshop", psURI), ("photoshop_1_", ps12)])),
+      ["丢失 \(borrowed11) = 杭州"])
+check("键空间比对：借用标准前缀的不能由真正的 photoshop:City 承载",
+      keySpaceDiff(before: xmpKeySpace([("photoshop:City", "杭州")], [("photoshop", ps11)]),
+                   after: xmpKeySpace([("photoshop:City", "杭州")], [("photoshop", psURI)])), ["丢失 \(borrowed11) = 杭州"])
+// 健壮性：任意前缀、URI、路径不崩
+for (input, want) in [("", ""), ("_", "_"), ("_1_", ""), ("_1__1__1_", ""), ("jt__", "jt__"), ("jt_x_", "jt_x_"),
+                      ("jt_１_", "jt_１_"), ("jt_12_", "jt"), ("jt_1", "jt_1")] {
+    checkRule(input, xmpPrefixBase(input), want, "基名去掉末尾的 _数字_")
+}
+let long = String(repeating: "_1_", count: 3000), longURI = String(repeating: "\u{FF}/", count: 3000)
+let messy = xmpKeySpace([("", "空"), (":", "冒号"), ("[[[", "括号"), ("]].", "反括号"), ("\(long):x", "长"),
+                         ("..", "点"), (":x", "空前缀")],
+                        [("", ""), (long, longURI), ("", jt1), ("x", ""), ("y", longURI)])
+check("畸形的前缀、URI、路径：不崩，每条路径一个键", messy.count, 7)
+
 print("原始字节读取器：残缺、越界的输入不崩，读不出就照实说")
 func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8(v >> 8 & 0xFF)] }
 func le32(_ v: Int) -> [UInt8] { le16(v & 0xFFFF) + le16(v >> 16 & 0xFFFF) }
