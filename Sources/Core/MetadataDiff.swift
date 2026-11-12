@@ -696,6 +696,93 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
         + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
                              isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
         + unportablePhotoshopResources(in: bytes)
+        + extendedAttributeIssues(source: source.path, dest: dest.path)
+}
+
+// MARK: - 扩展属性
+
+/// 一个文件上全部扩展属性的「名字 → 值」；属性列表读不出、或列出来的某个属性的值读不出是 nil。
+func extendedAttributes(_ path: String) -> [String: [UInt8]]? {
+    guard let names = extendedAttributeNames(path) else { return nil }
+    var result: [String: [UInt8]] = [:]
+    for name in names {
+        guard let value = extendedAttributeValue(path, name) else { return nil }
+        result[name] = value
+    }
+    return result
+}
+
+/// 扩展属性核对：读两边的扩展属性交给 extendedAttributeDiff。任何一边读不出是一行「无法核对扩展属性」。
+func extendedAttributeIssues(source: String, dest: String) -> [String] {
+    guard let s = extendedAttributes(source) else { return ["无法核对扩展属性：读不出源文件的扩展属性"] }
+    guard let d = extendedAttributes(dest) else { return ["无法核对扩展属性：读不出产物的扩展属性"] }
+    return extendedAttributeDiff(source: s, product: d)
+}
+
+/// 有人看得懂的名字的扩展属性：名字，和把值解成文本的办法（解不出是 nil）。
+let namedXattrs: [String: (label: String, decode: ([UInt8]) -> String?)] = [
+    "com.apple.assetsd.description": ("「照片」的说明", { String(validatingUTF8Bytes: $0) }),
+    "com.apple.metadata:kMDItemFinderComment": ("访达备注", { plistValue($0) as? String }),
+    "com.apple.metadata:_kMDItemUserTags": ("访达标签", { bytes in
+        // 每个标签是「名字」或「名字\n颜色编号」，显示时去掉颜色编号。
+        guard let tags = plistValue(bytes) as? [String] else { return nil }
+        return tags.map { $0.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? $0 }
+            .joined(separator: "、")
+    }),
+]
+
+/// 扩展属性的值是二进制（或 XML）plist 时解出来的对象；解不出是 nil。
+func plistValue(_ bytes: [UInt8]) -> Any? {
+    try? PropertyListSerialization.propertyList(from: Data(bytes), options: [], format: nil)
+}
+
+extension String {
+    /// 字节是合法的 UTF-8 时的文本，否则 nil（不像 String(decoding:) 那样替换成 U+FFFD）。
+    init?(validatingUTF8Bytes bytes: [UInt8]) {
+        guard let s = String(bytes: bytes, encoding: .utf8) else { return nil }
+        self = s
+    }
+}
+
+/// 扩展属性的差异：源上的每一个属性，除了转换时本来就不拷的（skippedXattrs），产物上必须有同名、
+/// 值逐字节相同的一份。产物上多出来的不报。纯函数，单测直接喂字典。
+///
+/// - 产物上没有：`丢失 扩展属性 <名字>（N 字节）`；
+/// - 值不同：`变化 扩展属性 <名字>（N 字节 → M 字节）`，等长时加上从第几个字节（从 1 数）起不同。
+/// namedXattrs 里的三种换成人看得懂的名字并显示值；值解不出时照旧只报字节数。
+func extendedAttributeDiff(source: [String: [UInt8]], product: [String: [UInt8]]) -> [String] {
+    var issues: [String] = []
+    for (name, value) in source.sorted(by: { $0.key < $1.key }) where !skippedXattrs.contains(name) {
+        let other = product[name]
+        if other == value { continue }
+        func sizes() -> String {
+            guard let other else { return "\(value.count) 字节" }
+            var text = "\(value.count) 字节 → \(other.count) 字节"
+            if value.count == other.count, let k = (0..<value.count).first(where: { value[$0] != other[$0] }) {
+                text += "，第 \(k + 1) 个字节起不同"
+            }
+            return text
+        }
+        let verb = other == nil ? "丢失" : "变化"
+        guard let named = namedXattrs[name], let text = named.decode(value) else {
+            let label = namedXattrs[name].map { "\($0.label)（扩展属性 \(name)，" } ?? "扩展属性 \(name)（"
+            issues.append("\(verb) \(label)\(sizes())）")
+            continue
+        }
+        let head = "\(verb) \(named.label)（扩展属性 \(name)）"
+        guard let other else {
+            issues.append("\(head)= \(truncate(text))")
+            continue
+        }
+        guard let otherText = named.decode(other) else {
+            issues.append("\(head)：\(truncate(text)) → （\(sizes())，解不出）")
+            continue
+        }
+        var line = "\(head)：\(truncate(text)) → \(truncate(otherText))"
+        if truncate(text) == truncate(otherText) { line += "（显示相同，\(sizes())）" }
+        issues.append(line)
+    }
+    return issues
 }
 
 /// 照搬过的产物，EXIF 必须与源逐字节相同，或者恰好是源的备注改写。

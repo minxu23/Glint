@@ -93,7 +93,10 @@ jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
    `xmp:Label`、`lr:hierarchicalSubject`、`dc:title` 的各个语言、人脸区域的
    `Name`、`xmpMM:*` 和自定义命名空间，也包括扩展 XMP 段里的内容。
 3. **文件层元数据** —— 创建时间、修改时间、POSIX 权限，以及全部扩展属性
-   （访达备注 `kMDItemFinderComment`、访达标签 `kMDItemUserTags` 等）。
+   （「照片」App 的说明 `com.apple.assetsd.description` 和别的 `com.apple.assetsd.*`、
+   访达备注 `kMDItemFinderComment`、访达标签 `kMDItemUserTags` 等），只有隔离标记
+   `com.apple.quarantine` 和资源分支 `com.apple.ResourceFork` 不拷。扩展属性由 `--verify`
+   逐个核对（见「`--verify` 到底比什么」）。
    相册类 App 在 EXIF 缺失时会回退到文件时间，所以这一层同样影响"拍摄时间"。
 
 ICC 色彩描述文件和图像方向也一并保留。CMYK 的 JPEG 例外：产物会变成 RGB、
@@ -366,6 +369,29 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   `0x0425`（IPTC 摘要，`0x0404` 的校验和）和两个缩略图资源 `0x0409`、`0x040C`
   （见下面的有意忽略）。资源块里解析不了的数据（长度越界、不以 `8BIM` 开头）
   按字节数计入同一行。
+
+**扩展属性逐个核对。** 「照片」App 的说明、访达备注、标签都不在图像文件里，存在文件的
+扩展属性里，拷贝失败或目标文件系统不存扩展属性时它们就没了，元数据比对看不见。所以源上
+的每一个扩展属性，产物上必须有同名、值逐字节相同的一份：
+
+- 产物上没有：`丢失 扩展属性 <名字>（N 字节）`；
+- 值不同：`变化 扩展属性 <名字>（N 字节 → M 字节）`，两边等长时加上「第 K 个字节起不同」（K 从 1 数）。
+- 三种换成人看得懂的名字并显示值（截断规则同别处）：`com.apple.assetsd.description` 是
+  「「照片」的说明」，值按 UTF-8 文本显示；`com.apple.metadata:kMDItemFinderComment` 是
+  「访达备注」，值是二进制 plist 里的字符串；`com.apple.metadata:_kMDItemUserTags` 是
+  「访达标签」，值是 plist 里的标签名（去掉颜色编号，用「、」连起来）。例如
+  `丢失 「照片」的说明（扩展属性 com.apple.assetsd.description）= 西湖日落`、
+  `变化 访达标签（扩展属性 com.apple.metadata:_kMDItemUserTags）：红色、工作 → 工作`。
+  值解不出时照旧只报字节数，如 `丢失 访达备注（扩展属性 com.apple.metadata:kMDItemFinderComment，12 字节）`；
+  变化后的值解不出时写 `（N 字节 → M 字节，解不出）`；截断后两边显示一样时补上字节数。
+- 不比的只有转换时本来就不拷的那两个：`com.apple.quarantine`（隔离标记，产物是本机新写的
+  文件）、`com.apple.ResourceFork`（资源分支）。拷贝和核对用的是同一份清单
+  （[`skippedXattrs`](Sources/Core/Converter.swift)）。实测没有哪个扩展属性会在转换后被
+  系统改写：`FinderInfo`、`lastuseddate#PS`、`macl`、`provenance`、`kMDItemWhereFroms` 等
+  都原样拷过去。
+- 产物上多出来的属性不报（例如系统给新文件加的 `com.apple.provenance`，源上没有时）。
+- 源或产物的扩展属性读不出（属性列表或某个属性的值读不出，包括文件系统不支持扩展属性）时
+  报一行 `无法核对扩展属性：…`，不当作没有差异。
 
 有几类差异会被有意忽略，因为它们描述的是文件本身而非照片内容：
 

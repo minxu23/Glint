@@ -186,27 +186,42 @@ func propertiesForHEIFWriter(_ properties: [CFString: Any]) -> [CFString: Any] {
 
 // MARK: - 文件层元数据（时间戳 / 权限 / 扩展属性）
 
-/// 不应该跟着复制到新文件上的扩展属性。
+/// 不应该跟着复制到新文件上的扩展属性。转换时不拷、--verify 也不核对（extendedAttributeIssues），
+/// 两处用的都是这一份。
 let skippedXattrs: Set<String> = ["com.apple.quarantine", "com.apple.ResourceFork"]
 
-func copyExtendedAttributes(from src: String, to dst: String) -> Int {
-    let size = listxattr(src, nil, 0, XATTR_NOFOLLOW)
-    guard size > 0 else { return 0 }
+/// `path` 上的扩展属性名，按 listxattr 给出的顺序；listxattr 出错（含文件系统不支持扩展属性）
+/// 或两次读到的长度不一致是 nil。没有扩展属性是空数组。
+func extendedAttributeNames(_ path: String) -> [String]? {
+    let size = listxattr(path, nil, 0, XATTR_NOFOLLOW)
+    guard size >= 0 else { return nil }
+    guard size > 0 else { return [] }
     var namebuf = [CChar](repeating: 0, count: size)
-    guard listxattr(src, &namebuf, size, XATTR_NOFOLLOW) == size else { return 0 }
-
-    var copied = 0
+    guard listxattr(path, &namebuf, size, XATTR_NOFOLLOW) == size else { return nil }
+    var names: [String] = []
     var start = 0
     for i in 0..<size where namebuf[i] == 0 {
         defer { start = i + 1 }
         guard i > start else { continue }
-        let name = String(cString: Array(namebuf[start..<i]) + [0])
-        if skippedXattrs.contains(name) { continue }
-        let vlen = getxattr(src, name, nil, 0, 0, XATTR_NOFOLLOW)
-        guard vlen >= 0 else { continue }
-        var value = [UInt8](repeating: 0, count: max(vlen, 1))
-        guard getxattr(src, name, &value, vlen, 0, XATTR_NOFOLLOW) == vlen else { continue }
-        if setxattr(dst, name, value, vlen, 0, XATTR_NOFOLLOW) == 0 { copied += 1 }
+        names.append(String(cString: Array(namebuf[start..<i]) + [0]))
+    }
+    return names
+}
+
+/// `path` 上名为 `name` 的扩展属性的值；读不出是 nil。
+func extendedAttributeValue(_ path: String, _ name: String) -> [UInt8]? {
+    let vlen = getxattr(path, name, nil, 0, 0, XATTR_NOFOLLOW)
+    guard vlen >= 0 else { return nil }
+    var value = [UInt8](repeating: 0, count: max(vlen, 1))
+    guard getxattr(path, name, &value, vlen, 0, XATTR_NOFOLLOW) == vlen else { return nil }
+    return Array(value.prefix(vlen))
+}
+
+func copyExtendedAttributes(from src: String, to dst: String) -> Int {
+    var copied = 0
+    for name in extendedAttributeNames(src) ?? [] where !skippedXattrs.contains(name) {
+        guard let value = extendedAttributeValue(src, name) else { continue }
+        if setxattr(dst, name, value, value.count, 0, XATTR_NOFOLLOW) == 0 { copied += 1 }
     }
     return copied
 }

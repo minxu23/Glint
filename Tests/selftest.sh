@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=457
-EXPECTED_UNIT=640
+EXPECTED_ASSERTIONS=465
+EXPECTED_UNIT=664
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -214,6 +214,50 @@ check_same "修改时间一致" \
 check_same "访达备注保留" \
     "$(xattr -p com.apple.metadata:kMDItemFinderComment "$WORK/照片.heic" 2>/dev/null)" \
     "$(xattr -p com.apple.metadata:kMDItemFinderComment "$WORK/照片.jpg" 2>/dev/null)"
+
+round "3b. 扩展属性进校验"
+# 「照片」的说明、访达备注、访达标签（后两个按访达的写法存成二进制 plist）和一个自定义属性。
+# 产物上四个都得在、值逐字节相同，校验通过；校验也核对它们（单测逐条钉着报法）。
+mkdir -p "$WORK/扩展属性"
+XA="$WORK/扩展属性/带属性.jpg"
+cp "$WORK/照片.jpg" "$XA"
+# 把一段 plist 的 XML 转成二进制，写成扩展属性 $1 到文件 $2。
+xattr_plist() {
+    plutil -convert binary1 -o "$WORK/扩展属性/tmp.plist" - <<< "$3" \
+        && xattr -wx "$1" "$(xxd -p "$WORK/扩展属性/tmp.plist" | tr -d '\n')" "$2"
+}
+PL_HEAD='<?xml version="1.0" encoding="UTF-8"?><plist version="1.0">'
+make_sample xattr -w com.apple.assetsd.description "西湖日落，和外婆一起" "$XA"
+make_sample xattr_plist com.apple.metadata:kMDItemFinderComment "$XA" "$PL_HEAD<string>访达里的备注</string></plist>"
+make_sample xattr_plist com.apple.metadata:_kMDItemUserTags "$XA" "$PL_HEAD<array><string>红色
+6</string><string>旅行</string></array></plist>"
+make_sample xattr -w user.jpeg2heif.custom "自定义的值" "$XA"
+XATTRS4='com.apple.assetsd.description
+com.apple.metadata:kMDItemFinderComment
+com.apple.metadata:_kMDItemUserTags
+user.jpeg2heif.custom'
+cp "$XA" "$WORK/扩展属性/删源.jpg"
+xa_out=$("$BIN" --verify -v "$XA" 2>&1)
+grep -q "元数据校验通过" <<< "$xa_out" \
+    && pass "带四个扩展属性：校验通过" \
+    || { fail "带四个扩展属性：校验报了差异"; sed 's/^/     /' <<< "$xa_out"; }
+while IFS= read -r name; do
+    check_same "产物上有 $name，值逐字节相同" \
+        "$(xattr -px "$name" "${XA%.jpg}.heic" 2>/dev/null)" "$(xattr -px "$name" "$XA" 2>/dev/null)"
+done <<< "$XATTRS4"
+"$BIN" --delete-original "$WORK/扩展属性/删源.jpg" >/dev/null 2>&1
+[ -f "$WORK/扩展属性/删源.heic" ] && [ ! -e "$WORK/扩展属性/删源.jpg" ] \
+    && pass "扩展属性都在：--delete-original 删了源" || fail "扩展属性都在，却没删源或没产出 .heic"
+# 隔离标记转换时不拷，校验也不核对它。
+QA="$WORK/扩展属性/隔离.jpg"
+cp "$WORK/照片.jpg" "$QA"
+make_sample xattr -w com.apple.quarantine "0081;00000000;Safari;" "$QA"
+qa_out=$("$BIN" --verify "$QA" 2>&1); st=$?
+grep -q "元数据校验通过" <<< "$qa_out" \
+    && pass "源带隔离标记：校验不报" \
+    || { fail "源带隔离标记：校验报了差异"; sed 's/^/     /' <<< "$qa_out"; }
+refute "源带隔离标记：产物上没有隔离标记" "$st" \
+    sh -c 'xattr -p com.apple.quarantine "$1" >/dev/null 2>&1' _ "${QA%.jpg}.heic"
 
 round "4. 指定文件夹批量转换"
 cp "$WORK/照片.jpg" "$WORK/相册/a.jpg"

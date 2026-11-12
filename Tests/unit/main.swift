@@ -1770,6 +1770,110 @@ check("-v 那一行：两次一样大", Reencode(first: 2048, second: 2048).desc
 check("-v 那一行：第二遍失败", Reencode(first: 2048, second: nil).description,
       "产物比原图大，重编了一次：2.0 KB → 重编失败（用了第一份）")
 
+print("扩展属性核对：纯函数")
+func binaryPlist(_ object: Any) -> [UInt8] {
+    [UInt8]((try? PropertyListSerialization.data(fromPropertyList: object, format: .binary, options: 0)) ?? Data())
+}
+let xDescription = "com.apple.assetsd.description"
+let xComment = "com.apple.metadata:kMDItemFinderComment"
+let xTags = "com.apple.metadata:_kMDItemUserTags"
+let xattrSource: [String: [UInt8]] = [
+    xDescription: Array("西湖日落".utf8),
+    xComment: binaryPlist("访达里的备注"),
+    xTags: binaryPlist(["红色\n6", "工作"]),
+    "user.custom": Array("abcdef".utf8),
+    "com.apple.quarantine": Array("0081;00000000;Safari;".utf8),
+    "com.apple.ResourceFork": [1, 2, 3],
+]
+let xattrCopied = xattrSource.filter { !skippedXattrs.contains($0.key) }
+func withXattr(_ name: String, _ value: [UInt8]?) -> [String: [UInt8]] {
+    var d = xattrCopied
+    d[name] = value
+    return d
+}
+check("同名同值、被跳过的两个产物上没有：不报", extendedAttributeDiff(source: xattrSource, product: xattrCopied), [])
+check("产物多一个属性：不报",
+      extendedAttributeDiff(source: xattrSource, product: withXattr("user.extra", [9])), [])
+check("没有名字的属性丢了", extendedAttributeDiff(source: xattrSource, product: withXattr("user.custom", nil)),
+      ["丢失 扩展属性 user.custom（6 字节）"])
+check("等长改了一个字节：注明从第几个字节起不同",
+      extendedAttributeDiff(source: xattrSource, product: withXattr("user.custom", Array("abcXef".utf8))),
+      ["变化 扩展属性 user.custom（6 字节 → 6 字节，第 4 个字节起不同）"])
+check("长度变了", extendedAttributeDiff(source: xattrSource, product: withXattr("user.custom", Array("abc".utf8))),
+      ["变化 扩展属性 user.custom（6 字节 → 3 字节）"])
+check("「照片」的说明丢了：显示说明的文本",
+      extendedAttributeDiff(source: xattrSource, product: withXattr(xDescription, nil)),
+      ["丢失 「照片」的说明（扩展属性 com.apple.assetsd.description）= 西湖日落"])
+check("「照片」的说明变了",
+      extendedAttributeDiff(source: xattrSource, product: withXattr(xDescription, Array("西湖日出".utf8))),
+      ["变化 「照片」的说明（扩展属性 com.apple.assetsd.description）：西湖日落 → 西湖日出"])
+check("访达备注丢了：显示 plist 里的字符串",
+      extendedAttributeDiff(source: xattrSource, product: withXattr(xComment, nil)),
+      ["丢失 访达备注（扩展属性 com.apple.metadata:kMDItemFinderComment）= 访达里的备注"])
+check("访达标签丢了：显示标签名，去掉颜色编号",
+      extendedAttributeDiff(source: xattrSource, product: withXattr(xTags, nil)),
+      ["丢失 访达标签（扩展属性 com.apple.metadata:_kMDItemUserTags）= 红色、工作"])
+check("访达标签变了", extendedAttributeDiff(source: xattrSource, product: withXattr(xTags, binaryPlist(["工作"]))),
+      ["变化 访达标签（扩展属性 com.apple.metadata:_kMDItemUserTags）：红色、工作 → 工作"])
+let rawComment: [String: [UInt8]] = [xComment: Array("不是 plist".utf8)]
+check("访达备注解不出：只报字节数", extendedAttributeDiff(source: rawComment, product: [:]),
+      ["丢失 访达备注（扩展属性 com.apple.metadata:kMDItemFinderComment，12 字节）"])
+check("产物上的访达备注解不出", extendedAttributeDiff(source: xattrSource, product: withXattr(xComment, [0xFF])),
+      ["变化 访达备注（扩展属性 com.apple.metadata:kMDItemFinderComment）：访达里的备注 → （\(xattrSource[xComment]!.count) 字节 → 1 字节，解不出）"])
+check("说明不是合法的 UTF-8：只报字节数",
+      extendedAttributeDiff(source: [xDescription: [0xE8, 0xA5]], product: [xDescription: [0xE8, 0xA6]]),
+      ["变化 「照片」的说明（扩展属性 com.apple.assetsd.description，2 字节 → 2 字节，第 2 个字节起不同）"])
+check("显示相同的长说明：补上字节数",
+      extendedAttributeDiff(source: [xDescription: Array((String(repeating: "长", count: 70) + "甲").utf8)],
+                            product: [xDescription: Array((String(repeating: "长", count: 70) + "乙").utf8)]),
+      ["变化 「照片」的说明（扩展属性 com.apple.assetsd.description）：\(String(repeating: "长", count: 60))… → "
+       + "\(String(repeating: "长", count: 60))…（显示相同，213 字节 → 213 字节，第 211 个字节起不同）"])
+check("属性列表读不出：报无法核对",
+      extendedAttributeIssues(source: "/不存在的路径/源.jpg", dest: "/不存在的路径/产物.heic"),
+      ["无法核对扩展属性：读不出源文件的扩展属性"])
+
+print("扩展属性核对：真实文件")
+// 转一张带扩展属性的图，再动产物上的属性，看 metadataDiff 报什么。
+let xattrRoot = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-xattr-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: xattrRoot, withIntermediateDirectories: true)
+let xattrJPEG = xattrRoot.appendingPathComponent("源.jpg")
+if let image = tinyJPEGSource().flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }),
+   let out = CGImageDestinationCreateWithURL(xattrJPEG as CFURL, "public.jpeg" as CFString, 1, nil) {
+    CGImageDestinationAddImage(out, image, nil)
+    _ = CGImageDestinationFinalize(out)
+}
+for (name, value) in xattrSource { _ = setxattr(xattrJPEG.path, name, value, value.count, 0, XATTR_NOFOLLOW) }
+check("前提：源上有给的 6 个扩展属性", extendedAttributes(xattrJPEG.path)?.filter { xattrSource[$0.key] != nil }, xattrSource)
+let xattrHEIC = xattrRoot.appendingPathComponent("产物.heic")
+if case .converted = convert(xattrJPEG, opts: ConversionOptions(), dest: xattrHEIC) {
+    pass("前提：转换成功")
+} else {
+    fail("前提：转换成功")
+}
+let xattrBaseline = metadataDiff(source: xattrJPEG, dest: xattrHEIC)
+check("转换后不报扩展属性（被跳过的两个产物上没有）", xattrBaseline.filter { $0.contains("扩展属性") }, [])
+/// 产物上的属性还原成源上会被拷的那些，再做 `edit`，返回 metadataDiff 比转换后多出来的行。
+func xattrIssuesAfter(_ edit: (String) -> Void) -> [String] {
+    for name in extendedAttributeNames(xattrHEIC.path) ?? [] { _ = removexattr(xattrHEIC.path, name, XATTR_NOFOLLOW) }
+    _ = copyExtendedAttributes(from: xattrJPEG.path, to: xattrHEIC.path)
+    edit(xattrHEIC.path)
+    return metadataDiff(source: xattrJPEG, dest: xattrHEIC).filter { !xattrBaseline.contains($0) }
+}
+func setX(_ path: String, _ name: String, _ value: [UInt8]) {
+    _ = setxattr(path, name, value, value.count, 0, XATTR_NOFOLLOW)
+}
+check("删掉一个：报丢失", xattrIssuesAfter { _ = removexattr($0, "user.custom", XATTR_NOFOLLOW) },
+      ["丢失 扩展属性 user.custom（6 字节）"])
+check("改一个字节：报变化", xattrIssuesAfter { setX($0, "user.custom", Array("abcdeF".utf8)) },
+      ["变化 扩展属性 user.custom（6 字节 → 6 字节，第 6 个字节起不同）"])
+check("改长度：报变化", xattrIssuesAfter { setX($0, "user.custom", Array("abcdefg".utf8)) },
+      ["变化 扩展属性 user.custom（6 字节 → 7 字节）"])
+check("删掉说明：那一行带着说明的文本", xattrIssuesAfter { _ = removexattr($0, xDescription, XATTR_NOFOLLOW) },
+      ["丢失 「照片」的说明（扩展属性 com.apple.assetsd.description）= 西湖日落"])
+check("产物多一个属性：不报", xattrIssuesAfter { setX($0, "user.extra", [1]) }, [])
+check("被跳过的两个只在源上：不报", xattrIssuesAfter { _ in }, [])
+try? FileManager.default.removeItem(at: xattrRoot)
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args) else { return nil }
