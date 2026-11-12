@@ -1642,6 +1642,77 @@ check("尺子不比的键新出现也不算", inconsistentKeys(before: sourceVie
 check("MakerNote 派生键丢失按键逐个算",
       inconsistentKeys(before: ["{MakerCanon}/a": "1", "{MakerCanon}/b": "2"], after: [:]), ["{MakerCanon}/a", "{MakerCanon}/b"])
 
+print("EXIF 文字标签的原文：去掉尾部填充后是合法的 UTF-8 才可靠")
+check("没有这个标签、全是填充：当作没有", [readExifText(nil), readExifText([]), readExifText([0, 0x20, 0x0A, 0])],
+      [ExifTextReading.absent, .absent, .absent])
+check("ASCII、UTF-8：可靠，去掉尾部的 NUL 与空白", [readExifText(Array("West Lake".utf8) + [0, 0x20, 0]),
+                                                  readExifText(Array("西湖日落 ".utf8))],
+      [ExifTextReading.reliable("West Lake"), .reliable("西湖日落")])
+check("Copyright 两段：中间的 NUL 照留，只去最尾部的",
+      readExifText(Array("摄影师".utf8) + [0] + Array("编辑者".utf8) + [0]), .reliable("摄影师\0编辑者"))
+check("GBK：不可靠，带去掉填充后的字节与值的全部字节数",
+      readExifText(gbkXiHu + [0, 0]), .unreliable(bytes: gbkXiHu, size: 6))
+let textTIFF = tiffLE([(0x010E, 2, 8, le32(8 + 2 + 3 * 12 + 4)), (0x013B, 2, 4, Array("Ann".utf8) + [0]),
+                       (0x8298, 2, 4, gbkXiHu)], tail: Array("Sunset ".utf8) + [0])
+check("从 IFD0 读出三组的原文",
+      exifTextOriginals(TIFFStructure(textTIFF, base: 0, length: textTIFF.count)),
+      [.description: .reliable("Sunset"), .artist: .reliable("Ann"), .copyright: .unreliable(bytes: gbkXiHu, size: 4)])
+check("没有 EXIF：三组都没有", exifTextOriginals(nil), [.description: .absent, .artist: .absent, .copyright: .absent])
+
+print("照搬自检的放行：新退步的键属于说明、作者、版权之一，且照搬后等于 EXIF 原文")
+let keptOriginals: [ReconciledGroup: ExifTextReading] =
+    [.description: .reliable("西湖日落"), .artist: .reliable("测试作者"), .copyright: .reliable("(C) 2024")]
+for (key, value, group) in [("{TIFF}/ImageDescription", "西湖日落", ReconciledGroup.description),
+                            ("{IPTC}/Caption/Abstract", "西湖日落", .description),
+                            ("XMP/dc:description[x-default]", "西湖日落", .description),
+                            ("{TIFF}/Artist", "测试作者", .artist), ("{IPTC}/Byline[0]", "测试作者", .artist),
+                            ("XMP/dc:creator[0]", "测试作者", .artist),
+                            ("{TIFF}/Copyright", "(C) 2024", .copyright), ("{IPTC}/CopyrightNotice", "(C) 2024", .copyright),
+                            ("XMP/dc:rights[x-default]", "(C) 2024", .copyright)] {
+    checkRule(key, exifOriginalKept(key: key, value: value, originals: keptOriginals), group, "属于该组且等于 EXIF 原文：放行")
+}
+for (key, value, why) in [("{TIFF}/ImageDescription", "IIM 的说明", "等于别的值：不放行"),
+                          ("XMP/dc:creator[0]", "西湖日落", "等于别组的原文：不放行"),
+                          ("{IPTC}/Byline[1]", "IIM 作者", "带下标的键等于别的值：不放行"),
+                          ("{Exif}/DateTimeOriginal", "西湖日落", "不属于任何组：不放行"),
+                          ("{TIFF}/ImageDescriptionX", "西湖日落", "名字里含组的键不算：不放行"),
+                          ("XMP/dc:description[x-default]/x", "西湖日落", "下标后面还有子路径不算：不放行")] {
+    checkRule(key, exifOriginalKept(key: key, value: value, originals: keptOriginals), nil, why)
+}
+check("照搬后读不出：不放行", exifOriginalKept(key: "{TIFF}/Artist", value: nil, originals: keptOriginals), nil)
+check("EXIF 原文不可靠（GBK）、没有：不放行",
+      [exifOriginalKept(key: "{TIFF}/ImageDescription", value: "Î÷ºþ",
+                        originals: [.description: .unreliable(bytes: gbkXiHu, size: 4)]),
+       exifOriginalKept(key: "{TIFF}/ImageDescription", value: "", originals: [.description: .absent])],
+      [ReconciledGroup?.none, nil])
+let split = splitRegressions(["{TIFF}/Copyright", "XMP/dc:description[x-default]", "{TIFF}/ImageDescription",
+                              "{Exif}/DateTimeOriginal", "{IPTC}/Byline[0]"],
+                             afterView: ["{TIFF}/Copyright": "(C) 2024", "XMP/dc:description[x-default]": "西湖日落",
+                                         "{TIFF}/ImageDescription": "西湖日落", "{Exif}/DateTimeOriginal": "2024:09:15 10:42:07",
+                                         "{IPTC}/Byline[0]": "别人"],
+                             originals: keptOriginals)
+check("放行的归到组、按说明/作者/版权的顺序，其余是真退步",
+      [split.blocking == ["{Exif}/DateTimeOriginal", "{IPTC}/Byline[0]"], split.kept == [.description, .copyright]],
+      [true, true])
+check("-v 那一行写明哪几组保留了 EXIF 的原值，与备注改写可以同时出现",
+      [RawExifOutcome.carried(bytes: 786, commentRewritten: false, keptOriginals: [.description, .artist]).description,
+       RawExifOutcome.carried(bytes: 786, commentRewritten: true, keptOriginals: [.copyright]).description,
+       RawExifOutcome.carried(bytes: 786, commentRewritten: false).description],
+      ["EXIF 整块照搬（786 字节；说明、作者与 IPTC 不一致，保留 EXIF 的原值）",
+       "EXIF 整块照搬（786 字节，备注改写成 ImageIO 读得出的写法；版权与 IPTC 不一致，保留 EXIF 的原值）",
+       "EXIF 整块照搬（786 字节）"])
+var exifTextCrashes = 0
+for _ in 0..<5000 {
+    var t = textTIFF
+    for _ in 0...carryRandom(4) { t[carryRandom(t.count)] = UInt8(carryRandom(256)) }
+    let originals = exifTextOriginals(TIFFStructure(Array(t.prefix(carryRandom(t.count + 1))), base: 0,
+                                                    length: max(0, carryRandom(t.count + 1))))
+    let raw = (0..<carryRandom(12)).map { _ in UInt8(carryRandom(256)) }
+    if case .reliable(let s) = readExifText(raw), s.isEmpty { exifTextCrashes += 1 }
+    _ = exifOriginalKept(key: "{TIFF}/Artist", value: String(decoding: raw, as: UTF8.self), originals: originals)
+}
+check("改坏的 TIFF、随机字节 5000 组不崩，可靠的原文从不为空", exifTextCrashes, 0)
+
 print("{FileContents} 里的编码参数：按去掉下标后的完整键路径认")
 check(isFileContentsEncodingKey("{FileContents}/Images[0]/ChromaSubsampling"), "主图的色度抽样忽略")
 check(isFileContentsEncodingKey("{FileContents}/Images[12]/ChromaSubsampling"), "任何一张主图的色度抽样都忽略")

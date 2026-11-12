@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=511
-EXPECTED_UNIT=682
+EXPECTED_ASSERTIONS=537
+EXPECTED_UNIT=708
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1340,6 +1340,77 @@ caption_skipped 空白 "没有说明"
 ./Tests/fixture --no-text "$C/不是UTF8.jpg" >/dev/null
 make_sample xattr -wx "$CAPX" "E8A5BFE6" "$C/不是UTF8.jpg"
 caption_skipped 不是UTF8 "不是合法的 UTF-8"
+
+round "7p. EXIF 与 IPTC 打架的照片也整块照搬"
+# ImageIO 读 JPEG 时用 IIM 的值调和说明、作者、版权：IIM 摘要对不上时视图显示 IIM 的值，系统重写
+# 把它写进产物的 EXIF。默认路径照搬，保留 EXIF 的原值，产物视图里显示的就是 EXIF 的原值。
+# 样本是普通夹具只改 IIM（mangle --iim），别处不动，IIM 摘要于是对不上。夹具里 IIM 的说明本来
+# 就与 EXIF 的不同（「IPTC 备注字段」），作者相同，没有版权。
+P="$WORK/打架"
+mkdir -p "$P"
+EXIF_DESC="西湖日落 sunset at West Lake" EXIF_ARTIST="测试作者" EXIF_CR="(C) 2024 测试"
+# 用法：conflict_sample 名字 IIM 改法...（造 $P/名字.jpg，另拷一份 $P/名字-重写.jpg 留给 --no-raw-exif）
+conflict_sample() {
+    local f="$P/$1.jpg"; shift
+    ./Tests/fixture "$f" >/dev/null || fail "造不出样本：$f"
+    make_sample ./Tests/mangle-tool --iim "$f" "$@"
+    cp "$f" "${f%.jpg}-重写.jpg"
+}
+# 用法：expect_kept_original 描述 文件 组 键=EXIF 的原值...（两条断言，另加每个键一条）
+# 默认路径走 -v --delete-original，输出留在 KEPT_OUT、退出码留在 KEPT_ST。
+expect_kept_original() {
+    local what=$1 f=$2 groups=$3 ref="${2%.jpg}-源副本.jpg" kv; shift 3
+    cp "$f" "$ref"
+    KEPT_OUT=$("$BIN" -v --delete-original "$f" 2>&1); KEPT_ST=$?
+    grep -qE "^    EXIF 整块照搬（[0-9]+ 字节；${groups}与 IPTC 不一致，保留 EXIF 的原值）$" <<< "$KEPT_OUT" \
+        && pass "$what：照搬了，-v 说${groups}保留 EXIF 的原值" \
+        || { fail "$what：没照搬，或 -v 没说保留了哪几组"; sed 's/^/     /' <<< "$KEPT_OUT"; }
+    check "$what：产物的 EXIF 与源逐字节相同" "$(./Tests/probe --exif-same "$ref" "${f%.jpg}.heic")" "相同"
+    for kv in "$@"; do
+        check "$what：产物里 ${kv%%=*} 是 EXIF 的原值" "$(./Tests/probe "${f%.jpg}.heic" "${kv%%=*}")" "${kv#*=}"
+    done
+}
+# 1. 只有说明打架。
+conflict_sample 说明 "2:120=IIM 里改过的说明"
+check "说明：前提，源的 {TIFF}/ImageDescription 是 IIM 那份" \
+    "$(./Tests/probe "$P/说明.jpg" '{TIFF}/ImageDescription')" "IIM 里改过的说明"
+expect_kept_original "说明" "$P/说明.jpg" "说明" "{TIFF}/ImageDescription=$EXIF_DESC"
+# 2. 作者打架、版权打架（IIM 的说明改成与 EXIF 相同，只剩这一组打架），三组一起打架。
+conflict_sample 作者 "2:120=$EXIF_DESC" "2:80=IIM 作者"
+check "作者：前提，源的 {TIFF}/Artist 是 IIM 那份、说明不打架" \
+    "$(./Tests/probe "$P/作者.jpg" '{TIFF}/Artist')|$(./Tests/probe "$P/作者.jpg" '{TIFF}/ImageDescription')" \
+    "IIM 作者|$EXIF_DESC"
+expect_kept_original "作者" "$P/作者.jpg" "作者" "{TIFF}/Artist=$EXIF_ARTIST" "{IPTC}/Byline[0]=$EXIF_ARTIST"
+conflict_sample 版权 "2:120=$EXIF_DESC" "2:116=IIM 版权"
+check "版权：前提，源的 {TIFF}/Copyright 是 IIM 那份、说明不打架" \
+    "$(./Tests/probe "$P/版权.jpg" '{TIFF}/Copyright')|$(./Tests/probe "$P/版权.jpg" '{TIFF}/ImageDescription')" \
+    "IIM 版权|$EXIF_DESC"
+expect_kept_original "版权" "$P/版权.jpg" "版权" "{TIFF}/Copyright=$EXIF_CR" "XMP/dc:rights[x-default]=$EXIF_CR"
+conflict_sample 三组 "2:120=IIM 说明" "2:80=IIM 作者" "2:116=IIM 版权"
+expect_kept_original "三组" "$P/三组.jpg" "说明、作者、版权" \
+    "{TIFF}/ImageDescription=$EXIF_DESC" "{TIFF}/Artist=$EXIF_ARTIST" "{TIFF}/Copyright=$EXIF_CR"
+# 3. IIM 声明 UTF-8 的 1:90 去掉：ImageIO 把 IIM 读成乱码，EXIF 里是好的中文。
+conflict_sample 乱码 "1:90"
+seen=$(./Tests/probe "$P/乱码.jpg" '{TIFF}/Artist')
+case "$seen" in
+    ""|"<无>"|"<无法读取>"|"$EXIF_ARTIST") fail "乱码：前提，源的 {TIFF}/Artist 是乱码（实际 [$seen]）" ;;
+    *) pass "乱码：前提，源的 {TIFF}/Artist 是乱码" ;;
+esac
+expect_kept_original "乱码" "$P/乱码.jpg" "说明、作者" "{TIFF}/ImageDescription=$EXIF_DESC" "{TIFF}/Artist=$EXIF_ARTIST"
+# 5. 不放行的。EXIF 的说明是 GBK 字节（原文不可靠）又与 IIM 打架：ImageIO 读 HEIC 时不认这种说明，
+#    照搬后视图照旧显示 XMP 里 IIM 那份，没有退步，照搬了，也没有放行哪一组。
+conflict_sample GBK说明 "2:120=IIM 里改过的说明"
+make_sample ./Tests/mangle-tool --tags "$P/GBK说明.jpg" 'ifd0:010E:ascii=\xCE\xF7\xBA\xFE'
+cp "$P/GBK说明.jpg" "$P/GBK说明-重写.jpg"
+out=$("$BIN" -v --verify "$P/GBK说明.jpg" 2>&1)
+grep -qE "^    EXIF 整块照搬（[0-9]+ 字节）$" <<< "$out" \
+    && pass "GBK 说明：照搬了，没有放行哪一组" || { fail "GBK 说明：没照搬，或说了保留 EXIF 的原值"; sed 's/^/     /' <<< "$out"; }
+#    说明打架之外另有一个键退步（两条 0x9286 的无前缀备注改写不了，照搬后 ImageIO 读不出）：照旧退回。
+conflict_sample 另有退步 "2:120=IIM 里改过的说明"
+make_sample ./Tests/mangle-tool --tags "$P/另有退步.jpg" "exif:9286:undef=$NOTE" "exif:9286:undef=$NOTE"
+out=$("$BIN" -v --verify "$P/另有退步.jpg" 2>&1)
+grep -qF "EXIF 没有照搬：照搬后 {Exif}/UserComment 会读不出" <<< "$out" \
+    && pass "另有退步：照旧退回系统重写，-v 说的是备注" || { fail "另有退步：照搬了，或原因不对"; sed 's/^/     /' <<< "$out"; }
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

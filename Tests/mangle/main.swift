@@ -34,6 +34,11 @@
 //       `exif:A420:ascii@7FFFFFF0=0123456789abcdef`）。
 //   mangle --8bim <文件.jpg> <资源号十六进制> <内容>
 //       往 APP13 Photoshop 资源块末尾追加一个 8BIM 资源，内容是 <内容> 的 UTF-8 字节。
+//   mangle --iim <文件.jpg> <记录>:<数据集>[=<值>]...
+//       改写 APP13 Photoshop 段里 IPTC（8BIM 0x0404）资源的数据集，别的资源（含 IIM 摘要
+//       0x0425）不动——摘要于是对不上，ImageIO 改用 IIM 的值去调和说明、作者、版权。
+//       `2:120=新说明` 把这个数据集换成新值（有几条同号的只留第一条的位置；没有就加在最后），
+//       `1:90` 不带 `=` 是删掉这个数据集的全部条目。值的写法同 --tags（`\0`、`\xHH`）。
 //   mangle --color-gainmap <文件.jpg>
 //       把 MPF 登记的第一张附加图像（ISO 增益图）换成 3 通道的 JPEG：解码出原来的单通道
 //       增益图，三个通道分别取它的 1、3/4、1/3 倍重新编码，保留原增益图 JPEG 的 APPn 段
@@ -61,6 +66,7 @@ let usage = """
       mangle --ifd0 <文件.jpg> <标签十六进制>=<值>...
       mangle --tags <文件.jpg> <ifd0|exif|gps>:<标签十六进制>:<ascii|undef|short|long|rational|none>=<值>...
       mangle --8bim <文件.jpg> <资源号十六进制> <内容>
+      mangle --iim <文件.jpg> <记录>:<数据集>[=<值>]...
       mangle --color-gainmap <文件.jpg>
       mangle --graft-aux <文件.jpg> <提供辅助图的.jpg>
 """
@@ -76,7 +82,7 @@ let mode = first.hasPrefix("--") ? first : ""
 let rest = mode.isEmpty ? args : Array(args.dropFirst())
 let expected = ["": 2, "--replace": 3, "--segment": 3, "--append": 2, "--unicode-comment": 2, "--strip-trailer": 1, "--8bim": 3,
                 "--color-gainmap": 1, "--graft-aux": 2]
-if mode == "--ifd0" || mode == "--tags" {
+if mode == "--ifd0" || mode == "--tags" || mode == "--iim" {
     guard rest.count >= 2 else { die(usage, 2) }
 } else {
     guard let want = expected[mode], rest.count == want else { die(usage, 2) }
@@ -294,6 +300,71 @@ func appendPhotoshopResource(id: Int, content: [UInt8]) {
     print("追加了 8BIM 资源 0x\(String(format: "%04X", id))（\(size) 字节）")
 }
 
+/// `--iim` 的改写，见文件头。
+func rewriteIIM(_ specs: [String]) {
+    let photoshopID: [UInt8] = Array("Photoshop 3.0".utf8) + [0]
+    guard let segment = JPEGLayout(bytes)?.segments
+        .last(where: { $0.marker == 0xED && $0.begins(with: photoshopID, in: bytes) })
+    else { die("这张图里没有 APP13 Photoshop 段") }
+    var payload = Array(bytes[segment.payload])
+    // 找 0x0404：8BIM、资源号、Pascal 名（连长度字节补到偶数）、4 字节大端长度、内容（补到偶数）。
+    var i = photoshopID.count
+    var found: (start: Int, contentAt: Int, size: Int)?
+    while i + 12 <= payload.count, Array(payload[i..<(i + 4)]) == Array("8BIM".utf8) {
+        let id = Int(payload[i + 4]) << 8 | Int(payload[i + 5])
+        var nameLength = Int(payload[i + 6]) + 1
+        if nameLength % 2 == 1 { nameLength += 1 }
+        let sizeAt = i + 6 + nameLength
+        guard sizeAt + 4 <= payload.count else { break }
+        let size = payload[sizeAt..<(sizeAt + 4)].reduce(0) { $0 << 8 | Int($1) }
+        let contentAt = sizeAt + 4
+        guard contentAt + size <= payload.count else { break }
+        if id == 0x0404 { found = (i, contentAt, size); break }
+        i = contentAt + size + size % 2
+    }
+    guard let found else { die("APP13 段里没有 IPTC（0x0404）资源") }
+    let content = Array(payload[found.contentAt..<(found.contentAt + found.size)])
+    // 数据集：0x1C、记录号、数据集号、2 字节大端长度、值。
+    var datasets: [(record: Int, dataset: Int, value: [UInt8])] = []
+    var k = 0
+    while k + 5 <= content.count, content[k] == 0x1C {
+        let length = Int(content[k + 3]) << 8 | Int(content[k + 4])
+        guard length < 0x8000, k + 5 + length <= content.count else { die("IIM 里有扩展长度或越界的数据集，改不了") }
+        datasets.append((Int(content[k + 1]), Int(content[k + 2]), Array(content[(k + 5)..<(k + 5 + length)])))
+        k += 5 + length
+    }
+    for spec in specs {
+        let parts = spec.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        let head = parts[0].split(separator: ":")
+        guard head.count == 2, let r = Int(head[0]), let d = Int(head[1]), (0...255).contains(r), (0...255).contains(d)
+        else { die("数据集写成 <记录>:<数据集>[=<值>]：\(spec)") }
+        let first = datasets.firstIndex { $0.record == r && $0.dataset == d }
+        if parts.count == 2 {
+            let value = unescapedBytes(String(parts[1]))
+            guard value.count < 0x8000 else { die("值太长：\(spec)") }
+            if let first {
+                datasets[first].value = value
+                datasets = datasets.enumerated().filter { $0.offset == first || !($0.element.record == r && $0.element.dataset == d) }.map(\.element)
+            } else {
+                datasets.append((r, d, value))
+            }
+        } else {
+            guard first != nil else { die("IIM 里没有数据集 \(r):\(d)") }
+            datasets.removeAll { $0.record == r && $0.dataset == d }
+        }
+    }
+    let rebuilt: [UInt8] = datasets.flatMap { (d) -> [UInt8] in [0x1C, UInt8(d.record), UInt8(d.dataset), UInt8(d.value.count >> 8), UInt8(d.value.count & 0xFF)] + d.value }
+    let size = rebuilt.count
+    let sizeAt = found.contentAt - 4
+    let oldEnd = min(found.contentAt + found.size + found.size % 2, payload.count)
+    let padding: [UInt8] = size % 2 == 1 ? [0] : []
+    let replacement: [UInt8] = [UInt8(size >> 24 & 0xFF), UInt8(size >> 16 & 0xFF), UInt8(size >> 8 & 0xFF), UInt8(size & 0xFF)]
+        + rebuilt + padding
+    payload.replaceSubrange(sizeAt..<oldEnd, with: replacement)
+    replacePayload(of: segment, with: payload)
+    print("改写了 IIM（\(found.size) → \(size) 字节）")
+}
+
 let mpfSegmentID: [UInt8] = Array("MPF".utf8) + [0]
 
 /// `data` 里的 MPF 段：段本身、段内 TIFF 头的位置、TIFF 结构和 MP 条目表的位置（相对 TIFF 头）。
@@ -406,6 +477,8 @@ case "--ifd0":
     ifd0Entries(Array(rest.dropFirst()))
 case "--tags":
     typedEntries(Array(rest.dropFirst()))
+case "--iim":
+    rewriteIIM(Array(rest.dropFirst()))
 case "--8bim":
     guard let id = Int(rest[1], radix: 16), (0...0xFFFF).contains(id) else { die("资源号写十六进制，如 0BB7") }
     appendPhotoshopResource(id: id, content: Array(rest[2].utf8))

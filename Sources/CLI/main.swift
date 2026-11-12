@@ -94,12 +94,7 @@ let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result 
         print(line)
         if opts.verbose {
             print("    元数据条目 \(r.tagCount) 项，扩展属性 \(r.xattrCount) 项")
-            switch r.rawExif {
-            case .carried(let bytes, let rewritten)?:
-                print("    EXIF 整块照搬（\(bytes) 字节\(rewritten ? "，备注改写成 ImageIO 读得出的写法" : "")）")
-            case .kept(let why)?: print("    EXIF 没有照搬：\(why)")
-            case nil: break
-            }
+            if let rawExif = r.rawExif { print("    \(rawExif.description)") }
             if let reencode = r.reencode { print("    \(reencode.description)") }
             if let caption = r.caption { print("    \(caption.description)") }
         }
