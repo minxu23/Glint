@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=537
-EXPECTED_UNIT=708
+EXPECTED_ASSERTIONS=587
+EXPECTED_UNIT=727
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -498,8 +498,11 @@ expect_reported "只改过 EXIF 时间" "$WORK/只改EXIF.jpg" "丢失 {IPTC}/Ti
 make_sample ./Tests/mangle-tool --replace "$WORK/只改IIM.jpg" "184207+0800" "104207+0000"
 check "前提：ImageIO 视图把 EXIF 拍摄时间调和成 IIM 的 10:42:07" \
     "$(./Tests/probe "$WORK/只改IIM.jpg" '{Exif}/DateTimeOriginal')" "2024:09:15 10:42:07"
+# IIM 摘要对不上，说明也按 IIM 调和：时间打架让照搬退回系统重写，EXIF 里的说明被换成 IIM 那份，
+# 两边视图相同，由说明的原文核对报出来。
 expect_reported "只改过 IIM 时间" "$WORK/只改IIM.jpg" \
-    "变化 {Exif}/DateTimeOriginal: 2024:09:15 18:42:07 → 2024:09:15 10:42:07"
+    "变化 {Exif}/DateTimeOriginal: 2024:09:15 18:42:07 → 2024:09:15 10:42:07" \
+    "变化 EXIF 说明 ImageDescription 的原文：西湖日落 sunset at West Lake → IPTC 备注字段"
 
 # ImageIO 不读的段：COM 注释、不认识的 APPn（APP11 是 C2PA 用的）、EOI 之后的数据。
 cp "$WORK/照片.jpg" "$WORK/注释段.jpg"
@@ -932,7 +935,8 @@ for o in 3 6 8 5; do
 done
 
 # 4. 退回旧路：照搬会让视图退步的两张，产物与 --no-raw-exif 逐字节相同，校验输出逐行相同。
-# 第二张另有一条无前缀备注：备注改写了，EXIF 与 IIM 打架照样让视图退步。
+# EXIF 与 IIM 的时间打架让视图退步（说明打架放行，时间的不放行）；第二张另有一条无前缀备注，
+# 备注改写了，照样退回。系统重写把 EXIF 的说明换成了 IIM 那份，两条路都由原文核对报出来。
 for what in 只改IIM 无前缀加只改IIM; do
     for mode in "" --no-raw-exif; do
         d="$WORK/照搬/$what${mode}"
@@ -949,6 +953,9 @@ for what in 只改IIM 无前缀加只改IIM; do
     grep -qE "EXIF 没有照搬：照搬后 .+" <<< "$out_a" \
         && pass "$what：-v 说了没照搬的原因" || { fail "$what：-v 没说没照搬的原因"; sed 's/^/     /' <<< "$out_a"; }
     check_same "$what：校验输出逐行相同" "$(grep -v "EXIF 没有照搬" <<< "$out_a")" "$out_b"
+    grep -qF "变化 EXIF 说明 ImageDescription 的原文：西湖日落 sunset at West Lake → IPTC 备注字段" <<< "$out_b" \
+        && pass "$what（--no-raw-exif）：报出说明的原文被换成 IIM 那份" \
+        || { fail "$what（--no-raw-exif）：没报说明的原文"; sed 's/^/     /' <<< "$out_b"; }
 done
 
 # 6. 增益图与辅助图：照搬只动 EXIF，辅助图与 HDR 解码与 --no-raw-exif 的产物相同。3 通道的
@@ -1370,33 +1377,63 @@ expect_kept_original() {
         check "$what：产物里 ${kv%%=*} 是 EXIF 的原值" "$(./Tests/probe "${f%.jpg}.heic" "${kv%%=*}")" "${kv#*=}"
     done
 }
+# 用法：expect_conflict_lines 描述 文件 组:ImageIO原来显示的值...（接在 expect_kept_original 后面，
+# 查 KEPT_OUT：校验恰好每组一处差异、每组一行合成的说明，源文件保留）
+expect_conflict_lines() {
+    local what=$1 f=$2 item group want; shift 2
+    grep -qF "元数据校验发现 $# 处差异" <<< "$KEPT_OUT" \
+        && pass "$what：校验恰好 $# 处差异" || { fail "$what：差异不是恰好 $# 处"; sed 's/^/     /' <<< "$KEPT_OUT"; }
+    for item in "$@"; do
+        group=${item%%:*}
+        case "$group" in 说明) want=$EXIF_DESC ;; 作者) want=$EXIF_ARTIST ;; *) want=$EXIF_CR ;; esac
+        grep -qF -- "- 变化 $group：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「${item#*:}」，产物显示 EXIF 的原值「$want」" \
+            <<< "$KEPT_OUT" && pass "$what：$group 合成一行，说清原来显示什么、产物显示 EXIF 的原值" \
+            || { fail "$what：$group 没有合成的那一行"; sed 's/^/     /' <<< "$KEPT_OUT"; }
+    done
+    refute "$what：源文件保留" "$KEPT_ST" test ! -f "$f"
+}
 # 1. 只有说明打架。
 conflict_sample 说明 "2:120=IIM 里改过的说明"
 check "说明：前提，源的 {TIFF}/ImageDescription 是 IIM 那份" \
     "$(./Tests/probe "$P/说明.jpg" '{TIFF}/ImageDescription')" "IIM 里改过的说明"
 expect_kept_original "说明" "$P/说明.jpg" "说明" "{TIFF}/ImageDescription=$EXIF_DESC"
+expect_conflict_lines "说明" "$P/说明.jpg" "说明:IIM 里改过的说明"
+XFLAGS=--no-raw-exif expect_reported "说明（--no-raw-exif）" "$P/说明-重写.jpg" \
+    "变化 EXIF 说明 ImageDescription 的原文：$EXIF_DESC → IIM 里改过的说明"
 # 2. 作者打架、版权打架（IIM 的说明改成与 EXIF 相同，只剩这一组打架），三组一起打架。
 conflict_sample 作者 "2:120=$EXIF_DESC" "2:80=IIM 作者"
 check "作者：前提，源的 {TIFF}/Artist 是 IIM 那份、说明不打架" \
     "$(./Tests/probe "$P/作者.jpg" '{TIFF}/Artist')|$(./Tests/probe "$P/作者.jpg" '{TIFF}/ImageDescription')" \
     "IIM 作者|$EXIF_DESC"
 expect_kept_original "作者" "$P/作者.jpg" "作者" "{TIFF}/Artist=$EXIF_ARTIST" "{IPTC}/Byline[0]=$EXIF_ARTIST"
+expect_conflict_lines "作者" "$P/作者.jpg" "作者:IIM 作者"
+XFLAGS=--no-raw-exif expect_reported "作者（--no-raw-exif）" "$P/作者-重写.jpg" \
+    "变化 EXIF 作者 Artist 的原文：$EXIF_ARTIST → IIM 作者"
 conflict_sample 版权 "2:120=$EXIF_DESC" "2:116=IIM 版权"
 check "版权：前提，源的 {TIFF}/Copyright 是 IIM 那份、说明不打架" \
     "$(./Tests/probe "$P/版权.jpg" '{TIFF}/Copyright')|$(./Tests/probe "$P/版权.jpg" '{TIFF}/ImageDescription')" \
     "IIM 版权|$EXIF_DESC"
 expect_kept_original "版权" "$P/版权.jpg" "版权" "{TIFF}/Copyright=$EXIF_CR" "XMP/dc:rights[x-default]=$EXIF_CR"
+expect_conflict_lines "版权" "$P/版权.jpg" "版权:IIM 版权"
+XFLAGS=--no-raw-exif expect_reported "版权（--no-raw-exif）" "$P/版权-重写.jpg" \
+    "变化 EXIF 版权 Copyright 的原文：$EXIF_CR → IIM 版权"
 conflict_sample 三组 "2:120=IIM 说明" "2:80=IIM 作者" "2:116=IIM 版权"
 expect_kept_original "三组" "$P/三组.jpg" "说明、作者、版权" \
     "{TIFF}/ImageDescription=$EXIF_DESC" "{TIFF}/Artist=$EXIF_ARTIST" "{TIFF}/Copyright=$EXIF_CR"
+expect_conflict_lines "三组" "$P/三组.jpg" "说明:IIM 说明" "作者:IIM 作者" "版权:IIM 版权"
 # 3. IIM 声明 UTF-8 的 1:90 去掉：ImageIO 把 IIM 读成乱码，EXIF 里是好的中文。
 conflict_sample 乱码 "1:90"
 seen=$(./Tests/probe "$P/乱码.jpg" '{TIFF}/Artist')
-case "$seen" in
-    ""|"<无>"|"<无法读取>"|"$EXIF_ARTIST") fail "乱码：前提，源的 {TIFF}/Artist 是乱码（实际 [$seen]）" ;;
-    *) pass "乱码：前提，源的 {TIFF}/Artist 是乱码" ;;
+seen_desc=$(./Tests/probe "$P/乱码.jpg" '{TIFF}/ImageDescription')
+case "$seen|$seen_desc" in
+    "|"*|"<无>|"*|"<无法读取>|"*|"$EXIF_ARTIST|"*|*"|"|*"|<无>"|*"|<无法读取>"|*"|$EXIF_DESC")
+        fail "乱码：前提，源的 {TIFF}/Artist、{TIFF}/ImageDescription 是乱码（实际 [$seen]、[$seen_desc]）" ;;
+    *) pass "乱码：前提，源的 {TIFF}/Artist、{TIFF}/ImageDescription 是乱码" ;;
 esac
 expect_kept_original "乱码" "$P/乱码.jpg" "说明、作者" "{TIFF}/ImageDescription=$EXIF_DESC" "{TIFF}/Artist=$EXIF_ARTIST"
+expect_conflict_lines "乱码" "$P/乱码.jpg" "说明:$seen_desc" "作者:$seen"
+XFLAGS=--no-raw-exif expect_reported "乱码（--no-raw-exif）" "$P/乱码-重写.jpg" \
+    "变化 EXIF 说明 ImageDescription 的原文：$EXIF_DESC → $seen_desc" "变化 EXIF 作者 Artist 的原文：$EXIF_ARTIST → $seen"
 # 5. 不放行的。EXIF 的说明是 GBK 字节（原文不可靠）又与 IIM 打架：ImageIO 读 HEIC 时不认这种说明，
 #    照搬后视图照旧显示 XMP 里 IIM 那份，没有退步，照搬了，也没有放行哪一组。
 conflict_sample GBK说明 "2:120=IIM 里改过的说明"
@@ -1405,12 +1442,46 @@ cp "$P/GBK说明.jpg" "$P/GBK说明-重写.jpg"
 out=$("$BIN" -v --verify "$P/GBK说明.jpg" 2>&1)
 grep -qE "^    EXIF 整块照搬（[0-9]+ 字节）$" <<< "$out" \
     && pass "GBK 说明：照搬了，没有放行哪一组" || { fail "GBK 说明：没照搬，或说了保留 EXIF 的原值"; sed 's/^/     /' <<< "$out"; }
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "GBK 说明：照搬的产物校验通过" || { fail "GBK 说明：照搬的产物校验报了差异"; sed 's/^/     /' <<< "$out"; }
+#    系统重写把 IIM 那份写进 EXIF，GBK 的原文没了：源的字节不可靠，比字节。
+XFLAGS=--no-raw-exif expect_reported "GBK 说明（--no-raw-exif）" "$P/GBK说明-重写.jpg" \
+    "变化 EXIF 说明 ImageDescription：源里的字节不是合法的 UTF-8（5 字节），产物里换了一种写法，原文无法核对"
 #    说明打架之外另有一个键退步（两条 0x9286 的无前缀备注改写不了，照搬后 ImageIO 读不出）：照旧退回。
 conflict_sample 另有退步 "2:120=IIM 里改过的说明"
 make_sample ./Tests/mangle-tool --tags "$P/另有退步.jpg" "exif:9286:undef=$NOTE" "exif:9286:undef=$NOTE"
 out=$("$BIN" -v --verify "$P/另有退步.jpg" 2>&1)
 grep -qF "EXIF 没有照搬：照搬后 {Exif}/UserComment 会读不出" <<< "$out" \
     && pass "另有退步：照旧退回系统重写，-v 说的是备注" || { fail "另有退步：照搬了，或原因不对"; sed 's/^/     /' <<< "$out"; }
+# Copyright 写成「摄影师\0编辑者\0」两段：系统重写只留第一段，原文核对报出来；照搬的不报。
+./Tests/fixture "$P/两段版权.jpg" >/dev/null
+make_sample ./Tests/mangle-tool --tags "$P/两段版权.jpg" 'ifd0:8298:ascii=Photographer\0Editor'
+cp "$P/两段版权.jpg" "$P/两段版权-重写.jpg"
+out=$("$BIN" -v --verify "$P/两段版权.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "两段版权：照搬的产物校验通过" || { fail "两段版权：照搬的产物校验报了差异"; sed 's/^/     /' <<< "$out"; }
+XFLAGS=--no-raw-exif expect_reported "两段版权（--no-raw-exif）" "$P/两段版权-重写.jpg" \
+    '变化 EXIF 版权 Copyright 的原文：Photographer\0Editor → Photographer'
+# 6. 不打架的零噪声：两条路的校验都没有这一轮的行（合成的一行、三个文字标签的原文核对）。
+mkdir -p "$P/零噪声"
+for v in 普通 no-exif-offset lossy rich-xmp no-text; do
+    if [ "$v" = 普通 ]; then ./Tests/fixture "$P/零噪声/$v.jpg" >/dev/null; else ./Tests/fixture "--$v" "$P/零噪声/$v.jpg" >/dev/null; fi
+done
+cp test_pic/IMG_1225.JPG "$P/零噪声/IMG_1225.jpg"
+cp test_pic/P1130939.JPG "$P/零噪声/P1130939.jpg"
+for name in 普通 no-exif-offset lossy rich-xmp no-text IMG_1225 P1130939; do
+    for flags in "" --no-raw-exif; do
+        copy="$P/零噪声/$name${flags:+-重写}.jpg"
+        [ -f "$copy" ] || cp "$P/零噪声/$name.jpg" "$copy"
+        # shellcheck disable=SC2086  # flags 为空时不能变成一个空参数
+        out=$("$BIN" -v --verify $flags "$copy" 2>&1)
+        if grep -q "元数据校验" <<< "$out" && ! grep -qE "EXIF (说明|作者|版权) |与 IPTC 不一致" <<< "$out"; then
+            pass "零噪声 $name${flags:+（$flags）}：校验了，没有这一轮的行"
+        else
+            fail "零噪声 $name${flags:+（$flags）}：没校验，或报了这一轮的行"; sed 's/^/     /' <<< "$out"
+        fi
+    done
+done
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

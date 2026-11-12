@@ -2,8 +2,9 @@
 //
 // ImageIO 读 JPEG 时用 IIM（IPTC）的值调和说明、作者、版权：IIM 摘要对不上时视图显示 IIM 的值，
 // 系统重写时这个值写进产物的 EXIF 和 XMP。照搬的产物里 EXIF 是源的原值，HEIC 里 EXIF 压过 XMP，
-// 视图显示的就变回 EXIF 的原值。这里定义三组调和字段、EXIF 原文的读法，以及照搬自检的放行
-// （exifOriginalKept）。
+// 视图显示的就变回 EXIF 的原值。这里定义三组调和字段、EXIF 原文的读法，以及用到它们的
+// 三条规则：照搬自检的放行（exifOriginalKept）、校验里打架的那一组合成一行
+// （reconciledConflicts）、三个文字标签的原文核对（exifTextOriginalIssues）。
 
 import Foundation
 import ImageIO
@@ -140,4 +141,56 @@ func splitRegressions(_ worse: Set<String>, afterView: [String: String],
         }
     }
     return (blocking, ReconciledGroup.allCases.filter(kept.contains))
+}
+
+// MARK: - 校验：打架的那一组合成一行
+
+/// 源里 EXIF 与 IPTC 打架、产物显示 EXIF 原值的组，各合成一行。
+///
+/// 对每一组：源 EXIF 的原文 A 可靠（`originals`）；源视图里该组的键 k 值为 V，V ≠ A；产物视图里
+/// k 的值等于 A（按 keyVerdict 是「变化」）。同一组里 V 相同的键合成一行，那些键记进 `covered`，
+/// 键空间比对不再逐条报。该组里别的变法（不是 V → A 的）不在这里，照旧由键空间比对各报各的。
+/// 纯函数，单测直接喂字典。
+func reconciledConflicts(before: [String: String], after: [String: String],
+                         originals: [ReconciledGroup: ExifTextReading]) -> (issues: [String], covered: Set<String>) {
+    var issues: [String] = []
+    var covered = Set<String>()
+    for group in ReconciledGroup.allCases {
+        guard case .reliable(let original)? = originals[group] else { continue }
+        var shown: [String] = []                   // V，按第一次出现的顺序
+        for (k, v) in before.sorted(by: { $0.key < $1.key }) where ReconciledGroup(viewKey: k) == group {
+            guard let w = after[k], keyVerdict(k, v, after: after) == .changed,
+                  !valuesMatch(v, original), valuesMatch(w, original) else { continue }
+            covered.insert(k)
+            if !shown.contains(v) { shown.append(v) }
+        }
+        for v in shown {
+            issues.append("变化 \(group.label)：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「\(shownText(v))」，"
+                          + "产物显示 EXIF 的原值「\(shownText(original))」")
+        }
+    }
+    return (issues, covered)
+}
+
+// MARK: - 校验：三个文字标签的原文核对
+
+/// 文字标签的原文核对：源 EXIF 里这个标签的值字节 `source` 与产物原始 EXIF 里同一标签的
+/// `product`（没有是 nil）各读一遍（readExifText），交给 originalTextIssues，与备注原文核对
+/// 同一套判定与措辞：源可靠时产物要读出相同的文本；源不可靠时产物去掉填充后的字节要与源的相同。
+/// `reportedElsewhere`（originalReportedElsewhere，或者该组已经合成了一行）为真时不报。纯函数。
+func exifTextOriginalIssues(_ group: ReconciledGroup, source: [UInt8]?, product: [UInt8]?,
+                            reportedElsewhere: Bool) -> [String] {
+    guard !reportedElsewhere else { return [] }
+    func original(_ reading: ExifTextReading) -> OriginalText {
+        switch reading {
+        case .absent: return .absent
+        case .reliable(let text): return .reliable(text)
+        case .unreliable(_, let size): return .unreliable(size: size, why: "不是合法的 UTF-8")
+        }
+    }
+    let s = readExifText(source), p = readExifText(product)
+    var sameBytes = false
+    if case .unreliable(let a, _) = s, case .unreliable(let b, _) = p { sameBytes = a == b }
+    return originalTextIssues("EXIF \(group.label) \(group.tagName)", source: original(s), product: original(p),
+                              sameBytes: sameBytes)
 }

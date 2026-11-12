@@ -1713,6 +1713,117 @@ for _ in 0..<5000 {
 }
 check("改坏的 TIFF、随机字节 5000 组不崩，可靠的原文从不为空", exifTextCrashes, 0)
 
+print("校验：EXIF 与 IPTC 打架的那一组合成一行，键空间比对让位")
+let conflictBefore = ["{TIFF}/ImageDescription": "IIM 说明", "{IPTC}/Caption/Abstract": "IIM 说明",
+                      "XMP/dc:description[x-default]": "IIM 说明", "{TIFF}/Model": "Canon"]
+let conflictAfter = ["{TIFF}/ImageDescription": "西湖日落", "{IPTC}/Caption/Abstract": "西湖日落",
+                     "XMP/dc:description[x-default]": "西湖日落", "{TIFF}/Model": "Canon"]
+let descriptionLine = "变化 说明：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「IIM 说明」，产物显示 EXIF 的原值「西湖日落」"
+let merged = reconciledConflicts(before: conflictBefore, after: conflictAfter, originals: keptOriginals)
+check("三个键 V → A 合成一行，三个键都记进 covered",
+      [merged.issues == [descriptionLine],
+       merged.covered == ["{TIFF}/ImageDescription", "{IPTC}/Caption/Abstract", "XMP/dc:description[x-default]"]],
+      [true, true])
+check("键空间比对按 covered 让位：一处只出那一行",
+      keySpaceDiff(before: conflictBefore, after: conflictAfter, covered: merged.covered) + merged.issues, [descriptionLine])
+check("组里另一个键是别的变法（既不是 V 也不是 A）：照旧由键空间比对单独报",
+      { () -> [String] in
+          var after = conflictAfter
+          after["{IPTC}/Caption/Abstract"] = "第三种"
+          let m = reconciledConflicts(before: conflictBefore, after: after, originals: keptOriginals)
+          return keySpaceDiff(before: conflictBefore, after: after, covered: m.covered) + m.issues
+      }(), ["变化 {IPTC}/Caption/Abstract: IIM 说明 → 第三种", descriptionLine])
+check("组里两个键的 V 不同：各合成一行（按键排序后 V 第一次出现的顺序）",
+      reconciledConflicts(before: conflictBefore.merging(["{IPTC}/Caption/Abstract": "乱码"]) { _, b in b },
+                          after: conflictAfter, originals: keptOriginals).issues,
+      [descriptionLine, "变化 说明：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「乱码」，产物显示 EXIF 的原值「西湖日落」"])
+let threeBefore = conflictBefore.merging(["{TIFF}/Artist": "IIM 作者", "{IPTC}/Byline[0]": "IIM 作者",
+                                          "{TIFF}/Copyright": "IIM 版权", "XMP/dc:rights[x-default]": "IIM 版权"]) { a, _ in a }
+let threeAfter = conflictAfter.merging(["{TIFF}/Artist": "测试作者", "{IPTC}/Byline[0]": "测试作者",
+                                        "{TIFF}/Copyright": "(C) 2024", "XMP/dc:rights[x-default]": "(C) 2024"]) { a, _ in a }
+let three = reconciledConflicts(before: threeBefore, after: threeAfter, originals: keptOriginals)
+check("三组同时打架：三行，按说明、作者、版权；键空间比对一行都不出",
+      keySpaceDiff(before: threeBefore, after: threeAfter, covered: three.covered) + three.issues,
+      [descriptionLine,
+       "变化 作者：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「IIM 作者」，产物显示 EXIF 的原值「测试作者」",
+       "变化 版权：源里 EXIF 与 IPTC 不一致，ImageIO 原来显示「IIM 版权」，产物显示 EXIF 的原值「(C) 2024」"])
+check("不合成：EXIF 原文不可靠或没有、产物不是 A、产物没有这个键、源里本来就是 A",
+      [reconciledConflicts(before: conflictBefore, after: conflictAfter,
+                           originals: [.description: .unreliable(bytes: gbkXiHu, size: 4)]).issues,
+       reconciledConflicts(before: conflictBefore, after: conflictAfter, originals: [.description: .absent]).issues,
+       reconciledConflicts(before: conflictBefore, after: conflictAfter.mapValues { _ in "别的" },
+                           originals: keptOriginals).issues,
+       reconciledConflicts(before: conflictBefore, after: [:], originals: keptOriginals).issues,
+       reconciledConflicts(before: conflictAfter, after: conflictAfter, originals: keptOriginals).issues],
+      [[], [], [], [], []])
+
+print("校验：三个文字标签的原文核对（与备注原文核对同一套判定）")
+func textIssues(_ group: ReconciledGroup, _ s: [UInt8]?, _ p: [UInt8]?, elsewhere: Bool = false) -> [String] {
+    exifTextOriginalIssues(group, source: s, product: p, reportedElsewhere: elsewhere)
+}
+/// 说明那一组。
+func textIssues(_ s: [UInt8]?, _ p: [UInt8]?, elsewhere: Bool = false) -> [String] {
+    textIssues(.description, s, p, elsewhere: elsewhere)
+}
+let westLake = Array("西湖日落 sunset".utf8) + [0]
+check("原文相同不报；源里没有不报", [textIssues(westLake, westLake), textIssues(nil, westLake)], [[], []])
+check("原文变了：报两边的原文", textIssues(westLake, Array("IPTC 备注字段".utf8) + [0]),
+      ["变化 EXIF 说明 ImageDescription 的原文：西湖日落 sunset → IPTC 备注字段"])
+check("产物里没有这个标签、或只有填充：报原文丢失", [textIssues(.artist, Array("Ann".utf8), nil),
+                                                textIssues(.artist, Array("Ann".utf8), [0, 0x20])],
+      [["丢失 EXIF 作者 Artist 的原文 = Ann"], ["丢失 EXIF 作者 Artist 的原文 = Ann"]])
+check("比较前两边各自去掉尾部的 NUL 与空白",
+      [textIssues(Array("Ann  ".utf8) + [0, 0], Array("Ann".utf8) + [0]), textIssues(Array("Ann".utf8), Array("Ann\r\n".utf8))],
+      [[], []])
+check("源全是填充：当作没有，不报", textIssues([0x20, 0, 0], Array("别的".utf8)), [])
+check("产物的值不是合法的 UTF-8：报原文变化", textIssues(westLake, gbkXiHu + [0]),
+      ["变化 EXIF 说明 ImageDescription 的原文：西湖日落 sunset → （5 字节，不是合法的 UTF-8）"])
+check("源不可靠：去掉填充后的字节相同不报，填充不同也不报",
+      [textIssues(gbkXiHu + [0], gbkXiHu + [0]), textIssues(gbkXiHu + [0], gbkXiHu + [0, 0, 0x20])], [[], []])
+check("源不可靠：产物换了写法（按 Latin-1 猜出的 UTF-8）报，产物没有报丢失",
+      [textIssues(gbkXiHu + [0], Array("Î÷ºþ".utf8) + [0]), textIssues(gbkXiHu + [0], nil)],
+      [["变化 EXIF 说明 ImageDescription：源里的字节不是合法的 UTF-8（5 字节），产物里换了一种写法，原文无法核对"],
+       ["丢失 EXIF 说明 ImageDescription（5 字节，不是合法的 UTF-8）"]])
+let twoPart = Array("Photographer".utf8) + [0] + Array("Editor".utf8) + [0]
+check("Copyright 两段：第二段丢了要报，NUL 显示成 \\0；两段都在不报",
+      [textIssues(.copyright, twoPart, Array("Photographer".utf8) + [0]), textIssues(.copyright, twoPart, twoPart)],
+      [["变化 EXIF 版权 Copyright 的原文：Photographer\\0Editor → Photographer"], []])
+check("让位：同一处已经有一行时都不报",
+      [textIssues(westLake, nil, elsewhere: true), textIssues(westLake, gbkXiHu, elsewhere: true),
+       textIssues(gbkXiHu, westLake, elsewhere: true)], [[], [], []])
+let descKey = ReconciledGroup.description.tiffKey
+check("让位的条件：键空间比对报了 {TIFF}/ImageDescription 丢失或变化，或原始清点报了 0x010E 丢失",
+      [originalReportedElsewhere(key: descKey, tag: 0x010E, before: [descKey: "a"], after: [:], covered: [], rawLostTags: []),
+       originalReportedElsewhere(key: descKey, tag: 0x010E, before: [descKey: "a"], after: [descKey: "b"], covered: [],
+                                 rawLostTags: []),
+       originalReportedElsewhere(key: descKey, tag: 0x010E, before: [:], after: [:], covered: [], rawLostTags: [0x010E]),
+       originalReportedElsewhere(key: descKey, tag: 0x010E, before: [descKey: "a"], after: [descKey: "a"], covered: [],
+                                 rawLostTags: []),
+       originalReportedElsewhere(key: descKey, tag: 0x010E, before: [:], after: [:], covered: [], rawLostTags: [0x9286])],
+      [true, true, true, false, false])
+// 系统重写把 ImageIO 调和出的值写进 EXIF：两边视图一样（IIM 那份），键空间比对看不见，原文核对报。
+let rewrittenView = [descKey: "IPTC 备注字段"]
+check("两边视图相同而 EXIF 原文被换掉：键空间比对 0 行，原文核对报 1 行",
+      keySpaceDiff(before: rewrittenView, after: rewrittenView)
+          + textIssues(westLake, Array("IPTC 备注字段".utf8),
+                       elsewhere: originalReportedElsewhere(key: descKey, tag: 0x010E, before: rewrittenView,
+                                                            after: rewrittenView, covered: [], rawLostTags: [])),
+      ["变化 EXIF 说明 ImageDescription 的原文：西湖日落 sunset → IPTC 备注字段"])
+var conflictCrashes = 0
+for _ in 0..<5000 {
+    let a = (0..<carryRandom(16)).map { _ in UInt8(carryRandom(256)) }
+    var b = twoPart
+    for _ in 0...carryRandom(3) { b[carryRandom(b.count)] = UInt8(carryRandom(256)) }
+    for (s, p) in [(a, b), (b, a), (Array(b.prefix(carryRandom(b.count + 1))), a)] {
+        if s == p, !textIssues(.copyright, s, p).isEmpty { conflictCrashes += 1 }
+    }
+    let v = String(decoding: a, as: UTF8.self), w = String(decoding: b, as: UTF8.self)
+    let m = reconciledConflicts(before: ["{TIFF}/Artist": v, "{IPTC}/Byline[0]": w], after: ["{TIFF}/Artist": w],
+                                originals: [.artist: readExifText(b)])
+    if m.issues.count > 1 { conflictCrashes += 1 }
+}
+check("随机字节 5000 组都不崩，两边字节相同时从不报，一组至多合成一行", conflictCrashes, 0)
+
 print("{FileContents} 里的编码参数：按去掉下标后的完整键路径认")
 check(isFileContentsEncodingKey("{FileContents}/Images[0]/ChromaSubsampling"), "主图的色度抽样忽略")
 check(isFileContentsEncodingKey("{FileContents}/Images[12]/ChromaSubsampling"), "任何一张主图的色度抽样都忽略")

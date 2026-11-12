@@ -676,22 +676,33 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
                           viewLosses: keySpaceLosses(before: before, after: after),
                           makerNoteReported: makerNoteLost(before: before, after: after),
                           sourceViewHasImageUniqueID: before[exifKey(kCGImagePropertyExifImageUniqueID)] != nil)
-    // 备注原文：产物的 EXIF 读不出时原始清点已经报了「无法核对」，这里不再说。
-    var commentIssues: [String] = []
+    // 说明、作者、版权里 EXIF 与 IPTC 打架、产物显示 EXIF 原值的，每组合成一行，键空间比对让位。
+    let sourceTIFF = TIFFStructure(jpeg: bytes)
+    let conflicts = reconciledConflicts(before: before, after: after, originals: exifTextOriginals(sourceTIFF))
+    // 备注与三个文字标签的原文：产物的 EXIF 读不出时原始清点已经报了「无法核对」，这里不再说。
+    var originalIssues: [String] = []
     if case .tiff(let destTIFF) = heifExif(destBytes) {
-        let sourceTIFF = TIFFStructure(jpeg: bytes)
-        commentIssues = userCommentOriginalIssues(
+        originalIssues = userCommentOriginalIssues(
             source: sourceTIFF.flatMap(rawUserCommentValue), sourceBigEndian: sourceTIFF?.bigEndian ?? true,
             product: rawUserCommentValue(destTIFF), productBigEndian: destTIFF.bigEndian,
             reportedElsewhere: userCommentReportedElsewhere(before: before, after: after, covered: raw.coveredViewKeys,
                                                             rawLostTags: raw.lostMainTags))
+        for group in ReconciledGroup.allCases {
+            let elsewhere = conflicts.covered.contains(group.tiffKey)
+                || originalReportedElsewhere(key: group.tiffKey, tag: group.tag, before: before, after: after,
+                                             covered: raw.coveredViewKeys, rawLostTags: raw.lostMainTags)
+            originalIssues += exifTextOriginalIssues(group, source: sourceTIFF.flatMap { rawIFD0Value($0, tag: group.tag) },
+                                                     product: rawIFD0Value(destTIFF, tag: group.tag),
+                                                     reportedElsewhere: elsewhere)
+        }
     }
     // 后几项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
-    return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys)
+    return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys.union(conflicts.covered))
+        + conflicts.issues
         + raw.issues
         + carriedExifIssues(source: bytes, dest: destBytes,
                             comment: SourceUserComment(imageProperties(sourceImage), reading: rawExifUserComment(in: bytes)))
-        + commentIssues
+        + originalIssues
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
         + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
                              isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
@@ -823,8 +834,8 @@ func carriedTIFFMatches(source: [UInt8], product: [UInt8], comment: SourceUserCo
 /// | 可靠的文本 T | 也是可靠的文本，过了 normalizedUserComment 后等于 T | 原文变化；产物没有备注是原文丢失 |
 /// | 猜的 | 0x9286 的值字节与源的逐字节相同 | 换了写法、原文无法核对；产物没有备注是丢失 |
 ///
-/// `sourceBigEndian`、`productBigEndian` 是两边各自所在 TIFF 的字节序。报的时候两边显示的就是
-/// 拿来比的那串文本。
+/// `sourceBigEndian`、`productBigEndian` 是两边各自所在 TIFF 的字节序。判定与措辞见
+/// originalTextIssues；猜的那种比的是 0x9286 的全部值字节（含头）。
 ///
 /// 键空间比对比的是 ImageIO 两边读出来的值：ImageIO 把源读错、又把读错的写进产物，两边一样，
 /// 它看不见。这一条看的是原文。`reportedElsewhere`（userCommentReportedElsewhere）为真时同一处
@@ -832,7 +843,6 @@ func carriedTIFFMatches(source: [UInt8], product: [UInt8], comment: SourceUserCo
 func userCommentOriginalIssues(source: [UInt8]?, sourceBigEndian: Bool, product: [UInt8]?, productBigEndian: Bool,
                                reportedElsewhere: Bool) -> [String] {
     guard !reportedElsewhere else { return [] }
-    let p = product.map { userCommentReadingForComparison($0, bigEndian: productBigEndian) } ?? .absent
     /// 猜的那种值为什么不可靠。
     func unreadable(_ header: UserCommentHeader) -> String {
         switch header {
@@ -841,31 +851,61 @@ func userCommentOriginalIssues(source: [UInt8]?, sourceBigEndian: Bool, product:
         case .ascii, .undefined, .none: return "不是合法的 UTF-8"
         }
     }
-    switch source.map({ userCommentReadingForComparison($0, bigEndian: sourceBigEndian) }) ?? .absent {
+    func original(_ raw: [UInt8]?, bigEndian: Bool) -> OriginalText {
+        switch raw.map({ userCommentReadingForComparison($0, bigEndian: bigEndian) }) ?? .absent {
+        case .absent: return .absent
+        case .reliable(let decoded, _): return .reliable(normalizedUserComment(decoded))
+        case .guessed(_, let raw, let header): return .unreliable(size: raw.count, why: unreadable(header))
+        }
+    }
+    return originalTextIssues("备注 UserComment", source: original(source, bigEndian: sourceBigEndian),
+                              product: original(product, bigEndian: productBigEndian),
+                              sameBytes: source != nil && product == source)
+}
+
+/// 原文核对里一边读出来的东西（备注、三个文字标签共用）。
+enum OriginalText: Equatable {
+    /// 没有，或去掉填充后是空的。
+    case absent
+    /// 可靠的文本，已经过各自的归一（去掉 BOM、尾部的 NUL 与空白）。
+    case reliable(String)
+    /// 解不出可靠的文本：值的字节数，与为什么（「不是合法的 UTF-8」之类）。
+    case unreliable(size: Int, why: String)
+}
+
+/// 原文核对的判定与报告行，`label` 如「备注 UserComment」「EXIF 说明 ImageDescription」：
+///
+/// | 源 | 产物必须 | 否则报 |
+/// |---|---|---|
+/// | 可靠的文本 T | 也是可靠的文本，且等于 T | 原文变化；产物没有是原文丢失 |
+/// | 不可靠 | 拿来比的字节与源的相同（`sameBytes`） | 换了写法、原文无法核对；产物没有是丢失 |
+///
+/// 报的时候两边显示的就是拿来比的那串文本（shownText：截断，NUL 写成 `\0`）。
+func originalTextIssues(_ label: String, source: OriginalText, product: OriginalText, sameBytes: Bool) -> [String] {
+    switch source {
     case .absent:
         return []
-    case .reliable(let decoded, _):
-        let text = normalizedUserComment(decoded)
+    case .reliable(let text):
         let other: String
-        switch p {
-        case .absent: return ["丢失 备注 UserComment 的原文 = \(truncate(text))"]
-        case .reliable(let d, _):
-            other = normalizedUserComment(d)
+        switch product {
+        case .absent: return ["丢失 \(label) 的原文 = \(shownText(text))"]
+        case .reliable(let o):
+            other = o
             guard other != text else { return [] }
-        case .guessed(_, let raw, let header):
-            return ["变化 备注 UserComment 的原文：\(truncate(text)) → （\(raw.count) 字节，\(unreadable(header))）"]
+        case .unreliable(let size, let why):
+            return ["变化 \(label) 的原文：\(shownText(text)) → （\(size) 字节，\(why)）"]
         }
-        var line = "变化 备注 UserComment 的原文：\(truncate(text)) → \(truncate(other))"
-        if truncate(text) == truncate(other) {
+        var line = "变化 \(label) 的原文：\(shownText(text)) → \(shownText(other))"
+        if shownText(text) == shownText(other) {
             let a = Array(text), b = Array(other)
             let at = (0..<min(a.count, b.count)).first { a[$0] != b[$0] } ?? min(a.count, b.count)
             line += "（显示相同，第 \(at + 1) 个字符起不同）"
         }
         return [line]
-    case .guessed(_, let raw, let header):
-        if product == raw { return [] }
-        if p == .absent { return ["丢失 备注 UserComment（\(raw.count) 字节，\(unreadable(header))）"] }
-        return ["变化 备注 UserComment：源里的字节\(unreadable(header))（\(raw.count) 字节），产物里换了一种写法，原文无法核对"]
+    case .unreliable(let size, let why):
+        if sameBytes { return [] }
+        if product == .absent { return ["丢失 \(label)（\(size) 字节，\(why)）"] }
+        return ["变化 \(label)：源里的字节\(why)（\(size) 字节），产物里换了一种写法，原文无法核对"]
     }
 }
 
@@ -885,13 +925,20 @@ func userCommentReadingForComparison(_ raw: [UInt8], bigEndian: Bool) -> UserCom
 }
 
 
-/// 备注这一处是不是已经有一行了：键空间比对为 `{Exif}/UserComment` 报了丢失或变化（没被原始清点
-/// 盖掉，`covered`），或者原始清点报了 0x9286 丢失（`rawLostTags`）。备注原文核对向它们让位：
-/// 它们早就有、写的是用户在别的软件里看得到的值；原文核对只补它们看不见的那种（两边读法一样错）。
+/// 备注这一处是不是已经有一行了（originalReportedElsewhere，视图键 `{Exif}/UserComment`、标签 0x9286）。
 func userCommentReportedElsewhere(before: [String: String], after: [String: String], covered: Set<String>,
                                   rawLostTags: Set<Int>) -> Bool {
-    if rawLostTags.contains(0x9286) { return true }
-    let key = exifKey(kCGImagePropertyExifUserComment)
+    originalReportedElsewhere(key: exifKey(kCGImagePropertyExifUserComment), tag: 0x9286, before: before, after: after,
+                              covered: covered, rawLostTags: rawLostTags)
+}
+
+/// 一个 EXIF 标签这一处是不是已经有一行了：键空间比对为它的视图键 `key` 报了丢失或变化（没被
+/// 原始清点盖掉，`covered`），或者原始清点报了标签 `tag` 丢失（`rawLostTags`）。原文核对向它们
+/// 让位：它们早就有、写的是用户在别的软件里看得到的值；原文核对只补它们看不见的那种（两边读法
+/// 一样错，或 ImageIO 两边显示的是调和出的同一个值）。
+func originalReportedElsewhere(key: String, tag: Int, before: [String: String], after: [String: String],
+                               covered: Set<String>, rawLostTags: Set<Int>) -> Bool {
+    if rawLostTags.contains(tag) { return true }
     guard !covered.contains(key), let value = before[key] else { return false }
     let verdict = keyVerdict(key, value, after: after)
     return verdict == .lost || verdict == .changed
@@ -988,14 +1035,15 @@ func makerNoteLost(before: [String: String], after: [String: String]) -> Bool {
 /// 两个键空间 → 差异列表。纯函数，不碰文件：单测直接喂手搭的字典，
 /// 逐分支钉住（值变化、等价字段承载、MakerNote 汇总、易变键跳过）。
 ///
-/// `covered`：原始 EXIF 清点已经报过的视图键（去掉数组下标后比），这里不再报，
-/// 一处变化只出一行。
+/// `covered`：别处已经报过的视图键，这里不再报，一处变化只出一行。原始 EXIF 清点给的是去掉
+/// 数组下标的键（盖住它的所有下标），打架合成的那一行（reconciledConflicts）给的是键本身。
 func keySpaceDiff(before: [String: String], after: [String: String],
                   covered: Set<String> = []) -> [String] {
     var issues: [String] = []
     var makerNoteLost: [String: Int] = [:]   // 伪字典名 → 丢失条目数
 
-    for (k, v) in before.sorted(by: { $0.key < $1.key }) where !covered.contains(strippingAllArrayIndices(k)) {
+    for (k, v) in before.sorted(by: { $0.key < $1.key })
+    where !covered.contains(strippingAllArrayIndices(k)) && !covered.contains(k) {
         switch keyVerdict(k, v, after: after) {
         case .skipped, .carried, .matched:
             continue
