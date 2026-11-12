@@ -810,6 +810,17 @@ expectTrailer(mpfJPEG([(0, gainMap), (0x010002, gainMap)]) { $0[2].offset = $0[1
 expectTrailer(mpfJPEG([(0x010002, preview), (0x010002, preview)]) { $0[2].offset = $0[1].offset }, carried: [],
               ["丢失 EOI 之后的 \(preview.count) 字节（尾部共 \(2 * preview.count) 字节，其中 \(preview.count) 字节是 MPF 登记的预览图，不需要带）"],
               "两个预览图条目指向同一处：只认一个，没人认领的那份照报")
+// 预览图条目指向 EOI 之前、主图 APP1 里的一张完整 JPEG（EXIF 缩略图那样）：不认，尾部那张
+// 没人登记的照报。mpfJPEG 的主图 EOI 在第 68 字节（SOI 2 + 段头 4 + MPF\0 4 + TIFF 58），
+// 在它前面插一个 APP1 段，里面的 JPEG 从 68 + 4 + 6 起，相对 MPF 头（第 10 字节）的偏移是 68。
+let embeddedThumb = tinyJPEG(16, 12)
+var thumbInMain = mpfJPEG([(0x010002, preview)]) { $0[1] = (0x010002, embeddedThumb.count, 68) }
+thumbInMain.insert(contentsOf: jpegSegment(0xE1, Array("Exif".utf8) + [0, 0] + embeddedThumb), at: 68)
+check("前提：插段后预览图条目落在 EOI 之前、恰好是一张完整 JPEG",
+      mpfImages(in: thumbInMain, JPEGLayout(thumbInMain)!).map { "\($0.range) \(standaloneJPEGSize(thumbInMain[$0.range]).map { "\($0)" } ?? "nil")" },
+      ["78..<\(78 + embeddedThumb.count) (width: 16, height: 12)"])
+expectTrailer(thumbInMain, carried: [], ["丢失 EOI 之后的 \(preview.count) 字节"],
+              "预览图条目指向 EOI 之前主图里的一张完整 JPEG：不认，尾部照报")
 expectTrailer(mpfJPEG([(0, gainMap), (0x010002, preview)], tail: xyz), carried: [(40, 30)],
               ["丢失 EOI 之后的 3 字节（尾部共 \(oneTrailer + preview.count + 3) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像，"
                + "\(preview.count) 字节是 MPF 登记的预览图，不需要带）"],
