@@ -85,6 +85,11 @@ struct CaptureTime: Comparable, Hashable {
         String(format: "%d 年 %d 月 %d 日 %02d:%02d", year, month, day, hour, minute)
     }
 
+    /// 列表里的短写法：`2026-04-27 20:28`
+    var compact: String {
+        String(format: "%04d-%02d-%02d %02d:%02d", year, month, day, hour, minute)
+    }
+
     private var tuple: [Int] { [year, month, day, hour, minute, second] }
     static func < (a: CaptureTime, b: CaptureTime) -> Bool { a.tuple.lexicographicallyPrecedes(b.tuple) }
 }
