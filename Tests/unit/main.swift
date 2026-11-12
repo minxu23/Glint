@@ -860,6 +860,10 @@ let withComment = ducky + quality + [0, 2, 0, 9, 0, 0, 0, 5] + Array("hello".utf
 expectSegments(oneSegmentJPEG(0xEC, withComment), lostDucky(withComment), "Ducky 带注释记录（标签 2）：照报")
 let withCopyright = ducky + quality + [0, 3, 0, 7, 0, 0, 0, 3] + Array("abc".utf8) + [0, 0]
 expectSegments(oneSegmentJPEG(0xEC, withCopyright), lostDucky(withCopyright), "Ducky 带版权记录（标签 3）：照报")
+let shortComment = ducky + quality + [0, 2, 0, 4] + Array("abcd".utf8)
+expectSegments(oneSegmentJPEG(0xEC, shortComment), lostDucky(shortComment), "Ducky 带一条长度也是 4 的注释记录：照报")
+let commentOnly = ducky + [0, 2, 0, 4] + Array("abcd".utf8) + [0, 0]
+expectSegments(oneSegmentJPEG(0xEC, commentOnly), lostDucky(commentOnly), "Ducky 只有注释记录、没有保存质量：照报")
 let overrun = ducky + [0, 1, 0, 4, 0, 0]
 expectSegments(oneSegmentJPEG(0xEC, overrun), lostDucky(overrun), "Ducky 记录长度越过段尾：照报")
 let oddLength = ducky + [0, 1, 0, 2, 0, 80, 0, 0]
