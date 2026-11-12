@@ -27,7 +27,25 @@ final class InspectorViewController: NSViewController {
     private var shownPath: String?
 
     static let width: CGFloat = 280
-    private let inner: CGFloat = 280 - 32
+    static let minimumWidth: CGFloat = 240
+    static let maximumWidth: CGFloat = 400
+    /// 内容的宽度：栏宽减去左右各 16。每次摆内容时按当时的栏宽重算，栏宽变了就重摆一次。
+    private var inner: CGFloat = 280 - 32
+    private var lastContent: InspectorContent?
+    private var laidOutWidth: CGFloat = 0
+
+    private var availableInner: CGFloat {
+        let width = scroll.contentView.bounds.width > 0 ? scroll.contentView.bounds.width : view.bounds.width
+        return max(120, floor(width) - 32)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let width = availableInner
+        if abs(width - laidOutWidth) > 0.5, let content = lastContent {
+            show(content)
+        }
+    }
 
     override func loadView() {
         let root = DropTargetView()
@@ -65,6 +83,9 @@ final class InspectorViewController: NSViewController {
     // MARK: 拼内容
 
     func show(_ content: InspectorContent) {
+        lastContent = content
+        inner = availableInner
+        laidOutWidth = inner
         let keepScroll = scroll.contentView.bounds.origin
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         var groups: [NSView] = []
@@ -147,6 +168,7 @@ final class InspectorViewController: NSViewController {
             }
         }
         let name = makeWrappingLabel(item.name, size: 14, selectable: true)
+        name.preferredMaxLayoutWidth = inner
         name.font = .systemFont(ofSize: 14, weight: .semibold)
         var meta = [item.format.label]
         if let dims = item.info?.dimensions { meta.append(dims) }
@@ -186,7 +208,7 @@ final class InspectorViewController: NSViewController {
         views.append(verdictRow(verdictTitle(mark), symbol: symbol?.name, color: symbol?.color ?? .secondaryLabelColor))
         switch row.status {
         case .failed(let why), .skipped(let why):
-            views.append(makeWrappingLabel(why, size: 12, color: .secondaryLabelColor, selectable: true))
+            views.append(wrapped(makeWrappingLabel(why, size: 12, color: .secondaryLabelColor, selectable: true), inner))
         default: break
         }
         if case .differences(let issues) = row.verification {
@@ -231,7 +253,9 @@ final class InspectorViewController: NSViewController {
             if let re = row.reencode { pairs.append(("重编", makeWrappingLabel(re.description, size: 13))) }
             if let cap = row.caption { pairs.append(("备注", makeWrappingLabel(cap.description, size: 13))) }
             views.append(keyValueGrid(pairs))
-            if !row.note.isEmpty { views.append(makeWrappingLabel(row.note, size: 12, color: .secondaryLabelColor, selectable: true)) }
+            if !row.note.isEmpty {
+                views.append(wrapped(makeWrappingLabel(row.note, size: 12, color: .secondaryLabelColor, selectable: true), inner))
+            }
         }
         let s = vstack(views, spacing: 8)
         return s
@@ -325,6 +349,7 @@ final class InspectorViewController: NSViewController {
     /// 备注下面那行小字；只存在文件之外的前面放 systemOrange 的三角，文字仍是次要色。
     private func placeRow(_ note: Note) -> NSView {
         let label = makeWrappingLabel(note.placeText, size: 11, color: .secondaryLabelColor)
+        label.preferredMaxLayoutWidth = note.isAtRisk ? inner - 16 : inner
         guard note.isAtRisk else { return label }
         let icon = NSImageView(image: symbolImage("exclamationmark.triangle.fill", size: 10) ?? NSImage())
         icon.contentTintColor = .systemOrange
@@ -339,7 +364,7 @@ final class InspectorViewController: NSViewController {
 
     private func captureGroup(_ info: PhotoInfo) -> NSView? {
         var pairs: [(String, NSView)] = []
-        if let t = info.captured { pairs.append(("时间", makeLabel(t.display, size: 13, monospacedDigits: true))) }
+        if let t = info.captured { pairs.append(("时间", valueStack(t.display, small: nil))) }
         if let camera = info.cameraName {
             pairs.append(("相机", valueStack(camera, small: info.exposureLine)))
         } else if let exposure = info.exposureLine {
@@ -347,7 +372,7 @@ final class InspectorViewController: NSViewController {
         }
         if let lens = info.lens { pairs.append(("镜头", makeWrappingLabel(lens, size: 13))) }
         if let loc = info.location {
-            let s = vstack([makeLabel(loc.display, size: 13, monospacedDigits: true)], spacing: 1)
+            let s = vstack([valueStack(loc.display, small: nil)], spacing: 1)
             if let url = loc.mapsURL {
                 s.addArrangedSubview(LinkButton("在地图中打开") { NSWorkspace.shared.open(url) })
             }
@@ -366,14 +391,14 @@ final class InspectorViewController: NSViewController {
         link.toolTip = "在访达中显示"
         link.lineBreakMode = .byTruncatingMiddle
         link.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let modified = makeLabel(CaptureTime(date: item.modified).display, size: 13, monospacedDigits: true)
+        let modified = valueStack(CaptureTime(date: item.modified).display, small: nil)
         return vstack([groupTitle("文件"), keyValueGrid([("位置", link), ("修改", modified)])], spacing: 7)
     }
 
     // MARK: 汇总
 
     private func summaryGroup(_ title: String, _ summary: ItemsSummary) -> NSView {
-        var views: [NSView] = [makeWrappingLabel(summary.title ?? title, size: 14)]
+        var views: [NSView] = [wrapped(makeWrappingLabel(summary.title ?? title, size: 14), inner)]
         (views[0] as? NSTextField)?.font = .systemFont(ofSize: 14, weight: .semibold)
         for line in summary.formatLines { views.append(makeLabel(line, size: 13, monospacedDigits: true)) }
         if let notes = summary.notesLine { views.append(makeLabel(notes, size: 13, monospacedDigits: true)) }
@@ -410,10 +435,10 @@ final class InspectorViewController: NSViewController {
     // MARK: 两列明细
 
     private func valueStack(_ main: String, small: String?) -> NSView {
-        let top = makeWrappingLabel(main, size: 13)
+        let top = wrapped(makeWrappingLabel(main, size: 13), inner - 60)
         top.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         guard let small else { return top }
-        let sub = makeWrappingLabel(small, size: 11, color: .secondaryLabelColor)
+        let sub = wrapped(makeWrappingLabel(small, size: 11, color: .secondaryLabelColor), inner - 60)
         sub.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         return vstack([top, sub], spacing: 1)
     }
@@ -427,9 +452,18 @@ final class InspectorViewController: NSViewController {
         for r in 0..<grid.numberOfRows { grid.row(at: r).yPlacement = .top }
         for (_, v) in pairs {
             if let t = v as? NSTextField { t.preferredMaxLayoutWidth = inner - 60 }
+            // 值一栏不许比给它的宽度宽（链接、竖排的两行都一样），宽了就截断或折行，不出界。
+            v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            v.widthAnchor.constraint(lessThanOrEqualToConstant: inner - 60).isActive = true
         }
         return grid
     }
+}
+
+/// 给会折行的标签定下折行宽度。
+private func wrapped(_ label: NSTextField, _ width: CGFloat) -> NSTextField {
+    label.preferredMaxLayoutWidth = width
+    return label
 }
 
 final class FlippedView: NSView {

@@ -6,6 +6,8 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: MainWindowController!
     private var launched = false
+    /// 启动时随「打开方式」送进来的路径会先于 applicationDidFinishLaunching 到，先攒着。
+    private var pendingURLs: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         controller = MainWindowController(store: DefaultsStore())
@@ -14,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = buildMenu()
         NSApp.activate(ignoringOtherApps: true)
         launched = true
+        if !pendingURLs.isEmpty { controller.add(urls: pendingURLs); pendingURLs = [] }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -26,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 在访达里对图片或文件夹选「打开方式」，或拖到程序坞图标上。
     func application(_ application: NSApplication, open urls: [URL]) {
-        controller?.add(urls: urls)
+        if let controller { controller.add(urls: urls) } else { pendingURLs += urls }
     }
 
     /// 没有 nib 就得自己搭菜单。动作发给响应链（nil target），由主窗口或当前焦点处理。

@@ -19,6 +19,9 @@ let usage = """
   --convert                 把当前视图里全部的 JPEG 转完再截图
   --measure                 打印从加文件夹到第一屏缩略图出齐的时间
   --scroll                  把网格从头滚到尾，打印每一步主线程上花的最长时间
+  --inspector <宽>          把信息栏拖到这个宽度（240–400）
+  --onscreen                窗口放到屏幕上，用 screencapture 截真实窗口（玻璃、强调色都是真的；
+                            需要屏幕录制权限），而不是离屏渲染
 """
 
 func die(_ message: String) -> Never {
@@ -42,6 +45,8 @@ var showSheet = false
 var shouldConvert = false
 var measure = false
 var scrollTest = false
+var inspectorWidth: Double?
+var onscreen = false
 var inputs: [URL] = []
 
 while !args.isEmpty {
@@ -64,6 +69,8 @@ while !args.isEmpty {
     case "--convert": shouldConvert = true
     case "--measure": measure = true
     case "--scroll": scrollTest = true
+    case "--inspector": inspectorWidth = Double(value())
+    case "--onscreen": onscreen = true
     default:
         if a.hasPrefix("--") { die("不认识的选项 \(a)\n" + usage) }
         inputs.append(URL(fileURLWithPath: a))
@@ -178,9 +185,27 @@ if scrollTest {
     _ = wait(timeout: 30, idle)
 }
 
+if let inspectorWidth { controller.setInspectorWidth(CGFloat(inspectorWidth)); settle(0.3) }
 window.contentView?.layoutSubtreeIfNeeded()
 window.displayIfNeeded()
 settle(0.2)
+
+if onscreen {
+    // 真实窗口：放到屏幕上、置前，等系统合成完再用 screencapture 按窗口号截。
+    NSApp.setActivationPolicy(.regular)
+    window.center()
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    settle(1.5)
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    p.arguments = ["-o", "-x", "-l", "\(window.windowNumber)", outPath]
+    try p.run()
+    p.waitUntilExit()
+    guard p.terminationStatus == 0 else { die("screencapture 失败（退出码 \(p.terminationStatus)）") }
+    print("已写出 \(outPath)（真实窗口）")
+    exit(0)
+}
 
 /// 整个窗口（含工具栏）渲染成位图。
 func render(_ view: NSView) -> NSBitmapImageRep? {

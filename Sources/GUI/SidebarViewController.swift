@@ -173,8 +173,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func select(_ entry: LibraryEntry) {
         let target = nodes.values.first { $0.entry == entry && outline.row(forItem: $0) >= 0 }
         let row = target.map { outline.row(forItem: $0) } ?? -1
-        if row >= 0, outline.selectedRow != row {
-            outline.selectRowIndexes([row], byExtendingSelection: false)
+        // 重载后 NSOutlineView 按行号保留选中，行号对应的可能已经是别的条目；
+        // 找不到当前条目时清掉选中，不让高亮停在别的行上（之后的选中变化会把条目换掉）。
+        if row >= 0 {
+            if outline.selectedRow != row { outline.selectRowIndexes([row], byExtendingSelection: false) }
+        } else if outline.selectedRow >= 0 {
+            outline.deselectAll(nil)
         }
     }
 

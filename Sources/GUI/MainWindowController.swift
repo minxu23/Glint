@@ -15,6 +15,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private(set) var browserSettings: BrowserSettings
     private(set) var visible: [PhotoItem] = []
     private var activityDismissed = true
+    /// 等扫出来以后要选中的图片（单独添加的）。
+    private var pendingSelection: [String]?
 
     let sidebar = SidebarViewController()
     let browser = BrowserViewController()
@@ -35,6 +37,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var sheetController: ConversionSheetController?
 
     static let defaultSize = NSSize(width: 1180, height: 720)
+    static let sidebarWidth: CGFloat = 208
+    static let sidebarRange: ClosedRange<CGFloat> = 180...320
+    private var needsDefaultSplit = false
     static let minimumSize = NSSize(width: 900, height: 560)
 
     init(store: SettingsStore, library: LibraryModel = LibraryModel(), autosave: Bool = true) {
@@ -87,8 +92,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             inspectorItem = NSSplitViewItem(viewController: inspector)
         }
         inspectorItem.canCollapse = true
-        inspectorItem.minimumThickness = 240
-        inspectorItem.maximumThickness = 420
+        inspectorItem.minimumThickness = InspectorViewController.minimumWidth
+        inspectorItem.maximumThickness = InspectorViewController.maximumWidth
         inspectorItem.preferredThicknessFraction = 0
         innerSplit.addSplitViewItem(browserItem)
         innerSplit.addSplitViewItem(inspectorItem)
@@ -120,8 +125,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         ])
 
         sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = 160
-        sidebarItem.maximumThickness = 320
+        sidebarItem.minimumThickness = MainWindowController.sidebarRange.lowerBound
+        sidebarItem.maximumThickness = MainWindowController.sidebarRange.upperBound
         sidebarItem.canCollapse = true
         let rightItem = NSSplitViewItem(viewController: rightSide)
         rightItem.minimumThickness = 600
@@ -133,20 +138,41 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         innerSplit.splitView.setPosition(MainWindowController.defaultSize.width - 208 - InspectorViewController.width,
                                          ofDividerAt: 0)
         if autosave {
+            // 还没存过分栏位置（首次启动）时，等窗口布局好以后放到规格的宽度（见 showWindow）。
+            let saved = ["吉光.侧栏", "吉光.信息栏"].contains {
+                UserDefaults.standard.object(forKey: "NSSplitView Subview Frames \($0)") != nil
+            }
+            needsDefaultSplit = !saved
             outerSplit.splitView.autosaveName = "吉光.侧栏"
             innerSplit.splitView.autosaveName = "吉光.信息栏"
         }
     }
 
-    /// 布局定下来以后把分栏放到默认宽度（截图工具、首次启动）。
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        if needsDefaultSplit {
+            needsDefaultSplit = false
+            applyDefaultSplitPositions()
+        }
+    }
+
+    /// 布局定下来以后把分栏放到默认宽度：侧栏 208，信息栏 280（截图工具、首次启动）。
     func applyDefaultSplitPositions() {
         window?.contentView?.layoutSubtreeIfNeeded()
-        outerSplit.splitView.setPosition(208, ofDividerAt: 0)
+        outerSplit.splitView.setPosition(MainWindowController.sidebarWidth, ofDividerAt: 0)
         rightSide.view.layoutSubtreeIfNeeded()
         let width = rightSide.view.bounds.width
         if !inspectorItem.isCollapsed {
             innerSplit.splitView.setPosition(width - InspectorViewController.width, ofDividerAt: 0)
         }
+        window?.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    /// 把信息栏拖到给定宽度（截图工具用；夹在最小、最大宽度之间）。
+    func setInspectorWidth(_ width: CGFloat) {
+        rightSide.view.layoutSubtreeIfNeeded()
+        let w = min(InspectorViewController.maximumWidth, max(InspectorViewController.minimumWidth, width))
+        innerSplit.splitView.setPosition(rightSide.view.bounds.width - w, ofDividerAt: 0)
         window?.contentView?.layoutSubtreeIfNeeded()
     }
 
@@ -184,6 +210,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func refreshNow() {
         let lib = library.library
+        if pendingSelection != nil, !lib.looseFiles.isEmpty, entry != .looseFiles { entry = .looseFiles }
         if case .conversion = entry, record == nil { entry = .all }
         if case .folder(let path) = entry, !lib.folders.contains(where: { path == $0 || isPath(path, inside: $0) }) { entry = .all }
         if entry == .looseFiles, lib.looseFiles.isEmpty { entry = .all }
@@ -191,6 +218,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let q = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = !q.isEmpty && lib.items(in: entry, record: record).count > 0 ? "没有找到「\(q)」" : "这里没有图片"
         browser.setItems(visible, emptyMessage: message, welcome: lib.isEmpty)
+        if let pending = pendingSelection {
+            let ready = pending.filter { path in visible.contains { $0.path == path } }
+            if !ready.isEmpty {
+                pendingSelection = nil
+                browser.select(paths: ready)
+            }
+        }
         sidebar.update(library: lib, record: record, selected: entry)
         refreshTitle()
         refreshInspector()
@@ -288,7 +322,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 if let first = folders.first {
                     self.selectEntry(.folder(first.standardizedFileURL.path))
                 } else if !files.isEmpty {
-                    self.selectEntry(.looseFiles)
+                    // 单独送进来的图片（拖进来、「打开方式」）：扫出来以后选中它们，信息栏直接显示。
+                    // 条目要等图片 stat 完（后台）才出现，到时候再切过去。
+                    self.pendingSelection = files.map { $0.standardizedFileURL.path }
+                    self.browser.select(paths: [])
                 }
             }
         }

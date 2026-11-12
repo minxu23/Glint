@@ -814,9 +814,10 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 
 参数：`--appearance light|dark`、`--size 宽x高`、`--view grid|list`、`--sidebar <条目或文件夹名>`、
 `--select <文件名>`（可重复）、`--search <词>`、`--sheet`（显示转换面板）、`--convert`（把当前视图里
-全部的 JPEG 转完再截图），以及量性能用的 `--measure`、`--scroll`。设置存在内存里，不碰应用自己的设置。
-离屏渲染画不出毛玻璃和侧栏的 source list 样式，截图里侧栏换成不透明背景和普通列表来画，
-工具栏是非活动窗口的样子。
+全部的 JPEG 转完再截图）、`--inspector <宽>`（把信息栏拖到这个宽度），以及量性能用的 `--measure`、`--scroll`。
+设置存在内存里，不碰应用自己的设置。离屏渲染画不出毛玻璃和侧栏的 source list 样式，截图里侧栏
+换成不透明背景和普通列表来画，工具栏是非活动窗口的样子；加 `--onscreen` 则把窗口放到屏幕上、
+用 `screencapture` 截真实窗口（需要屏幕录制权限）。
 
 ## 目录结构
 
