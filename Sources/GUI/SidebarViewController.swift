@@ -317,7 +317,7 @@ final class SidebarEntryCell: NSTableCellView {
         icon.contentTintColor = n.missing ? .tertiaryLabelColor : n.symbolColor
         name.stringValue = n.title
         name.textColor = n.missing ? .tertiaryLabelColor : .labelColor
-        count.stringValue = n.missing ? "找不到" : n.count.formatted()
+        count.stringValue = n.missing ? "找不到" : n.count.formatted(.number.locale(Locale(identifier: "zh_CN")))
         setAccessibilityLabel(n.missing ? "\(n.title)，找不到" : "\(n.title)，\(n.count) 张")
     }
 }

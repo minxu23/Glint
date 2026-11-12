@@ -27,6 +27,7 @@ final class ConversionSheetController: NSViewController {
     private let overwriteCheck = NSButton(checkboxWithTitle: "覆盖同名的 HEIF", target: nil, action: nil)
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
     private let startButton = NSButton(title: "转换", target: nil, action: nil)
+    private var grid = NSGridView()
 
     init(targets: ConversionTargets, store: SettingsStore) {
         self.targets = targets
@@ -95,12 +96,15 @@ final class ConversionSheetController: NSViewController {
         advancedBox.addArrangedSubview(check(overwriteCheck, nil))
         advancedBox.isHidden = true
 
-        let grid = NSGridView(views: [
+        let rule = NSBox()
+        rule.boxType = .separator
+        grid = NSGridView(views: [
             [formLabel("转成"), formatPopup],
             [formLabel("画质"), qualityRow],
             [NSGridCell.emptyContentView, qualityHintLabel],
             [formLabel("保存到"), outputPopup],
             [NSGridCell.emptyContentView, outputPath],
+            [rule, NSGridCell.emptyContentView],
             [formLabel("元数据"), metaBlock],
             [formLabel("源文件"), deleteBlock],
             [NSGridCell.emptyContentView, vstack([advancedHeader, advancedBox], spacing: 6)],
@@ -109,11 +113,13 @@ final class ConversionSheetController: NSViewController {
         grid.rowSpacing = 10
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 0).width = 64
-        for r in [5, 6, 7] { grid.row(at: r).yPlacement = .top }
-        for r in 0..<grid.numberOfRows { grid.cell(atColumnIndex: 0, rowIndex: r).yPlacement = r >= 5 ? .top : .center }
+        for r in [6, 7, 8] { grid.row(at: r).yPlacement = .top }
+        for r in 0..<grid.numberOfRows { grid.cell(atColumnIndex: 0, rowIndex: r).yPlacement = r >= 6 ? .top : .center }
+        grid.mergeCells(inHorizontalRange: NSRange(location: 0, length: 2), verticalRange: NSRange(location: 5, length: 1))
         grid.row(at: 2).topPadding = -6
         grid.row(at: 4).topPadding = -6
-        grid.row(at: 5).topPadding = 8
+        grid.row(at: 5).topPadding = 2
+        grid.row(at: 5).bottomPadding = 2
 
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
@@ -188,6 +194,7 @@ final class ConversionSheetController: NSViewController {
         qualityHintLabel.stringValue = qualityHint(settings.quality)
         outputPopup.selectItem(at: settings.outputFolder == nil ? 0 : 1)
         outputPath.isHidden = settings.outputFolder == nil
+        if grid.numberOfRows > 4 { grid.row(at: 4).isHidden = settings.outputFolder == nil }
         outputPath.stringValue = settings.outputFolder.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? ""
         verifyCheck.state = settings.effectiveVerify ? .on : .off
         verifyCheck.isEnabled = !settings.verifyLocked

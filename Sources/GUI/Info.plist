@@ -26,14 +26,14 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>JPEG 图像</string>
+			<string>图片</string>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>public.jpeg</string>
+				<string>public.image</string>
 				<string>public.folder</string>
 			</array>
 		</dict>

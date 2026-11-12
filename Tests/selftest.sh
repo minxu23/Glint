@@ -17,7 +17,7 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=613
+EXPECTED_ASSERTIONS=615
 EXPECTED_UNIT=883
 EXPECTED_GUI=226
 
@@ -1613,6 +1613,25 @@ Tests/uisnapshot "$WORK/界面.png" --convert "$WORK/界面" >/dev/null 2>&1
 want=$(./Tests/probe "$WORK/界面/拖入的照片.jpg" '{GPS}/Latitude')
 got=$(./Tests/probe "$WORK/界面/拖入的照片.heic" '{GPS}/Latitude')
 check_same "界面产物同样保留 GPS" "$got" "$want"
+# 只浏览不转换（选中、列表 + 搜索、转换面板、子文件夹）：文件夹里的文件列表、内容、
+# 修改时间、权限、扩展属性一样都不能变。
+mkdir -p "$WORK/只看/子"
+cp "$WORK/照片.jpg" "$WORK/只看/一.jpg"
+cp "$WORK/照片.jpg" "$WORK/只看/子/二.jpg"
+xattr -w com.apple.assetsd.description "只看不改" "$WORK/只看/一.jpg"
+folder_state() {
+    (cd "$WORK/只看" && find . -print0 | sort -z | xargs -0 stat -f '%N %z %m %p' \
+        && find . -type f -print0 | sort -z | xargs -0 shasum \
+        && find . -type f -print0 | sort -z | xargs -0 xattr -l)
+}
+before=$(folder_state)
+browse_status=0
+for opts in "--select 一.jpg" "--view list --search 一" "--sheet" "--sidebar 子"; do
+    # shellcheck disable=SC2086
+    Tests/uisnapshot "$WORK/只看.png" $opts "$WORK/只看" >/dev/null 2>&1 || browse_status=$?
+done
+[ "$browse_status" -eq 0 ] && pass "只浏览的四次截图都跑完了" || fail "只浏览的截图失败（退出码 $browse_status）"
+check_same "只浏览不转换时，文件夹里的文件一样都没变" "$(folder_state)" "$before"
 
 echo
 # 数的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」：比 PASSED 的话，

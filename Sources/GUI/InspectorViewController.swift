@@ -208,7 +208,7 @@ final class InspectorViewController: NSViewController {
             let all = issues.joined(separator: "\n")
             copy.target = self
             copy.action = #selector(copyIssues(_:))
-            copy.identifier = .init(all)
+            issuesToCopy = all
             views.append(copy)
         }
         if row.status == .done {
@@ -237,9 +237,12 @@ final class InspectorViewController: NSViewController {
         return s
     }
 
+    /// 「拷贝全部」拷的那些差异行（每行一条）。
+    private var issuesToCopy = ""
+
     @objc private func copyIssues(_ sender: NSButton) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(sender.identifier?.rawValue ?? "", forType: .string)
+        NSPasteboard.general.setString(issuesToCopy, forType: .string)
     }
 
     private func verdictRow(_ text: String, symbol: String?, color: NSColor) -> NSView {
@@ -288,6 +291,7 @@ final class InspectorViewController: NSViewController {
             let expanded = expandedNotes.contains(note.text)
             text.maximumNumberOfLines = expanded ? 0 : 12
             text.lineBreakMode = .byWordWrapping
+            text.cell?.truncatesLastVisibleLine = true
             views.append(text)
             if !expanded && lineCount(note.text, width: inner, lineHeight: 13 * 1.5) > 12 {
                 let more = LinkButton("显示全部") { [weak self] in
