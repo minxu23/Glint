@@ -17,8 +17,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=599
-EXPECTED_UNIT=836
+EXPECTED_ASSERTIONS=613
+EXPECTED_UNIT=879
 EXPECTED_GUI=48
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -528,6 +528,26 @@ expect_reported "AROT 后面不是两个 0 的 APP10 段" "$WORK/AROT不对.jpg"
 cp "$WORK/照片.jpg" "$WORK/尾部数据.jpg"
 make_sample ./Tests/mangle-tool --append "$WORK/尾部数据.jpg" "动态照片的视频放在这里"
 expect_reported "EOI 之后的数据" "$WORK/尾部数据.jpg" "丢失 EOI 之后的 33 字节"
+# 没有可带信息的几种不报：FlashPix 扩展（APP2 `FPXR\0`）、只有保存质量的 Ducky 段（APP12）、
+# 微信加在 EOI 之后的 `tyf-` 加 4 个 0。三样放在同一张图里，校验通过、--delete-original 删源。
+# 差一点的形状由单测逐条管；这里各留一条端到端的照报。
+f="$WORK/没有价值.jpg"
+cp "$WORK/照片.jpg" "$f"
+make_sample ./Tests/mangle-tool --segment "$f" E2 'FPXR\0\x01\0\x02\0\0\0\x10Contents'
+make_sample ./Tests/mangle-tool --segment "$f" EC 'Ducky\0\x01\0\x04\0\0\0\x50\0\0'
+make_sample ./Tests/mangle-tool --append "$f" 'tyf-\0\0\0\0'
+out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "FlashPix、只有质量的 Ducky、tyf- 标记：不报，校验通过" \
+    || { fail "FlashPix、只有质量的 Ducky、tyf- 标记：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+refute "FlashPix、只有质量的 Ducky、tyf- 标记：校验通过后删了源" "$st" test -e "$f"
+f="$WORK/差一点.jpg"
+cp "$WORK/照片.jpg" "$f"
+make_sample ./Tests/mangle-tool --segment "$f" E2 'FPXQ\0\x01\0\x02'
+make_sample ./Tests/mangle-tool --segment "$f" EC 'Ducky\0\x01\0\x04\0\0\0\x50\0\x02\0\x05hello\0\0'
+make_sample ./Tests/mangle-tool --append "$f" 'tyf-\0\0\0\x01'
+expect_reported "差一点的 FlashPix、Ducky、tyf- 标记" "$f" \
+    "丢失 APP2 段（FPXQ，8 字节）" "丢失 APP12 段（Ducky，24 字节）" "丢失 EOI 之后的 8 字节"
 
 # CMYK 的 ICC 描述文件和色彩模型被换成 sRGB/RGB，必须报。
 ./Tests/fixture --cmyk "$WORK/CMYK.jpg" >/dev/null
@@ -651,11 +671,21 @@ esac
 out=$("$BIN" --verify "$gain_ref" -o "$WORK/辅助图/缩略图.heic" 2>&1); st=$?
 refute "缩略图：校验不报 ThumbnailImages 这组键" "$st" grep -qF "ThumbnailImages" <<< "$out"
 
-# 尾部记账：辅助图在 JPEG 里放在 EOI 之后、由 MPF 登记。搬进产物的那几段不报，其余照报。
-# 真实相机照片的 EOI 之后是一张大尺寸预览图，不是辅助图，搬不走。
+# 尾部记账：辅助图在 JPEG 里放在 EOI 之后、由 MPF 登记。搬进产物的那几段、MPF 登记的
+# 大尺寸预览图不报，其余照报。这张相机照片的 EOI 之后是一张预览图（类型码 0x010002，
+# 845023 字节），前面 16 字节 0xFF 加 128 字节、后面 33 字节 0xFF 加 256 字节 MPF 没登记的
+# 相机数据（含非填充字节），连同夹着的填充一共 433 字节照报。
 cp test_pic/P1130939.JPG "$WORK/辅助图/带预览图.jpg"
-expect_reported "EOI 之后是预览图" "$WORK/辅助图/带预览图.jpg" \
-    "丢失 EOI 之后的 845456 字节（MPF 多图格式的附加图像）"
+expect_reported "EOI 之后是预览图加相机数据" "$WORK/辅助图/带预览图.jpg" \
+    "丢失 EOI 之后的 433 字节（尾部共 845456 字节，其中 845023 字节是 MPF 登记的预览图，不需要带）"
+# 把 MPF 没登记的字节都改成填充，只剩预览图：不报。
+cp test_pic/P1130939.JPG "$WORK/辅助图/只有预览图.jpg"
+make_sample ./Tests/mangle-tool --pad-trailer "$WORK/辅助图/只有预览图.jpg"
+out=$("$BIN" -v --delete-original "$WORK/辅助图/只有预览图.jpg" 2>&1); st=$?
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "EOI 之后只有预览图和填充：校验通过" \
+    || { fail "EOI 之后只有预览图和填充：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+refute "EOI 之后只有预览图和填充：校验通过后删了源" "$st" test -e "$WORK/辅助图/只有预览图.jpg"
 ./Tests/fixture --aux gainmap "$WORK/辅助图/辅助图加尾巴.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --append "$WORK/辅助图/辅助图加尾巴.jpg" "动态照片的视频放在这里"
 expect_reported "辅助图后面另有数据" "$WORK/辅助图/辅助图加尾巴.jpg" "丢失 EOI 之后的 33 字节（尾部共 "
@@ -704,13 +734,32 @@ for what in 彩色 单通道; do
         fail "$what：按 HDR 解码的最亮值 [$peak_src] → [$peak_dst]，源要明显高于 SDR、两边相差不到 10%"
     fi
 done
-# 版本标记段只在产物里真有 ISO 增益图时才算带过去。截掉增益图（EOI 之后），只剩主图里
-# 孤立的标记段——真实照片里也有这样的——必须照报。
+# 版本标记段只有版本号，一律不报。截掉增益图（EOI 之后），只剩主图里孤立的标记段——
+# 编辑软件重存时扔了增益图的真实照片就是这样：源里本来就没有增益图，转换什么也没丢，
+# 校验通过。增益图本身在源里而产物里没有时，由尾部记账和辅助图的键比对报（7e）。
 cp "$WORK/ISO增益图/源副本/单通道.jpg" "$WORK/ISO增益图/只有标记段.jpg"
 make_sample ./Tests/mangle-tool --strip-trailer "$WORK/ISO增益图/只有标记段.jpg"
 check "前提：截掉之后源里没有增益图" "$(./Tests/probe --aux "$WORK/ISO增益图/只有标记段.jpg" ISOGainMap)" "<无>"
-expect_reported "只有 ISO 21496 标记段、没有增益图" "$WORK/ISO增益图/只有标记段.jpg" \
-    "丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，32 字节）"
+out=$("$BIN" -v --verify "$WORK/ISO增益图/只有标记段.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "只有 ISO 21496 标记段、没有增益图：标记段不报，校验通过" \
+    || { fail "只有 ISO 21496 标记段、没有增益图：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+# 新版 MPF 给增益图的类型码 0x050000（华为的 HDR 照片用它）：搬进产物了就不计入尾部的丢失。
+# 0x040000（编辑前的原图）不是辅助图，照报。
+for code in 050000 040000; do
+    f="$WORK/ISO增益图/类型码$code.jpg"
+    cp "$WORK/ISO增益图/源副本/单通道.jpg" "$f"
+    make_sample ./Tests/mangle-tool --mpf-type "$f" 1 "$code"
+    check "类型码 $code：前提，ImageIO 照样读得出源里的 ISO 增益图" "$(./Tests/probe --aux "$f" ISOGainMap)" "600x450 1278226488"
+done
+f="$WORK/ISO增益图/类型码050000.jpg"
+out=$("$BIN" -v --delete-original "$f" 2>&1); st=$?
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "类型码 0x050000 的增益图搬进产物：校验通过" \
+    || { fail "类型码 0x050000 的增益图搬进产物：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+refute "类型码 0x050000 的增益图搬进产物：校验通过后删了源" "$st" test -e "$f"
+check "类型码 0x050000：产物里有 ISO 增益图" "$(./Tests/probe --aux "${f%.jpg}.heic" ISOGainMap)" "600x450 1278226488"
+expect_reported "类型码 0x040000 的附加图像" "$WORK/ISO增益图/类型码040000.jpg" "字节（MPF 多图格式的附加图像）"
 
 round "7g. ImageIO 读不出的 EXIF 标签"
 # 两边都走 ImageIO 视图时，ImageIO 在源一侧就读不出的标签两边都看不见。原始清点直接
@@ -913,7 +962,7 @@ for name in IMG_1225 P1130939; do
             "$(./Tests/probe "$WORK/照搬/$name.heic" '{MakerCanon}/LensModel')" \
             "$(./Tests/probe "$WORK/照搬/$name.jpg" '{MakerCanon}/LensModel')"
     else
-        grep -q "发现 1 处差异" <<< "$out" && grep -qF "丢失 EOI 之后的 845456 字节" <<< "$out" \
+        grep -q "发现 1 处差异" <<< "$out" && grep -qF "丢失 EOI 之后的 433 字节（尾部共 845456 字节" <<< "$out" \
             && pass "$name：只剩 EOI 之后那一行" || { fail "$name：差异不止 EOI 之后那一行"; sed 's/^/     /' <<< "$out"; }
     fi
 done

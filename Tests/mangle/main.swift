@@ -10,7 +10,13 @@
 //       在最后一个 APPn 段之后插入一个标记段（标记写十六进制，如 FE 是 COM、
 //       EB 是 APP11），内容是 <内容> 的 UTF-8 字节；`\0` 是 NUL、`\xHH` 是任意一个字节。
 //   mangle --append <文件.jpg> <内容>
-//       在文件末尾（EOI 之后）追加 <内容> 的 UTF-8 字节。
+//       在文件末尾（EOI 之后）追加 <内容> 的 UTF-8 字节；`\0`、`\xHH` 同 --segment。
+//   mangle --mpf-type <文件.jpg> <条目号> <类型码十六进制>
+//       把 MPF 索引第 <条目号> 个条目（0 是主图自己，1 是第一张附加图像）的 MP 类型码
+//       （属性字段的低 24 位）改成给定的值，高 8 位的标志不动。造新版 MPF 的增益图
+//       （0x050000）、编辑前的原图（0x040000）这类类型码的样本。
+//   mangle --pad-trailer <文件.jpg>
+//       EOI 之后不在任何 MPF 条目范围里的字节全部改成 0xFF，长度不变。
 //   mangle --unicode-comment <文件.jpg> <备注文本>
 //       把 EXIF UserComment 原地改写成 `UNICODE\0` 前缀加 <备注文本> 的 UTF-16
 //       （字节序随 TIFF 头），剩下的字节补 NUL。字段长度不变；放不下就失败。
@@ -69,6 +75,8 @@ let usage = """
       mangle --iim <文件.jpg> <记录>:<数据集>[=<值>]...
       mangle --color-gainmap <文件.jpg>
       mangle --graft-aux <文件.jpg> <提供辅助图的.jpg>
+      mangle --mpf-type <文件.jpg> <条目号> <类型码十六进制>
+      mangle --pad-trailer <文件.jpg>
 """
 
 func die(_ message: String, _ code: Int32 = 1) -> Never {
@@ -81,7 +89,7 @@ guard let first = args.first else { die(usage, 2) }
 let mode = first.hasPrefix("--") ? first : ""
 let rest = mode.isEmpty ? args : Array(args.dropFirst())
 let expected = ["": 2, "--replace": 3, "--segment": 3, "--append": 2, "--unicode-comment": 2, "--strip-trailer": 1, "--8bim": 3,
-                "--color-gainmap": 1, "--graft-aux": 2]
+                "--color-gainmap": 1, "--graft-aux": 2, "--mpf-type": 3, "--pad-trailer": 1]
 if mode == "--ifd0" || mode == "--tags" || mode == "--iim" {
     guard rest.count >= 2 else { die(usage, 2) }
 } else {
@@ -468,7 +476,37 @@ func colorizeGainMap() {
     print("增益图换成 3 通道（\(oldLength) → \(replacement.count) 字节）")
 }
 
+/// 见文件头 `--mpf-type`。
+func setMPFType(entry: Int, to type: Int) {
+    guard let (_, base, tiff, entries) = mpfIndex(bytes) else { die("这张图里没有可读的 MPF 段") }
+    guard entry >= 0, entry < entries.size / 16 else { die("MPF 索引里没有第 \(entry) 个条目") }
+    let at = entries.offset + entry * 16
+    guard let old = tiff.u32(at) else { die("MP 条目越界") }
+    let (_, u32) = encoders(tiff)
+    bytes.replaceSubrange((base + at)..<(base + at + 4), with: u32(old & ~0xFF_FFFF | type))
+    print(String(format: "第 %d 个条目的类型码 %06X → %06X", entry, old & 0xFF_FFFF, type))
+}
+
+/// 见文件头 `--pad-trailer`。
+func padTrailer() {
+    guard let layout = JPEGLayout(bytes), let eoi = layout.eoi else { die("找不到 EOI") }
+    let registered = mpfImages(in: bytes, layout).map(\.range)
+    var count = 0
+    for i in (eoi + 2)..<bytes.count where !registered.contains(where: { $0.contains(i) }) && bytes[i] != 0xFF {
+        bytes[i] = 0xFF
+        count += 1
+    }
+    print("尾部 \(count) 字节改成了 0xFF")
+}
+
 switch mode {
+case "--mpf-type":
+    guard let entry = Int(rest[1]), let type = Int(rest[2], radix: 16), (0...0xFF_FFFF).contains(type) else {
+        die("条目号写十进制，类型码写十六进制，如 1 050000")
+    }
+    setMPFType(entry: entry, to: type)
+case "--pad-trailer":
+    padTrailer()
 case "--color-gainmap":
     colorizeGainMap()
 case "--graft-aux":
@@ -511,8 +549,9 @@ case "--segment":
     bytes.insert(contentsOf: [0xFF, marker, UInt8(length >> 8), UInt8(length & 0xFF)] + content, at: at)
     print("插入了 FF\(rest[1].uppercased()) 段（\(content.count) 字节）")
 case "--append":
-    bytes.append(contentsOf: Array(rest[1].utf8))
-    print("追加了 \(rest[1].utf8.count) 字节")
+    let content = unescapedBytes(rest[1])
+    bytes.append(contentsOf: content)
+    print("追加了 \(content.count) 字节")
 case "--unicode-comment":
     guard let tiff = TIFFStructure(jpeg: bytes), let range = exifUserCommentRange(in: original) else {
         die("这张图里没有 UserComment 字段")

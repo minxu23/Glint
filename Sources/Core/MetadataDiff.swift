@@ -857,8 +857,7 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
                             comment: SourceUserComment(imageProperties(sourceImage), reading: rawExifUserComment(in: bytes)))
         + originalIssues
         + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
-        + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage),
-                             isoGainMapCarried: isoGainMapInBoth(source: sourceImage, dest: destImage))
+        + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage))
         + unportablePhotoshopResources(in: bytes)
         + extendedAttributeIssues(source: source.path, dest: dest.path)
 }
@@ -1095,13 +1094,6 @@ func originalReportedElsewhere(key: String, tag: Int, before: [String: String], 
     guard !covered.contains(key), let value = before[key] else { return false }
     let verdict = keyVerdict(key, value, after: after)
     return verdict == .lost || verdict == .changed
-}
-
-/// 源和产物里都有 ISO 增益图。系统低于 macOS 15 时 ImageIO 不认这一类，一律是 false。
-func isoGainMapInBoth(source: CGImageSource, dest: CGImageSource) -> Bool {
-    guard #available(macOS 15.0, *) else { return false }
-    return CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil
-        && CGImageSourceCopyAuxiliaryDataInfoAtIndex(dest, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil
 }
 
 /// 源和产物里都有的辅助图的宽高：同一类型、宽高与像素格式都相同才算。尾部记账

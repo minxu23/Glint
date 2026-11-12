@@ -105,12 +105,51 @@ func isISOGainMapVersionSegment(_ s: JPEGSegment, in bytes: [UInt8]) -> Bool {
     return s.marker == 0xE2 && s.payload.count == id.count + 4 && s.begins(with: id, in: bytes)
 }
 
+/// FlashPix 扩展：APP2，内容以 `FPXR\0` 开头。富士等相机用它存一张预览 JPEG 和它的目录，
+/// 都是主图的派生物。目录段和数据段一样认。
+func isFlashPixSegment(_ s: JPEGSegment, in bytes: [UInt8]) -> Bool {
+    s.marker == 0xE2 && s.begins(with: Array("FPXR".utf8) + [0], in: bytes)
+}
+
+/// Photoshop「存储为 Web 格式」写的 APP12 `Ducky` 段，且里面只有保存质量。
+///
+/// `Ducky` 之后是一串记录：2 字节标签、2 字节长度、数据，大端；遇到标签 0（必须是段的
+/// 最后 2 字节）或段尾结束。只认至少一条、每条都是标签 1（保存质量，长度 4）的；有注释
+/// （标签 2）、版权（标签 3）或别的标签，记录越界，标签 0 后面还有字节，都不认。
+func isDuckyQualityOnlySegment(_ s: JPEGSegment, in bytes: [UInt8]) -> Bool {
+    let id = Array("Ducky".utf8)
+    guard s.marker == 0xEC, s.begins(with: id, in: bytes) else { return false }
+    let end = s.payload.upperBound
+    func u16(_ at: Int) -> Int { Int(bytes[at]) << 8 | Int(bytes[at + 1]) }
+    var i = s.payload.lowerBound + id.count, records = 0
+    while i < end {
+        guard i + 2 <= end else { return false }
+        if u16(i) == 0 { if i + 2 == end { break } else { return false } }
+        guard i + 4 <= end, u16(i) == 1, u16(i + 2) == 4, i + 4 + 4 <= end else { return false }
+        records += 1
+        i += 4 + 4
+    }
+    return records > 0
+}
+
+/// 微信导出的图在 EOI 之后加的 8 字节：`tyf-` 加 4 个 0。
+private let weChatTrailer: [UInt8] = Array("tyf-".utf8) + [0, 0, 0, 0]
+
+/// 不报的段：没有可带的信息。各自的形状见判据函数，差一点就不认。
+///   - ISO 21496-1 版本标记段只有版本号；增益图本身丢没丢由尾部记账和辅助图的键比对负责。
+///   - FlashPix 扩展是相机的预览图，主图的派生物。
+///   - 只有保存质量的 Ducky 段是编码参数。
+func isWorthlessSegment(_ s: JPEGSegment, in bytes: [UInt8]) -> Bool {
+    isISOGainMapVersionSegment(s, in: bytes) || isFlashPixSegment(s, in: bytes) || isDuckyQualityOnlySegment(s, in: bytes)
+}
+
 // MARK: - MPF 多图索引与尾部记账
 
 /// MPF 索引里登记的一张附加图像。
 struct MPFImage: Equatable {
-    /// MP 类型码：条目属性字段的低 24 位。辅助图（增益图、深度图、蒙版）写的是
-    /// 0（未定义）；大尺寸预览图是 0x010001/0x010002，多视角图是 0x02xxxx。
+    /// MP 类型码：条目属性字段的低 24 位。辅助图（增益图、深度图、蒙版）多写 0（未定义），
+    /// 新版 MPF 给增益图另定了 0x050000；大尺寸预览图是 0x010001/0x010002，多视角图是
+    /// 0x02xxxx，编辑前的原图（Original Preservation Image）是 0x040000。
     let typeCode: Int
     /// 在文件里的绝对字节范围，已核对过落在文件之内。
     let range: Range<Int>
@@ -182,7 +221,7 @@ func standaloneJPEGSize(_ bytes: ArraySlice<UInt8>) -> (width: Int, height: Int)
 /// EOI 之后的字节里，哪些是已经搬进产物的辅助图。
 ///
 /// 一个 MPF 条目算作已搬走，必须同时满足：
-///   - MP 类型码是 0（辅助图写的就是这个；预览图、多视角图都不是 0）；
+///   - MP 类型码是 0 或 0x050000（辅助图写的是这两种；预览图、多视角图、编辑前的原图都不是）；
 ///   - 范围整个落在尾部之内，且不和已认下的条目重叠；
 ///   - 范围里恰好是一张完整的 JPEG（SOI 开头、EOI 结尾，不多不少）；
 ///   - 这张 JPEG 的宽高等于 `carried` 里某一张辅助图的宽高——`carried` 是源和产物
@@ -195,7 +234,7 @@ func carriedTrailerRanges(in bytes: [UInt8], _ layout: JPEGLayout,
     let trailer = (eoi + 2)..<bytes.count
     var unclaimed = carried
     var accepted: [Range<Int>] = []
-    for image in mpfImages(in: bytes, layout) where image.typeCode == 0 {
+    for image in mpfImages(in: bytes, layout) where auxiliaryMPFTypes.contains(image.typeCode) {
         guard image.range.lowerBound >= trailer.lowerBound, image.range.upperBound <= trailer.upperBound,
               !accepted.contains(where: { $0.overlaps(image.range) }),
               let size = standaloneJPEGSize(bytes[image.range]),
@@ -206,20 +245,36 @@ func carriedTrailerRanges(in bytes: [UInt8], _ layout: JPEGLayout,
     }
     return accepted
 }
+private let auxiliaryMPFTypes: Set<Int> = [0, 0x050000]
+
+/// EOI 之后的字节里，哪些是 MPF 登记的大尺寸预览图：主图的缩小拷贝，与 EXIF 缩略图同理不需要带。
+///
+/// 一个条目算作预览图，必须同时满足：MP 类型码是 0x010001 或 0x010002；范围整个落在尾部
+/// 之内，且不和 `claimed`（已认下的辅助图）或已认下的预览图重叠；范围里恰好是一张完整的 JPEG。
+func previewTrailerRanges(in bytes: [UInt8], _ layout: JPEGLayout, claimed: [Range<Int>]) -> [Range<Int>] {
+    guard let eoi = layout.eoi else { return [] }
+    let trailer = (eoi + 2)..<bytes.count
+    var accepted: [Range<Int>] = []
+    for image in mpfImages(in: bytes, layout) where previewMPFTypes.contains(image.typeCode) {
+        guard image.range.lowerBound >= trailer.lowerBound, image.range.upperBound <= trailer.upperBound,
+              !(claimed + accepted).contains(where: { $0.overlaps(image.range) }),
+              standaloneJPEGSize(bytes[image.range]) != nil
+        else { continue }
+        accepted.append(image.range)
+    }
+    return accepted
+}
+private let previewMPFTypes: Set<Int> = [0x010001, 0x010002]
 
 /// 源 JPEG 里 ImageIO 看不见、因而转换后必然丢失的部分，每段一条差异：
 /// COM 注释段、不认识的 APPn 段、EOI 之后的数据（全是 0x00/0xFF 填充的不算）。
-/// 这些都不在属性视图里，键空间比对发现不了。
+/// 这些都不在属性视图里，键空间比对发现不了。没有可带信息的几种段不报（isWorthlessSegment）。
 ///
-/// EOI 之后的数据里，已经随辅助图搬进产物的那几段（判据见 carriedTrailerRanges）
-/// 不计入；剩下的字节只要有一个不是填充，就报剩下的字节数。
-///
-/// `isoGainMapCarried`：源和产物里都有 ISO 增益图。只有这时 ISO 21496 版本标记段
-/// （见 isISOGainMapVersionSegment）才算已带过去——它只登记增益图元数据的版本，
-/// 增益图本身连同元数据在产物里了，它就没有别的信息；产物里没有 ISO 增益图，或源里
-/// 只有这个孤立的段、没有增益图，就照报。
-func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, height: Int)],
-                        isoGainMapCarried: Bool = false) -> [String] {
+/// EOI 之后共 M 字节，其中已经随辅助图搬进产物的 K 字节（carriedTrailerRanges）、MPF 登记的
+/// 预览图 P 字节（previewTrailerRanges）不计入。剩下的 R 字节里只要有一个不是填充、又不恰好是
+/// 微信的 `tyf-` 标记，就报 R：K、P 都是 0 时，R 里的非填充字节全在 MPF 登记的条目范围内就
+/// 注明是 MPF 的附加图像；K 或 P 不是 0 时注明 M 和其中的 K、P。
+func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, height: Int)]) -> [String] {
     guard let layout = JPEGLayout(bytes) else { return [] }
     var issues: [String] = []
     for s in layout.segments {
@@ -228,7 +283,7 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
             let text = String(bytes: content, encoding: .utf8)
                 ?? String(bytes: content, encoding: .isoLatin1) ?? ""
             issues.append("丢失 JPEG 注释段（COM）= \(truncate(trimPadding(text)))")
-        } else if isoGainMapCarried, isISOGainMapVersionSegment(s, in: bytes) {
+        } else if isWorthlessSegment(s, in: bytes) {
             continue
         } else if (0xE0...0xEF).contains(s.marker),
                   !portableAppSegments.contains(where: { $0.marker == s.marker && s.begins(with: $0.id, in: bytes) }) {
@@ -239,20 +294,29 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
     if let eoi = layout.eoi {
         let trailer = (eoi + 2)..<bytes.count
         let carried = carriedTrailerRanges(in: bytes, layout, carried: carriedAuxiliary)
-        // carried 里的范围互不重叠、都在尾部之内，所以剩下的字节数可以直接相减。
+        let previews = previewTrailerRanges(in: bytes, layout, claimed: carried)
+        // 两组范围互不重叠、都在尾部之内，所以剩下的字节数可以直接相减。
         let carriedCount = carried.reduce(0) { $0 + $1.count }
-        var i = trailer.lowerBound, meaningful = false
-        while i < trailer.upperBound, !meaningful {
-            if let skip = carried.first(where: { $0.contains(i) }) { i = skip.upperBound; continue }
-            meaningful = bytes[i] != 0x00 && bytes[i] != 0xFF
-            i += 1
+        let previewCount = previews.reduce(0) { $0 + $1.count }
+        // 剩下的字节：尾部去掉已认下的范围，按文件顺序的几段。
+        var rest: [Range<Int>] = [], at = trailer.lowerBound
+        for r in (carried + previews).sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if at < r.lowerBound { rest.append(at..<r.lowerBound) }
+            at = r.upperBound
         }
-        if meaningful {
-            let mpf = layout.segments.contains { $0.marker == 0xE2 && $0.begins(with: mpfID, in: bytes) }
-            let note = carriedCount > 0
-                ? "（尾部共 \(trailer.count) 字节，其中 \(carriedCount) 字节是已搬进产物的辅助图像）"
-                : mpf ? "（MPF 多图格式的附加图像）" : ""
-            issues.append("丢失 EOI 之后的 \(trailer.count - carriedCount) 字节" + note)
+        if at < trailer.upperBound { rest.append(at..<trailer.upperBound) }
+        let restCount = rest.reduce(0) { $0 + $1.count }
+        let meaningful = rest.lazy.flatMap { $0 }.filter { bytes[$0] != 0x00 && bytes[$0] != 0xFF }
+        let weChat = restCount == weChatTrailer.count && rest.flatMap { bytes[$0] } == weChatTrailer
+        if meaningful.first != nil, !weChat {
+            var parts: [String] = []
+            if carriedCount > 0 { parts.append("\(carriedCount) 字节是已搬进产物的辅助图像") }
+            if previewCount > 0 { parts.append("\(previewCount) 字节是 MPF 登记的预览图，不需要带") }
+            let registered = mpfImages(in: bytes, layout).map(\.range)
+            let note = !parts.isEmpty
+                ? "（尾部共 \(trailer.count) 字节，其中 " + parts.joined(separator: "，") + "）"
+                : meaningful.allSatisfy { i in registered.contains { $0.contains(i) } } ? "（MPF 多图格式的附加图像）" : ""
+            issues.append("丢失 EOI 之后的 \(restCount) 字节" + note)
         }
     }
     return issues

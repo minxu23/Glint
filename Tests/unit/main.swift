@@ -723,8 +723,16 @@ let oneTrailer = gainMap.count
 expectTrailer(one, carried: [(40, 30)], [], "唯一的附加图像是搬走了的辅助图：不报")
 expectTrailer(one, carried: [], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "产物里没有这张辅助图：照报")
 expectTrailer(one, carried: [(41, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "尺寸对不上：照报")
-expectTrailer(mpfJPEG([(0x010002, gainMap)]), carried: [(40, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"],
-              "MP 类型是预览图（0x010002）：尺寸碰巧对上也照报")
+expectTrailer(mpfJPEG([(0x040000, gainMap)]), carried: [(40, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"],
+              "MP 类型是编辑前的原图（0x040000）：尺寸碰巧对上也照报")
+expectTrailer(mpfJPEG([(0x020002, gainMap)]), carried: [(40, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"],
+              "MP 类型是多视角图（0x020002）：尺寸碰巧对上也照报")
+expectTrailer(mpfJPEG([(0x050000, gainMap)]), carried: [(40, 30)], [], "新版 MPF 的增益图类型码（0x050000）搬走了：不报")
+expectTrailer(mpfJPEG([(0x050000, gainMap)]), carried: [(41, 30)], ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"],
+              "类型码 0x050000、尺寸对不上：照报")
+expectTrailer(mpfJPEG([(0x050000, gainMap)], tail: Array("xyz".utf8)), carried: [(40, 30)],
+              ["丢失 EOI 之后的 3 字节（尾部共 \(oneTrailer + 3) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
+              "类型码 0x050000 的增益图后面另有数据：只报剩下的字节")
 expectTrailer(mpfJPEG([(0, gainMap)], bigEndian: true), carried: [(40, 30)], [], "大端的 MP 索引照样读")
 expectTrailer(mpfJPEG([(0, gainMap)], tail: Array("xyz".utf8)), carried: [(40, 30)],
               ["丢失 EOI 之后的 3 字节（尾部共 \(oneTrailer + 3) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
@@ -738,22 +746,23 @@ expectTrailer(mpfJPEG([(0, gainMap), (0, depthMap)]), carried: [(40, 30), (20, 1
 expectTrailer(mpfJPEG([(0, gainMap), (0, gainMap)]), carried: [(40, 30)],
               ["丢失 EOI 之后的 \(oneTrailer) 字节（尾部共 \(2 * oneTrailer) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
               "一张辅助图只能认领一个条目")
+// 索引说谎时条目不收，尾部的字节不落在任何登记的范围里，所以也不注明是 MPF 的附加图像。
 expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset = 0x7FFF_FFF0 }, carried: [(40, 30)],
-              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "条目偏移指到文件外：照报，不崩")
+              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "条目偏移指到文件外：照报，不崩")
 expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].size += 1 }, carried: [(40, 30)],
-              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "条目长度越过文件末尾：照报")
+              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "条目长度越过文件末尾：照报")
 expectTrailer(mpfJPEG([(0, gainMap)], tail: [1]) { $0[1].size += 1 }, carried: [(40, 30)],
               ["丢失 EOI 之后的 \(oneTrailer + 1) 字节\(mpfNote)"], "条目范围里不只一张 JPEG：照报")
 expectTrailer(mpfJPEG([(0, Array(gainMap.dropLast(2)) + [0x12, 0x34])]), carried: [(40, 30)],
               ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "登记的图像没有 EOI：照报")
 expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset = 0 }, carried: [(40, 30)],
-              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "偏移 0 指回主图自己：照报")
+              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "偏移 0 指回主图自己：照报")
 expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset -= 4 }, carried: [(40, 30)],
-              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "条目范围伸进主图里：照报")
+              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "条目范围伸进主图里：照报（末尾 4 字节不在登记范围内，不注明 MPF）")
 expectTrailer(mpfJPEG([(0, gainMap)], entryBytes: 0xFFFF_FFF0), carried: [(40, 30)],
-              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "MPEntry 声称的条目数离谱：照报，不崩")
+              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "MPEntry 声称的条目数离谱：照报，不崩")
 expectTrailer(mpfJPEG([(0, gainMap)], entryBytes: 40), carried: [(40, 30)],
-              ["丢失 EOI 之后的 \(oneTrailer) 字节\(mpfNote)"], "MPEntry 长度不是 16 的倍数：照报")
+              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "MPEntry 长度不是 16 的倍数：照报")
 check("条目数离谱时一个条目都不收", mpfImages(in: mpfJPEG([(0, gainMap)], entryBytes: 0xFFFF_FFF0),
                                       JPEGLayout(mpfJPEG([(0, gainMap)]))!).count, 0)
 // 逐字节截短：不崩；截在辅助图中间（尾部至少还有一个非填充字节）时必须照报。
@@ -773,6 +782,94 @@ let segmentCuts = (mpfStart + 4 + 4 + 1..<mpfEnd).filter { cut in
     return unportableSegments(in: bytes, carriedAuxiliary: [(40, 30)]).isEmpty
 }
 check("MPF 段截短到任何长度，附加图像都照报", segmentCuts, [])
+
+print("尾部记账：MPF 登记的大尺寸预览图不报，前后的数据照报")
+let preview = tinyJPEG(160, 120)
+let xyz = Array("xyz".utf8)
+expectTrailer(mpfJPEG([(0x010002, preview)]), carried: [], [], "类型码 0x010002 的完整 JPEG 预览图：不报")
+expectTrailer(mpfJPEG([(0x010001, preview)]), carried: [], [], "类型码 0x010001 的完整 JPEG 预览图：不报")
+expectTrailer(mpfJPEG([(0x010002, preview)], gap: [0xFF, 0xFF], tail: [0, 0]), carried: [], [],
+              "预览图前后只有 0x00/0xFF 填充：不报")
+expectTrailer(mpfJPEG([(0x010002, preview)], tail: xyz), carried: [],
+              ["丢失 EOI 之后的 3 字节（尾部共 \(preview.count + 3) 字节，其中 \(preview.count) 字节是 MPF 登记的预览图，不需要带）"],
+              "预览图后面另有非填充数据：报剩下的字节，注明预览图的字节数")
+expectTrailer(mpfJPEG([(0x010002, preview)], gap: [0xFF, 0x12], tail: [0xFF]), carried: [],
+              ["丢失 EOI 之后的 3 字节（尾部共 \(preview.count + 3) 字节，其中 \(preview.count) 字节是 MPF 登记的预览图，不需要带）"],
+              "预览图前面夹着非填充数据：剩下的字节连填充一起算")
+expectTrailer(mpfJPEG([(0x010002, Array(preview.dropLast(2)) + [0x12, 0x34])]), carried: [],
+              ["丢失 EOI 之后的 \(preview.count) 字节\(mpfNote)"], "登记的预览图没有 EOI：照报")
+expectTrailer(mpfJPEG([(0x010002, preview)], tail: [1]) { $0[1].size += 1 }, carried: [],
+              ["丢失 EOI 之后的 \(preview.count + 1) 字节\(mpfNote)"], "预览图的条目范围里不只一张 JPEG：照报")
+expectTrailer(mpfJPEG([(0x010002, preview)]) { $0[1].offset -= 4 }, carried: [],
+              ["丢失 EOI 之后的 \(preview.count) 字节"], "预览图的条目范围伸进主图里：照报")
+expectTrailer(mpfJPEG([(0x010003, preview)]), carried: [], ["丢失 EOI 之后的 \(preview.count) 字节\(mpfNote)"],
+              "类型码 0x010003 不是预览图：照报")
+expectTrailer(mpfJPEG([(0, gainMap), (0x010002, gainMap)]) { $0[2].offset = $0[1].offset }, carried: [(40, 30)],
+              ["丢失 EOI 之后的 \(oneTrailer) 字节（尾部共 \(2 * oneTrailer) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
+              "预览图条目与已搬走的辅助图重叠：不认，没人认领的那份照报")
+expectTrailer(mpfJPEG([(0x010002, preview), (0x010002, preview)]) { $0[2].offset = $0[1].offset }, carried: [],
+              ["丢失 EOI 之后的 \(preview.count) 字节（尾部共 \(2 * preview.count) 字节，其中 \(preview.count) 字节是 MPF 登记的预览图，不需要带）"],
+              "两个预览图条目指向同一处：只认一个，没人认领的那份照报")
+expectTrailer(mpfJPEG([(0, gainMap), (0x010002, preview)], tail: xyz), carried: [(40, 30)],
+              ["丢失 EOI 之后的 3 字节（尾部共 \(oneTrailer + preview.count + 3) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像，"
+               + "\(preview.count) 字节是 MPF 登记的预览图，不需要带）"],
+              "辅助图、预览图都有，另有数据：两项都列")
+expectTrailer(mpfJPEG([(0, gainMap), (0x010002, preview)]), carried: [(40, 30)], [], "辅助图搬走了、另有预览图：不报")
+
+print("尾部那一行：K、P 都是 0 时，按非填充字节是否全在 MPF 登记的范围内决定注不注明")
+expectTrailer(tinyJPEG(8, 8) + xyz, carried: [], ["丢失 EOI 之后的 3 字节"], "没有 MPF：不注明")
+expectTrailer(mpfJPEG([(0, gainMap)], tail: xyz), carried: [], ["丢失 EOI 之后的 \(oneTrailer + 3) 字节"],
+              "有 MPF，但另有登记范围外的数据：不注明")
+expectTrailer(mpfJPEG([(0, gainMap)], gap: [0xFF], tail: [0, 0]), carried: [], ["丢失 EOI 之后的 \(oneTrailer + 3) 字节\(mpfNote)"],
+              "登记范围外只有填充：注明 MPF")
+
+print("尾部记账：微信的 tyf- 标记不报，差一点就照报")
+let weChat = Array("tyf-".utf8) + [0, 0, 0, 0]
+expectTrailer(tinyJPEG(8, 8) + weChat, carried: [], [], "EOI 之后恰好是 tyf- 加 4 个 0：不报")
+expectTrailer(mpfJPEG([(0, gainMap)], tail: weChat), carried: [(40, 30)], [], "辅助图搬走后剩下的恰好是 tyf- 标记：不报")
+expectTrailer(tinyJPEG(8, 8) + Array("tyf-".utf8) + [0, 0, 0, 1], carried: [], ["丢失 EOI 之后的 8 字节"],
+              "tyf- 后面 4 字节有非 0：照报")
+expectTrailer(tinyJPEG(8, 8) + weChat + [0], carried: [], ["丢失 EOI 之后的 9 字节"], "tyf- 标记后面多 1 字节（填充）：照报")
+expectTrailer(tinyJPEG(8, 8) + [0xFF] + weChat, carried: [], ["丢失 EOI 之后的 9 字节"], "tyf- 标记前面多 1 字节（填充）：照报")
+expectTrailer(tinyJPEG(8, 8) + Array(weChat.dropLast()), carried: [], ["丢失 EOI 之后的 7 字节"], "少 1 字节：照报")
+expectTrailer(tinyJPEG(8, 8) + Array("tyg-".utf8) + [0, 0, 0, 0], carried: [], ["丢失 EOI 之后的 8 字节"], "标识差一个字母：照报")
+
+print("不报的段：FlashPix 扩展、只有保存质量的 Ducky 段，差一点就照报")
+/// 只有一个标记段的 JPEG。
+func oneSegmentJPEG(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] { [0xFF, 0xD8] + jpegSegment(marker, payload) + [0xFF, 0xD9] }
+func expectSegments(_ bytes: [UInt8], _ want: [String], _ why: String) {
+    checkRule("\(bytes.count) 字节", unportableSegments(in: bytes, carriedAuxiliary: []), want, why)
+}
+let fpxrDirectory = Array("FPXR".utf8) + [0, 1, 0, 2] + Array(repeating: 0x41, count: 40)
+let fpxrData = Array("FPXR".utf8) + [0, 2] + [0xFF, 0xD8, 0xFF, 0xDB] + Array(repeating: 0x55, count: 200)
+expectSegments(oneSegmentJPEG(0xE2, fpxrDirectory), [], "APP2 FPXR 目录段：不报")
+expectSegments([0xFF, 0xD8] + jpegSegment(0xE2, fpxrDirectory) + jpegSegment(0xE2, fpxrData) + [0xFF, 0xD9], [],
+               "APP2 FPXR 目录段加数据段：都不报")
+let fpxq = Array("FPXQ".utf8) + Array(fpxrDirectory.dropFirst(4))
+expectSegments(oneSegmentJPEG(0xE2, fpxq), ["丢失 APP2 段（FPXQ，\(fpxq.count) 字节）"], "APP2 FPXQ：照报")
+expectSegments(oneSegmentJPEG(0xE3, fpxrDirectory), ["丢失 APP3 段（FPXR，\(fpxrDirectory.count) 字节）"], "APP3 FPXR：照报")
+let fpxrNoNul = Array("FPXRx".utf8) + Array(repeating: 0x41, count: 4)
+expectSegments(oneSegmentJPEG(0xE2, fpxrNoNul), ["丢失 APP2 段（FPXRxAAAA，9 字节）"], "FPXR 后面不是 NUL：照报")
+
+let ducky = Array("Ducky".utf8)
+let quality: [UInt8] = [0, 1, 0, 4, 0, 0, 0, 80]
+expectSegments(oneSegmentJPEG(0xEC, ducky + quality + [0, 0]), [], "Ducky 只有保存质量、以标签 0 结束：不报")
+expectSegments(oneSegmentJPEG(0xEC, ducky + quality), [], "Ducky 只有保存质量、到段尾结束：不报")
+func lostDucky(_ payload: [UInt8]) -> [String] { ["丢失 APP12 段（Ducky，\(payload.count) 字节）"] }
+let withComment = ducky + quality + [0, 2, 0, 9, 0, 0, 0, 5] + Array("hello".utf8) + [0, 0]
+expectSegments(oneSegmentJPEG(0xEC, withComment), lostDucky(withComment), "Ducky 带注释记录（标签 2）：照报")
+let withCopyright = ducky + quality + [0, 3, 0, 7, 0, 0, 0, 3] + Array("abc".utf8) + [0, 0]
+expectSegments(oneSegmentJPEG(0xEC, withCopyright), lostDucky(withCopyright), "Ducky 带版权记录（标签 3）：照报")
+let overrun = ducky + [0, 1, 0, 4, 0, 0]
+expectSegments(oneSegmentJPEG(0xEC, overrun), lostDucky(overrun), "Ducky 记录长度越过段尾：照报")
+let oddLength = ducky + [0, 1, 0, 2, 0, 80, 0, 0]
+expectSegments(oneSegmentJPEG(0xEC, oddLength), lostDucky(oddLength), "Ducky 保存质量的长度不是 4：照报")
+let afterEnd = ducky + quality + [0, 0, 7]
+expectSegments(oneSegmentJPEG(0xEC, afterEnd), lostDucky(afterEnd), "Ducky 标签 0 后面还有字节：照报")
+let halfTag = ducky + quality + [0]
+expectSegments(oneSegmentJPEG(0xEC, halfTag), lostDucky(halfTag), "Ducky 末尾剩半个标签：照报")
+expectSegments(oneSegmentJPEG(0xEC, ducky + [0, 0]), lostDucky(ducky + [0, 0]), "Ducky 一条记录都没有：照报")
+expectSegments(oneSegmentJPEG(0xED, ducky + quality + [0, 0]), ["丢失 APP13 段（Ducky，15 字节）"], "APP13 里的 Ducky：照报")
 
 print("UserComment：经 encodeHEIF 写进 HEIC，读回与原文一致、字段里没有多余内容")
 // 这一组真的走 ImageIO 的 HEIC 写入器：userCommentForHEIFWriter 依据的是量出来的
@@ -1977,18 +2074,20 @@ let twinTypes = ["{FileContents}/Images[0]/AuxiliaryData[0]/AuxiliaryDataType": 
                  "{FileContents}/Images[0]/AuxiliaryData[1]/AuxiliaryDataType": "kCGImageAuxiliaryDataTypeDepth"]
 check("同一张图里类型重复：照旧用下标", keyingAuxiliaryDataByType(twinTypes), twinTypes)
 
-print("ISO 21496 版本标记段：产物里有 ISO 增益图才算带过去")
-let isoMarker = jpegSegment(0xE2, Array("urn:iso:std:iso:ts:21496:-1".utf8) + [0, 0, 0, 0, 0])
-let isoJPEG = [0xFF, 0xD8] + isoMarker + [0xFF, 0xD9]
-let lostMarker = "丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，32 字节）"
-check("产物里有 ISO 增益图：不报", unportableSegments(in: isoJPEG, carriedAuxiliary: [], isoGainMapCarried: true), [])
-check("产物里没有 ISO 增益图：照报", unportableSegments(in: isoJPEG, carriedAuxiliary: [], isoGainMapCarried: false),
-      [lostMarker])
-let longerMarker = [0xFF, 0xD8] + jpegSegment(0xE2, Array("urn:iso:std:iso:ts:21496:-1".utf8) + [0, 0, 0, 0, 0, 7])
-    + [0xFF, 0xD9]
-check("标识对、但不只版本号（多 1 字节）：照报",
-      unportableSegments(in: longerMarker, carriedAuxiliary: [], isoGainMapCarried: true),
+print("ISO 21496 版本标记段：恰好 32 字节的一律不报，多出字节照报")
+// 它只有版本号。增益图丢没丢由尾部记账和辅助图的键比对管：这里的 JPEG 没有增益图，标记段照样不报。
+let isoID = Array("urn:iso:std:iso:ts:21496:-1".utf8) + [0]
+let isoJPEG = [0xFF, 0xD8] + jpegSegment(0xE2, isoID + [0, 0, 0, 0]) + [0xFF, 0xD9]
+check("源里没有增益图、只有 32 字节的标记段：不报", unportableSegments(in: isoJPEG, carriedAuxiliary: []), [])
+let longerMarker = [0xFF, 0xD8] + jpegSegment(0xE2, isoID + [0, 0, 0, 0, 7]) + [0xFF, 0xD9]
+check("标识对、但不只版本号（多 1 字节）：照报", unportableSegments(in: longerMarker, carriedAuxiliary: []),
       ["丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，33 字节）"])
+let shorterMarker = [0xFF, 0xD8] + jpegSegment(0xE2, isoID + [0, 0, 0]) + [0xFF, 0xD9]
+check("标识对、但少 1 字节：照报", unportableSegments(in: shorterMarker, carriedAuxiliary: []),
+      ["丢失 APP2 段（urn:iso:std:iso:ts:21496:-1，31 字节）"])
+let isoInAPP3 = [0xFF, 0xD8] + jpegSegment(0xE3, isoID + [0, 0, 0, 0]) + [0xFF, 0xD9]
+check("同样的内容放在 APP3：照报", unportableSegments(in: isoInAPP3, carriedAuxiliary: []),
+      ["丢失 APP3 段（urn:iso:std:iso:ts:21496:-1，32 字节）"])
 
 print("产物比原图大")
 check("大 33%", growthPercent(inBytes: 300, outBytes: 400), "33%")
