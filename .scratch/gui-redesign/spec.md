@@ -24,6 +24,13 @@ Status: ready-for-agent
 1. 照片本身是主角，界面的框架尽量退后；
 2. 备注在哪、会不会丢，说清楚——这是用户最在意的东西。
 
+## 1.1 名字
+
+应用叫**存照**（取自「立此存照」：把照片存好，也留下凭据）。用户看得到应用名的地方都用它：
+`Info.plist` 的 `CFBundleName` / `CFBundleDisplayName`、应用菜单、关于面板、没有选中条目时的窗口
+标题、README。应用包是 `存照.app`。`CFBundleIdentifier`、可执行文件名、命令行工具 `jpeg2heif`
+都不变。
+
 ## 2. 约束
 
 - AppKit，纯代码（没有 xib、没有资源目录），`swiftc` + Command Line Tools 能编；零第三方依赖。
