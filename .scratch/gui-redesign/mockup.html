@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>JPEG 转 HEIF · 界面草图</title>
+<style>
+/* 草图只为定排版与层级；真实界面用 AppKit 的系统色和系统控件，这里的色值是系统色在两种外观下的近似。 */
+:root { font: 13px/1.38 -apple-system, "SF Pro Text", "PingFang SC", sans-serif; }
+body { margin: 0; padding: 28px; background: #8e8e93; display: grid; gap: 28px; justify-content: center; }
+h2 { font-size: 13px; font-weight: 500; color: #fff; margin: 0 0 8px; }
+.light { --win:#ececec; --content:#fff; --pane:#f6f6f6; --bar:#f1f1f1; --sep:rgba(0,0,0,.10); --text:rgba(0,0,0,.85); --text2:rgba(0,0,0,.50); --text3:rgba(0,0,0,.26);
+  --accent:#0a7aff; --sel:#0a64e0; --seltext:#fff; --green:#248a3d; --amber:#b25000; --red:#d70015; --ctl:#fff; --ctlborder:rgba(0,0,0,.16); --track:rgba(0,0,0,.10); --alt:rgba(0,0,0,.028); --well:rgba(0,0,0,.045); }
+.dark { --win:#2a2a2c; --content:#1e1e1f; --pane:#262628; --bar:#2c2c2e; --sep:rgba(255,255,255,.11); --text:rgba(255,255,255,.86); --text2:rgba(255,255,255,.55); --text3:rgba(255,255,255,.26);
+  --accent:#0a84ff; --sel:#0a58cc; --seltext:#fff; --green:#30d158; --amber:#ff9f0a; --red:#ff453a; --ctl:rgba(255,255,255,.10); --ctlborder:rgba(255,255,255,.06); --track:rgba(255,255,255,.14); --alt:rgba(255,255,255,.03); --well:rgba(255,255,255,.06); }
+.window { width: 980px; height: 640px; border-radius: 11px; overflow: hidden; background: var(--win); color: var(--text); box-shadow: 0 18px 50px rgba(0,0,0,.42), 0 0 0 .5px rgba(0,0,0,.45);
+  display: grid; grid-template-rows: 52px 1fr 48px; }
+.num { font-variant-numeric: tabular-nums; }
+/* 工具栏 */
+.toolbar { display: flex; align-items: center; gap: 12px; padding: 0 12px 0 20px; border-bottom: .5px solid var(--sep); }
+.lights { display: flex; gap: 8px; margin-right: 6px; } .lights i { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; } .lights i:nth-child(2){background:#febc2e} .lights i:nth-child(3){background:#28c840}
+.title b { display: block; font-size: 13px; font-weight: 600; } .title span { font-size: 11px; color: var(--text2); }
+.tb { margin-left: auto; display: flex; gap: 4px; }
+.tb button { all: unset; height: 28px; padding: 0 9px; border-radius: 6px; color: var(--text2); display: flex; align-items: center; gap: 5px; font-size: 13px; }
+.tb button svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* 主体 */
+.body { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+.list { background: var(--content); display: grid; grid-template-rows: 24px 1fr; min-height: 0; }
+.cols, .row { display: grid; grid-template-columns: 1fr 168px 64px 112px; align-items: center; column-gap: 12px; padding: 0 16px 0 12px; }
+.cols { font-size: 11px; color: var(--text2); border-bottom: .5px solid var(--sep); }
+.cols span:nth-child(2), .cols span:nth-child(3) { text-align: right; }
+.cols .sorted { color: var(--text); font-weight: 500; } .cols .sorted::after { content: " ▾"; font-size: 9px; }
+.row { height: 48px; } .row:nth-child(even) { background: var(--alt); }
+.file { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+.file > div:last-child { min-width: 0; }
+.thumb { flex: none; width: 34px; height: 34px; border-radius: 5px; background: linear-gradient(135deg, var(--c1,#b9c7d8), var(--c2,#6d87a6)); box-shadow: inset 0 0 0 .5px rgba(0,0,0,.18); }
+.file b { font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.file small { font-size: 11px; color: var(--text2); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.size { text-align: right; color: var(--text2); } .size em { font-style: normal; color: var(--text); }
+.save { text-align: right; } .save.grew { font-weight: 500; }
+.st { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.st svg { width: 14px; height: 14px; flex: none; }
+.st { color: var(--text); } .st svg { color: var(--ic); }
+.ok { --ic: var(--green); color: var(--text2); } .diff { --ic: var(--amber); font-weight: 500; } .fail { --ic: var(--red); font-weight: 500; } .wait { color: var(--text3); } .run { color: var(--text2); }
+.row.sel { background: var(--sel); color: var(--seltext); } .row.sel small, .row.sel .size, .row.sel .size em, .row.sel .st, .row.sel .st svg, .row.sel .save { color: var(--seltext); }
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--track); border-top-color: var(--text2); flex: none; }
+/* 右栏 */
+.pane { background: var(--pane); border-left: .5px solid var(--sep); display: grid; grid-template-rows: 44px 1fr; min-height: 0; }
+.seg { margin: 10px 16px 0; height: 24px; background: var(--track); border-radius: 6px; display: grid; grid-template-columns: 1fr 1fr; padding: 2px; box-sizing: border-box; font-size: 12px; text-align: center; line-height: 20px; }
+.seg b { font-weight: 500; background: var(--ctl); border-radius: 4.5px; box-shadow: 0 .5px 2px rgba(0,0,0,.18); } .seg span { color: var(--text2); }
+.scroll { padding: 6px 16px 16px; overflow: hidden; }
+.group { padding: 12px 0; border-bottom: .5px solid var(--sep); } .group:last-child { border-bottom: 0; }
+.group h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--text2); }
+.kv { display: grid; grid-template-columns: 76px 1fr; row-gap: 5px; } .kv dt { color: var(--text2); } .kv dd { margin: 0; }
+.kv dd small { display: block; font-size: 11px; color: var(--text2); }
+.preview { height: 132px; border-radius: 7px; background: linear-gradient(160deg, #f0b27a 0%, #d98880 34%, #5d6d7e 35%, #34495e 100%); box-shadow: inset 0 0 0 .5px rgba(0,0,0,.2); margin-bottom: 10px; }
+.name { font-size: 15px; font-weight: 600; } .path { font-size: 11px; color: var(--text2); }
+.verdict { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 600; } .verdict svg { width: 17px; height: 17px; flex: none; }
+.verdict + p { margin: 4px 0 0; font-size: 12px; color: var(--text2); }
+.issue { display: grid; grid-template-columns: 34px 1fr; column-gap: 8px; padding: 6px 0; font-size: 12px; line-height: 1.45; }
+.issue + .issue { border-top: .5px solid var(--sep); }
+.issue i { font-style: normal; font-size: 11px; font-weight: 600; } .issue i.lost { color: var(--red); } .issue i.chg { color: var(--amber); }
+.check { display: grid; grid-template-columns: 18px 1fr; column-gap: 6px; padding: 5px 0; }
+.box { width: 14px; height: 14px; border-radius: 3.5px; background: var(--ctl); box-shadow: inset 0 0 0 .5px var(--ctlborder), 0 .5px 1px rgba(0,0,0,.12); margin-top: 2px; }
+.box.on { background: var(--accent); box-shadow: none; position: relative; } .box.on::after { content: ""; position: absolute; left: 4.5px; top: 2px; width: 3.5px; height: 7px; border: solid #fff; border-width: 0 1.6px 1.6px 0; transform: rotate(45deg); }
+.check small, .help { display: block; font-size: 11px; color: var(--text2); line-height: 1.4; }
+.slider { display: grid; grid-template-columns: 1fr 26px; align-items: center; gap: 10px; } .slider .tr { height: 4px; border-radius: 2px; background: var(--track); position: relative; }
+.slider .tr::before { content: ""; position: absolute; inset: 0 34% 0 0; background: var(--accent); border-radius: 2px; } .slider .tr::after { content: ""; position: absolute; left: 66%; top: -8px; width: 20px; height: 20px; margin-left: -10px; border-radius: 50%; background: #fff; box-shadow: 0 .5px 3px rgba(0,0,0,.35); }
+.popup { height: 22px; border-radius: 5.5px; background: var(--ctl); box-shadow: inset 0 0 0 .5px var(--ctlborder), 0 .5px 1px rgba(0,0,0,.12); padding: 0 8px; display: flex; align-items: center; justify-content: space-between; } .popup::after { content: "⌃"; font-size: 9px; color: var(--text2); transform: scaleY(.8); }
+.disc { color: var(--text2); font-size: 12px; } .disc::before { content: "▸ "; font-size: 10px; }
+/* 底栏 */
+.bar { display: flex; align-items: center; gap: 14px; padding: 0 16px; border-top: .5px solid var(--sep); background: var(--bar); }
+.bar .msg { flex: 1; min-width: 0; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .bar .msg b { color: var(--text); font-weight: 500; }
+.prog { width: 180px; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; } .prog i { display: block; height: 100%; width: 42%; background: var(--accent); }
+.btn { height: 28px; padding: 0 16px; border-radius: 6.5px; display: flex; align-items: center; font-weight: 500; background: var(--ctl); box-shadow: inset 0 0 0 .5px var(--ctlborder), 0 .5px 1px rgba(0,0,0,.12); }
+.btn.primary { background: var(--accent); color: #fff; box-shadow: none; } .btn.off { opacity: .4; }
+/* 空状态 */
+.drop { background: var(--content); display: grid; place-items: center; }
+.drop .in { text-align: center; max-width: 380px; } .drop svg { width: 46px; height: 46px; stroke: var(--text3); fill: none; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+.drop h1 { font-size: 17px; font-weight: 600; margin: 12px 0 6px; } .drop p { margin: 0 0 16px; color: var(--text2); }
+.drop .btn { display: inline-flex; }
+</style>
+
+<section>
+<h2>A　转完，选中一张看结果（浅色）</h2>
+<div class="window light">
+  <div class="toolbar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="title"><b>JPEG 转 HEIF</b><span class="num">8 张照片</span></div>
+    <div class="tb">
+      <button><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>添加</button>
+      <button><svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>清空</button>
+    </div>
+  </div>
+  <div class="body">
+    <div class="list">
+      <div class="cols"><span>名称</span><span>大小</span><span>节省</span><span class="sorted">校验</span></div>
+      <div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#c9a27e;--c2:#7a5c43"></div><div><b>IMG_20201019_204116.jpg</b><small>2020 秋</small></div></div><div class="size num">1.9 MB → <em>737 KB</em></div><div class="save num">62%</div><div class="st diff"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg>5 处差异</div></div>
+        <div class="row sel"><div class="file"><div class="thumb" style="--c1:#f0b27a;--c2:#34495e"></div><div><b>IMG_20260427_202841.jpg</b><small>2026 春</small></div></div><div class="size num">3.3 MB → <em>989 KB</em></div><div class="save num">71%</div><div class="st diff"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg>2 处差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#aab7b8;--c2:#566573"></div><div><b>EF50CE1F-883E-4704-83BE-B56ED457B68D.JPG</b><small>2020 秋</small></div></div><div class="size num">11.8 MB → <em>1.5 MB</em></div><div class="save num">87%</div><div class="st diff"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg>3 处差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#d5d8dc;--c2:#839192"></div><div><b>损坏的文件.jpg</b><small>无法读取图像</small></div></div><div class="size num">12 KB</div><div class="save"></div><div class="st fail"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm2.9 9.2-.7.7L8 8.7l-2.2 2.2-.7-.7L7.3 8 5.1 5.8l.7-.7L8 7.3l2.2-2.2.7.7L8.7 8l2.2 2.2Z"/></svg>失败</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#a9cce3;--c2:#2e86c1"></div><div><b>IMG_20220428_235048.jpg</b><small>2022 春</small></div></div><div class="size num">75 KB → <em>31 KB</em></div><div class="save num">59%</div><div class="st ok"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 9.9L4.3 8.2l.8-.8L7 9.3l3.9-3.9.8.8L7 10.9Z"/></svg>无差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#f9e79f;--c2:#b7950b"></div><div><b>Screenshot_20220607_104227.jpg</b><small>截图</small></div></div><div class="size num">1.4 MB → <em>484 KB</em></div><div class="save num">65%</div><div class="st ok"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 9.9L4.3 8.2l.8-.8L7 9.3l3.9-3.9.8.8L7 10.9Z"/></svg>无差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#d7bde2;--c2:#76448a"></div><div><b>thumb25aa359ed967.jpg</b><small>截图</small></div></div><div class="size num">25 KB → <em>34 KB</em></div><div class="save grew num">大 33%</div><div class="st ok"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 9.9L4.3 8.2l.8-.8L7 9.3l3.9-3.9.8.8L7 10.9Z"/></svg>无差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#abebc6;--c2:#1e8449"></div><div><b>XHS_1650814665248.jpg</b><small>2022 春</small></div></div><div class="size num">69 KB → <em>24 KB</em></div><div class="save num">65%</div><div class="st ok"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 9.9L4.3 8.2l.8-.8L7 9.3l3.9-3.9.8.8L7 10.9Z"/></svg>无差异</div></div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="seg"><span>设置</span><b>结果</b></div>
+      <div class="scroll">
+        <div class="group" style="padding-top:8px">
+          <div class="preview"></div>
+          <div class="name">IMG_20260427_202841.jpg</div>
+          <div class="path">~/Pictures/2026 春</div>
+        </div>
+        <div class="group">
+          <div class="verdict"><svg viewBox="0 0 16 16" fill="currentColor" style="color:var(--amber)"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg>2 处差异</div>
+          <p>源文件还在，没有删除。</p>
+          <div style="margin-top:8px">
+          <div class="issue"><i class="lost">丢失</i><span>APP8 段（ITUT35&，24 字节）</span></div>
+          <div class="issue"><i class="lost">丢失</i><span>EOI 之后的 1455836 字节（MPF 多图格式的附加图像）</span></div>
+          </div>
+        </div>
+        <div class="group">
+          <dl class="kv">
+            <dt>体积</dt><dd class="num">3.3 MB → 989 KB<small>省 71%</small></dd>
+            <dt>EXIF</dt><dd>与源文件逐字节相同<small class="num">1,088 字节</small></dd>
+            <dt>元数据</dt><dd class="num">80 项</dd>
+            <dt>扩展属性</dt><dd class="num">1 项</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bar">
+    <div class="msg"><b class="num">转完 7 张，省下 14.8 MB。</b><span class="num">3 张有差异，1 张失败，源文件都还在。</span></div>
+    <div class="btn off">开始转换</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2>B　转换中，右栏是设置（深色）</h2>
+<div class="window dark">
+  <div class="toolbar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="title"><b>JPEG 转 HEIF</b><span class="num">8 张照片</span></div>
+    <div class="tb">
+      <button style="opacity:.4"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>添加</button>
+      <button style="opacity:.4"><svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>清空</button>
+    </div>
+  </div>
+  <div class="body">
+    <div class="list">
+      <div class="cols"><span class="sorted">名称</span><span>大小</span><span>节省</span><span>校验</span></div>
+      <div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#aab7b8;--c2:#566573"></div><div><b>EF50CE1F-883E-4704-83BE-B56ED457B68D.JPG</b><small>2020 秋</small></div></div><div class="size num">11.8 MB → <em>1.5 MB</em></div><div class="save num">87%</div><div class="st diff"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg>3 处差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#c9a27e;--c2:#7a5c43"></div><div><b>IMG_20201019_204116.jpg</b><small>2020 秋</small></div></div><div class="size num">1.9 MB → <em>737 KB</em></div><div class="save num">62%</div><div class="st diff"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg>5 处差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#a9cce3;--c2:#2e86c1"></div><div><b>IMG_20220428_235048.jpg</b><small>2022 春</small></div></div><div class="size num">75 KB → <em>31 KB</em></div><div class="save num">59%</div><div class="st ok"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 9.9L4.3 8.2l.8-.8L7 9.3l3.9-3.9.8.8L7 10.9Z"/></svg>无差异</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#f0b27a;--c2:#34495e"></div><div><b>IMG_20260427_202841.jpg</b><small>2026 春</small></div></div><div class="size num">3.3 MB</div><div class="save"></div><div class="st run"><span class="spin"></span>转换中</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#f9e79f;--c2:#b7950b"></div><div><b>Screenshot_20220607_104227.jpg</b><small>截图</small></div></div><div class="size num">1.4 MB</div><div class="save"></div><div class="st run"><span class="spin"></span>转换中</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#d7bde2;--c2:#76448a"></div><div><b>thumb25aa359ed967.jpg</b><small>截图</small></div></div><div class="size num">25 KB</div><div class="save"></div><div class="st wait">等待</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#abebc6;--c2:#1e8449"></div><div><b>XHS_1650814665248.jpg</b><small>2022 春</small></div></div><div class="size num">69 KB</div><div class="save"></div><div class="st wait">等待</div></div>
+        <div class="row"><div class="file"><div class="thumb" style="--c1:#d5d8dc;--c2:#839192"></div><div><b>损坏的文件.jpg</b><small>截图</small></div></div><div class="size num">12 KB</div><div class="save"></div><div class="st wait">等待</div></div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="seg"><b>设置</b><span>结果</span></div>
+      <div class="scroll" style="opacity:.55">
+        <div class="group" style="padding-top:8px">
+          <h3>画质</h3>
+          <div class="slider"><div class="tr"></div><span class="num" style="text-align:right">80</span></div>
+          <span class="help" style="margin-top:6px">日常存档的推荐区间</span>
+        </div>
+        <div class="group">
+          <h3>保存到</h3>
+          <div class="popup">源文件旁边</div>
+          <div class="check" style="margin-top:6px"><span class="box"></span><span>包含子文件夹</span></div>
+          <div class="check"><span class="box"></span><span>覆盖同名的 HEIF</span></div>
+        </div>
+        <div class="group">
+          <h3>元数据</h3>
+          <div class="check"><span class="box on"></span><span>转完逐项校验<small>比对拍摄时间、位置、备注和扩展属性，列出丢失或变化的每一项</small></span></div>
+          <div class="check"><span class="box"></span><span>把「照片」里的说明写进文件<small>说明原本存在文件之外，离开这台 Mac 容易丢</small></span></div>
+        </div>
+        <div class="group">
+          <h3>源文件</h3>
+          <div class="check"><span class="box"></span><span>校验无差异后删除源文件<small>有差异的、HEIF 反而更大的，源文件都留着</small></span></div>
+        </div>
+        <div class="group"><span class="disc">高级</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="bar">
+    <div class="msg num">已转 3 张，共 8 张</div>
+    <div class="prog"><i></i></div>
+    <div class="btn">取消</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2>C　刚打开（浅色）</h2>
+<div class="window light" style="height:420px">
+  <div class="toolbar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="title"><b>JPEG 转 HEIF</b></div>
+    <div class="tb">
+      <button><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>添加</button>
+    </div>
+  </div>
+  <div class="body">
+    <div class="drop"><div class="in">
+      <svg viewBox="0 0 48 48"><rect x="6" y="11" width="30" height="24" rx="3.5"/><path d="M12 41h27a3.5 3.5 0 0 0 3.5-3.5V17"/><circle cx="15.5" cy="19.5" r="2.6"/><path d="m6.5 30 8-7.5 6.5 6 5-4.5 9.5 8.5"/></svg>
+      <h1>把 JPEG 或文件夹拖进来</h1>
+      <p>转成 HEIF 更省空间。拍摄时间、位置、备注原样带过去，转完逐项校验给你看。</p>
+      <div class="btn">选择文件或文件夹…</div>
+    </div></div>
+    <div class="pane">
+      <div class="seg"><b>设置</b><span style="opacity:.45">结果</span></div>
+      <div class="scroll">
+        <div class="group" style="padding-top:8px">
+          <h3>画质</h3>
+          <div class="slider"><div class="tr"></div><span class="num" style="text-align:right">80</span></div>
+          <span class="help" style="margin-top:6px">日常存档的推荐区间</span>
+        </div>
+        <div class="group">
+          <h3>保存到</h3>
+          <div class="popup">源文件旁边</div>
+          <div class="check" style="margin-top:6px"><span class="box"></span><span>包含子文件夹</span></div>
+          <div class="check"><span class="box"></span><span>覆盖同名的 HEIF</span></div>
+        </div>
+        <div class="group">
+          <h3>元数据</h3>
+          <div class="check"><span class="box on"></span><span>转完逐项校验<small>比对拍摄时间、位置、备注和扩展属性，列出丢失或变化的每一项</small></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bar">
+    <div class="msg">还没有照片</div>
+    <div class="btn primary off">开始转换</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2>D　转完没选中任何一行：「结果」是这一批的汇总（浅色，只画右栏）</h2>
+<div class="window light" style="width:300px;height:520px;grid-template-rows:1fr">
+  <div class="pane" style="border-left:0">
+    <div class="seg"><span>设置</span><b>结果</b></div>
+    <div class="scroll">
+      <div class="group" style="padding-top:8px">
+        <div class="verdict num">转完 7 张，省下 14.8 MB</div>
+        <p class="num">22.6 MB → 7.8 MB</p>
+      </div>
+      <div class="group">
+        <div class="issue" style="grid-template-columns:18px 1fr auto"><svg viewBox="0 0 16 16" fill="currentColor" style="width:14px;color:var(--green)"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 9.9L4.3 8.2l.8-.8L7 9.3l3.9-3.9.8.8L7 10.9Z"/></svg><span>校验无差异</span><span class="num">4 张</span></div>
+        <div class="issue" style="grid-template-columns:18px 1fr auto"><svg viewBox="0 0 16 16" fill="currentColor" style="width:14px;color:var(--amber)"><path d="M8 1.6 15 14H1L8 1.6Zm-.7 4.9.2 4h1l.2-4H7.3ZM8 11.4a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z"/></svg><span>有差异</span><span class="num">3 张</span></div>
+        <div class="issue" style="grid-template-columns:18px 1fr auto"><svg viewBox="0 0 16 16" fill="currentColor" style="width:14px;color:var(--red)"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm2.9 9.2-.7.7L8 8.7l-2.2 2.2-.7-.7L7.3 8 5.1 5.8l.7-.7L8 7.3l2.2-2.2.7.7L8.7 8l2.2 2.2Z"/></svg><span>失败</span><span class="num">1 张</span></div>
+        <div class="issue" style="grid-template-columns:18px 1fr auto"><span></span><span>HEIF 比源文件大</span><span class="num">1 张</span></div>
+      </div>
+      <div class="group">
+        <h3>最常见的差异</h3>
+        <div class="issue" style="grid-template-columns:1fr auto"><span>丢失 EOI 之后的数据</span><span class="num">2 张</span></div>
+        <div class="issue" style="grid-template-columns:1fr auto"><span>丢失 APP2 段（FPXR）</span><span class="num">1 张</span></div>
+        <div class="issue" style="grid-template-columns:1fr auto"><span>丢失 APP8 段（ITUT35&）</span><span class="num">1 张</span></div>
+      </div>
+      <div class="group"><span class="help">点「校验」列的表头，把有差异的排到最前面。</span></div>
+    </div>
+  </div>
+</div>
+</section>
+</html>
