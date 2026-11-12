@@ -250,6 +250,30 @@ EXIF 整块照搬照常（照搬的自检把产物里多出来的说明当作照
 把源文件和产物的元数据各自递归展开成「路径 = 值」的集合，逐条比对，报告
 丢失和变化。
 
+**XMP 的键按命名空间认，不按文件里的前缀。** XMP 里一个命名空间由 URI 认，前缀只是
+文件里的简写。ImageIO 读 XMP 时，标准 URI 一律换成它自己的标准前缀；文件声明的前缀已被
+别的 URI 占着时（比如非标准的 `http://ns.adobe.com/photoshop/1.1/` 也叫 `photoshop`），
+改叫 `photoshop_1_`、`photoshop_2_`……要不要加、加几，取决于同一个进程里同时还有哪些
+XMP：批量并发转换时，两个文件用同一个前缀指不同的命名空间，同一个文件源读一次、产物读
+一次可能拿到不同的前缀。所以 `XMP/…` 键里的前缀不用 ImageIO 给的，由 URI 定：
+
+- URI 是标准的 → 标准前缀。标准的是 ImageIO 公开的十个命名空间（`exif`、`aux`、`exifEX`、
+  `dc`、`Iptc4xmpCore`、`Iptc4xmpExt`、`photoshop`、`tiff`、`xmp`、`xmpRights`），加上
+  `MicrosoftPhoto`（`http://ns.microsoft.com/photo/1.0/`）和 `iio`
+  （`http://ns.apple.com/ImageIO/1.0/`）。本节和下面各张表里点名的 XMP 键，认的都是这些
+  URI：文件把 `photoshop` 这个前缀借给别的 URI，那些字段不算 `photoshop:City` 之类。
+- 不是标准的 → ImageIO 给的前缀去掉末尾所有的 `_数字_`（`jt_1_` → `jt`）。去掉之后与某个
+  标准前缀同名、或同一个文件里有几个非标准 URI 落到同一个名字时，键里带上 URI：
+  `XMP/photoshop{http%3A%2F%2Fns.adobe.com%2Fphotoshop%2F1.1%2F}:City`。URI 的 UTF-8 字节
+  里，ASCII 字母、数字和 `-._~` 照写，其余（`/`、`:`、`%`、方括号、花括号、空格、控制
+  字符、非 ASCII）写成 `%XX`，不同的 URI 写出来一定不同。
+- 嵌套结构的路径里每一段的前缀都这样换，方括号里的下标（`[0]`、`[x-default]`）不动。同一个
+  前缀在一个文件里报出不止一个 URI、或路径里的前缀不在这个文件的「前缀 → URI」表里时，
+  那一段原样保留。
+
+正常的文件（命名空间要么是标准的、要么各用各的前缀）键与前缀一一对应，写法就是文件里的
+前缀。转换时照搬 EXIF 的自检（「视图不退步」）用的是同一套键。
+
 **源侧的时间字段以原始字节为准。** ImageIO 读 JPEG 时会把 EXIF、IPTC-IIM、XMP
 三处的时间互相调和：只改过 EXIF 时间的照片，它的属性视图里 IIM 的 `184207+0800`
 会变成 `184208`、XMP 里的 `+08:00` 随之消失；只改过 IIM 时，视图里的 EXIF 拍摄
@@ -572,6 +596,11 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
 - **`exiftool -validate` 对带 IFD1 缩略图的照搬产物报 `IFD1:ThumbnailOffset is past end of file`**。
   它把 HEIC 里 IFD1 的偏移基址加了两遍（报出的偏移 = 真实位置 + Exif 项的文件偏移），是
   exiftool 的算法问题，`exiftool -b -ThumbnailImage` 取出的缩略图与源逐字节相同。
+- **产物 XMP 里声明的前缀名可能与源不同**。一个文件把标准前缀借给了非标准 URI（如
+  `xmlns:photoshop="http://ns.adobe.com/photoshop/1.1/"`），或几个文件用同一个前缀指不同的
+  URI 又在一起批量转换时，产物 XMP 里可能写成 `photoshop_1_`、`photoshop_1__1_`、`stArea_1_`
+  这样的前缀。前缀名由 ImageIO 写产物时定，URI 和值都与源相同，含义不变；按 URI 读 XMP 的
+  软件读出的是同样的字段。`--verify` 按 URI 比（见「`--verify` 到底比什么」），不报这种差别。
 - 下面标着「（系统重写时）」的几条——MakerNote、读不出的标签、GPS 精度、Windows XP 标签、
   IFD1 缩略图、说明作者版权的调和值、非 ASCII 备注的写法——只发生在 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，
   或「EXIF 整块照搬」一节里退回的那几种情形）。默认的整块照搬下它们原样在产物里。
