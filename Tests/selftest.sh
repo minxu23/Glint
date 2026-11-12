@@ -17,7 +17,7 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=465
+EXPECTED_ASSERTIONS=470
 EXPECTED_UNIT=664
 EXPECTED_GUI=48
 
@@ -508,6 +508,20 @@ expect_reported "COM 注释段" "$WORK/注释段.jpg" "丢失 JPEG 注释段（C
 cp "$WORK/照片.jpg" "$WORK/APP11.jpg"
 make_sample ./Tests/mangle-tool --segment "$WORK/APP11.jpg" EB "JP c2pa 内容凭证"
 expect_reported "APP11 段" "$WORK/APP11.jpg" "丢失 APP11 段（JP c2pa "
+# APP10 `AROT\0\0` 是 ImageIO 写的 JPEG 码流逐行索引，转成 HEIF 后本就不该在，不报；
+# 别的 APP10（包括 AROT 后面不是两个 0 的）照报。
+cp "$WORK/照片.jpg" "$WORK/AROT.jpg"
+make_sample ./Tests/mangle-tool --segment "$WORK/AROT.jpg" EA 'AROT\0\0\0\0\0\x10\0\0\0\x20\0\0\0\x30'
+arot_out=$("$BIN" --verify "$WORK/AROT.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$arot_out" \
+    && pass "APP10 AROT 段：不报，校验通过" \
+    || { fail "APP10 AROT 段：校验报了差异"; sed 's/^/     /' <<< "$arot_out"; }
+cp "$WORK/照片.jpg" "$WORK/APP10.jpg"
+make_sample ./Tests/mangle-tool --segment "$WORK/APP10.jpg" EA "XYZ1 别的内容"
+expect_reported "别的 APP10 段" "$WORK/APP10.jpg" "丢失 APP10 段（XYZ1 "
+cp "$WORK/照片.jpg" "$WORK/AROT不对.jpg"
+make_sample ./Tests/mangle-tool --segment "$WORK/AROT不对.jpg" EA 'AROT\x01\0\0\0\0\x10'
+expect_reported "AROT 后面不是两个 0 的 APP10 段" "$WORK/AROT不对.jpg" "丢失 APP10 段（AROT，10 字节）"
 cp "$WORK/照片.jpg" "$WORK/尾部数据.jpg"
 make_sample ./Tests/mangle-tool --append "$WORK/尾部数据.jpg" "动态照片的视频放在这里"
 expect_reported "EOI 之后的数据" "$WORK/尾部数据.jpg" "丢失 EOI 之后的 33 字节"

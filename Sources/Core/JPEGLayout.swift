@@ -88,6 +88,12 @@ private let portableAppSegments: [(marker: UInt8, id: [UInt8])] = [
     (0xE2, mpfID),
     (0xED, Array("Photoshop 3.0".utf8) + [0]),
     (0xEE, Array("Adobe".utf8)),
+    // 苹果的 ImageIO 写大图 JPEG 时加的 APP10 `AROT\0\0`：这份 JPEG 压缩数据的逐行索引。
+    // 实测一张 5712×4284 的：4 字节一条共 269 条，MCU 行数（高 ÷ 16）是 268；同一个文件
+    // DRI 的重启间隔 357 正好是一行的 MCU 数（宽 ÷ 16），即每行一个重启标记，索引指向它们，
+    // 供快速解码或旋转。有没有增益图都在（exiftool 叫它 HDRGainCurve，但与增益图无关）。
+    // 它只对这份 JPEG 的码流有意义，转成 HEIF 后不该存在。只认后面紧跟两个 0 的。
+    (0xEA, Array("AROT".utf8) + [0, 0]),
 ]
 private let mpfID: [UInt8] = Array("MPF".utf8) + [0]
 

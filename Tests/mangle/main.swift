@@ -8,7 +8,7 @@
 //       一处都没有就失败。用来造"只改过某一处时间"的样本，段长度和偏移都不用动。
 //   mangle --segment <文件.jpg> <标记> <内容>
 //       在最后一个 APPn 段之后插入一个标记段（标记写十六进制，如 FE 是 COM、
-//       EB 是 APP11），内容是 <内容> 的 UTF-8 字节。
+//       EB 是 APP11），内容是 <内容> 的 UTF-8 字节；`\0` 是 NUL、`\xHH` 是任意一个字节。
 //   mangle --append <文件.jpg> <内容>
 //       在文件末尾（EOI 之后）追加 <内容> 的 UTF-8 字节。
 //   mangle --unicode-comment <文件.jpg> <备注文本>
@@ -202,6 +202,24 @@ func ifd0Entries(_ specs: [String]) {
     rewriteIFD("ifd0", added)
 }
 
+/// 文本的 UTF-8 字节，其中 `\0` 是一个 NUL 字节，`\xHH` 是一个任意字节。
+func unescapedBytes(_ text: String) -> [UInt8] {
+    var raw: [UInt8] = []
+    let utf8 = Array(text.utf8)
+    var i = 0
+    while i < utf8.count {
+        if utf8[i] == 0x5C, i + 1 < utf8.count, utf8[i + 1] == 0x30 {
+            raw.append(0); i += 2
+        } else if utf8[i] == 0x5C, i + 3 < utf8.count, utf8[i + 1] == 0x78,
+                  let b = UInt8(String(decoding: utf8[(i + 2)..<(i + 4)], as: UTF8.self), radix: 16) {
+            raw.append(b); i += 4
+        } else {
+            raw.append(utf8[i]); i += 1
+        }
+    }
+    return raw
+}
+
 /// `--tags` 的值：`<IFD>:<标签十六进制>:<类型>=<值>`，类型写明，见文件头。
 func typedEntries(_ specs: [String]) {
     guard let tiff = TIFFStructure(jpeg: bytes) else { die("这张图里没有可改写的 EXIF") }
@@ -227,20 +245,7 @@ func typedEntries(_ specs: [String]) {
             countOverride = n
             typeSpec = typeSpec[..<at]
         }
-        // 文本里的 `\0` 是一个 NUL 字节，`\xHH` 是一个任意字节。
-        var raw: [UInt8] = []
-        let utf8 = Array(text.utf8)
-        var i = 0
-        while i < utf8.count {
-            if utf8[i] == 0x5C, i + 1 < utf8.count, utf8[i + 1] == 0x30 {
-                raw.append(0); i += 2
-            } else if utf8[i] == 0x5C, i + 3 < utf8.count, utf8[i + 1] == 0x78,
-                      let b = UInt8(String(decoding: utf8[(i + 2)..<(i + 4)], as: UTF8.self), radix: 16) {
-                raw.append(b); i += 4
-            } else {
-                raw.append(utf8[i]); i += 1
-            }
-        }
+        let raw = unescapedBytes(text)
         func numbers(_ width: Int, _ encode: (Int) -> [UInt8]) -> [UInt8] {
             text.split(separator: ",").flatMap { item -> [UInt8] in
                 guard let n = Int(item), n >= 0, width == 4 || n <= 0xFFFF else { die("数值不合法：\(spec)") }
@@ -424,7 +429,7 @@ case "--segment":
     guard let marker = UInt8(rest[1], radix: 16), marker >= 0xC0, marker != 0xD8, marker != 0xD9 else {
         die("标记必须是十六进制的段标记，如 FE、EB")
     }
-    let content = Array(rest[2].utf8)
+    let content = unescapedBytes(rest[2])
     guard content.count + 2 <= 0xFFFF else { die("内容太长，一个段放不下") }
     guard let layout = JPEGLayout(bytes) else { die("不是 JPEG") }
     // 插在最后一个 APPn 之后；没有 APPn 就紧跟 SOI。
