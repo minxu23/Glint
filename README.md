@@ -837,6 +837,8 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 | `Sources/CLI/Arguments.swift` | 命令行参数解析（纯函数，可被测试直接调用） |
 | `Sources/CLI/main.swift` | 命令行入口：串起解析、转换与输出 |
 | `Sources/GUI/AppName.swift` | 应用的名字（与 `Makefile` 的 `APP_NAME` 一起，改名只动这两处） |
+| `Resources/` | 应用图标：`AppIcon.icns` 装进应用包，`AppIcon-1024.png` 是大图 |
+| `Tools/make_icon.swift` | 生成应用图标（`make icon`）：极光色渐变底上一根白色羽毛，羽尖化成光——「吉光片羽」「极光」与把格式转换看作「羽化」 |
 | `Sources/GUI/PhotoInfo.swift` | 一张图的信息：格式、尺寸、拍摄时间、相机、位置、备注的四种来源与存放位置（不依赖 AppKit） |
 | `Sources/GUI/Library.swift` | 图库：来源、后台扫描与读元数据、过滤排序搜索、张数、文件夹树、副标题与汇总（不依赖 AppKit） |
 | `Sources/GUI/ConversionRecord.swift` | 转换的对象（面板标题与说明）、转换记录（标记、汇总、最常见的差异、活动条那句话）（不依赖 AppKit） |

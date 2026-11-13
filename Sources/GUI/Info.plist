@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleExecutable</key>
 	<string>JPEG2HEIF</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.jpeg2heif.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>

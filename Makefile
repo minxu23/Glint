@@ -18,7 +18,7 @@ GUI_VIEWS := $(filter-out Sources/GUI/main.swift $(GUI_MODEL),$(wildcard Sources
 GUI_LIB   := $(GUI_VIEWS) $(GUI_MODEL)
 GUI       := Sources/GUI/main.swift $(GUI_LIB)
 
-.PHONY: all cli app install install-cli install-app uninstall test run snapshot clean \
+.PHONY: all cli app icon install install-cli install-app uninstall test run snapshot clean \
         print-artifacts
 
 all: cli app
@@ -29,15 +29,20 @@ app: $(APP)
 $(BIN): $(CORE) $(CLI)
 	$(SWIFTC) $(SWIFTFLAGS) -o $@ $(CORE) $(CLI)
 
-$(APP): $(CORE) $(GUI) Sources/GUI/Info.plist
+$(APP): $(CORE) $(GUI) Sources/GUI/Info.plist Resources/AppIcon.icns
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	$(SWIFTC) $(SWIFTFLAGS) -o $(APP)/Contents/MacOS/JPEG2HEIF $(CORE) $(GUI)
 	@cp Sources/GUI/Info.plist $(APP)/Contents/Info.plist
+	@cp Resources/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	@plutil -insert CFBundleName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
 	@plutil -insert CFBundleDisplayName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
 	@codesign --force --sign - $(APP) 2>/dev/null || true
 	@touch $(APP)
 	@echo "已生成 $(APP)"
+
+# 重新生成应用图标（Resources/ 下的产物已提交，平时不用跑）。
+icon:
+	$(SWIFTC) -O Tools/make_icon.swift -o .make_icon && ./.make_icon Resources && rm -f .make_icon
 
 run: $(APP)
 	open $(APP)
