@@ -16,7 +16,7 @@ xmpKey 在第 4 轮报告里已出现（说明落地了）。「解析器藏在 
 
 ## Comments
 
-2026-11-13 复核：对照 `16a0dcd` 的代码，两条都已落地：
+2026-11-13 复核：对照 `3db17b5` 的代码，两条都已落地：
 
 1. `xmpKey`：已有 `xmpKey(_:)`，`MetadataDiff.swift` 里手拼的 `"XMP/` 只剩它自己这一处。
 2. 「解析器藏在 init 里」：`UTCOffset.init?(parsing:)` 只转调私有的静态函数

@@ -16,7 +16,7 @@ Review: ../reviews/round-01-standards.md
 
 ## Comments
 
-2026-11-13 复核：三条逐条对照 `16a0dcd` 的代码，都已落地：
+2026-11-13 复核：三条逐条对照 `3db17b5` 的代码，都已落地：
 
 1. 测试里重复的 `allJpegs(in:)` / `heics(in:)`：已合成 `files(in:ext:deep:)`（`Tests/guimodel/main.swift`）。
 2. `detailText` 的重复 switch：现在是 `case .skipped(let why), .failed(let why)` 直接绑定；

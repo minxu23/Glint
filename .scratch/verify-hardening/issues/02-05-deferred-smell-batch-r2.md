@@ -16,7 +16,7 @@ Review: ../reviews/round-02-standards.md
 
 ## Comments
 
-2026-11-13 复核：逐条对照 `16a0dcd` 的代码，都已落地：
+2026-11-13 复核：逐条对照 `3db17b5` 的代码，都已落地：
 
 1. 四个表各自手拼键路径：已有 `metadataKey` / `exifKey` / `iptcKey`（`Sources/Eclose/MetadataDiff.swift`）。
 2. 两个偏移解析器并排：`splitIIMTime` 现在返回 `UTCOffset?`，偏移只由 `UTCOffset` 解析。
