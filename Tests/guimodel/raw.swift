@@ -1,6 +1,6 @@
 // 界面模型测试的第三部分：相机 RAW（eclose 第 2 段 b）。图库认 RAW、「可以转换」与副标题数 RAW、
 // 转换的对象 JPEG 与 RAW 混着、删除只对 JPEG 生效、RAW 永不删除、RAW 的信息与缩略图。
-// 由 Tests/guiraw/main.swift 调用（为什么不并进 guimodel-test 见 Makefile）。要真 RAW 的用例用
+// 由 guimodel 的 main.swift 调用（第 10 部分）。要真 RAW 的用例用
 // Tests/DNG.swift 现场生成的 DNG（256×192 以上，过 ImageIO 认作 RAW 的门槛；更小的会被当成 TIFF，
 // 所以先断言类型是 RAW）。
 
@@ -245,8 +245,27 @@ func testMixedConversion(_ dir: URL, source: URL) {
 }
 
 /// 本文件的用例。`source` 是一张能无差异转换的 JPEG（Tests/fixture 造的）。
+/// 「把备注写进文件」对 RAW 也算数：转换时 RAW 与 JPEG 走同一个 captionPlan，所以 captionCanBeEmbedded
+/// 对文件里没有说明字段、只有「照片」说明的 RAW 要说「能」；文件里已有说明的照旧说「不能」。
+func testRAWCaption(_ dir: URL) {
+    print("RAW：「照片」说明能不能写进文件")
+    try? FileManager.default.removeItem(at: dir)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var bare = DNGSpec(); bare.imageDescription = nil
+    let outside = dir.appendingPathComponent("只有照片说明.dng"), inside = dir.appendingPathComponent("文件里有说明.dng")
+    try? makeDNG(bare).write(to: outside)
+    try? makeDNG(DNGSpec()).write(to: inside)
+    for url in [outside, inside] { setXattr(url, photosCaptionXattr, Array("「照片」里写的说明".utf8)) }
+    func embeddable(_ url: URL) -> Bool? {
+        CGImageSourceCreateWithURL(url as CFURL, nil).map { captionCanBeEmbedded(url, image: $0) }
+    }
+    check("文件里没有说明字段的 RAW：「照片」说明算作能写进文件的", embeddable(outside), true)
+    check("文件里已有说明的 RAW：不算能写进文件的", embeddable(inside), false)
+}
+
 func runRAWTests(work: URL, source: URL?) {
     testRAWLibrary()
+    testRAWCaption(work.appendingPathComponent("RAW说明"))
     testRAWTargets()
     testRAWRecord()
     testRAWOnDisk(work.appendingPathComponent("RAW样本"))

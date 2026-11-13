@@ -21,7 +21,7 @@ ROUNDS=0
 # 同时静默少了几条」。
 EXPECTED_ASSERTIONS=671
 EXPECTED_UNIT=1199
-EXPECTED_GUI=233
+EXPECTED_GUI=310
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -245,7 +245,7 @@ grep -q "元数据校验通过" <<< "$xa_out" \
     && pass "带四个扩展属性：校验通过" \
     || { fail "带四个扩展属性：校验报了差异"; sed 's/^/     /' <<< "$xa_out"; }
 while IFS= read -r name; do
-    check_same "产物上有 $name，值逐字节相同" \
+    check_same "产物上有 ${name}，值逐字节相同" \
         "$(xattr -px "$name" "${XA%.jpg}.heic" 2>/dev/null)" "$(xattr -px "$name" "$XA" 2>/dev/null)"
 done <<< "$XATTRS4"
 "$BIN" --delete-original "$WORK/扩展属性/删源.jpg" >/dev/null 2>&1
@@ -1732,6 +1732,9 @@ mkdir -p "$WORK/界面模型/源" "$WORK/界面模型/取消" "$WORK/界面模�
 # 关掉校验时必然丢数据的那张，不能显示「校验无差异」
 ./Tests/fixture --lossy "$WORK/界面模型/未校验/有损.jpg" >/dev/null
 ./Tests/fixture "$WORK/界面模型/源/二.jpg" >/dev/null
+# 相机 RAW 的用例（Tests/guimodel/raw.swift）：混着转时的那张 JPEG，单独一份，别的用例删不到它
+mkdir -p "$WORK/界面模型/RAW"
+./Tests/fixture "$WORK/界面模型/RAW/源.jpg" >/dev/null
 # 递归开关的素材：顶层一张、子目录一张，勾与不勾的张数必须不同
 ./Tests/fixture "$WORK/界面模型/递归/顶层.jpg" >/dev/null
 ./Tests/fixture "$WORK/界面模型/递归/子目录/深处.jpg" >/dev/null

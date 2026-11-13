@@ -46,7 +46,7 @@ public struct ConversionOptions: Equatable {
     public var convertCMYK = false
     public var jobs = ProcessInfo.processInfo.activeProcessorCount
     public var inputs: [String] = []
-    /// 收哪几种源：jpeg2heif 是 [.jpeg]，raw2heif 是 [.raw]。界面目前只转 JPEG。
+    /// 收哪几种源：jpeg2heif 是 [.jpeg]，raw2heif 是 [.raw]。界面每批开始时设成两种都收（ConversionTargets.apply）。
     /// 目录扫描按它挑扩展名，convert 按内容判定后不在这里的跳过（并指路到另一个命令）。
     public var sources: Set<SourceKind> = [.jpeg]
 

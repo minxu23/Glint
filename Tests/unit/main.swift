@@ -3506,7 +3506,7 @@ expectSame(gui.options.overwrite, cli.overwrite, "覆盖同名文件")
 expectSame(gui.options.deleteOriginal, cli.deleteOriginal, "删除源文件")
 expectSame(gui.options.rawExif, cli.rawExif, "整块照搬 EXIF")
 expectSame(gui.options.convertCMYK, cli.convertCMYK, "转 CMYK 的 JPEG")
-expectSame(gui.options.sources, cli.sources, "收的源（界面目前只转 JPEG）")
+expectSame(gui.options.sources, cli.sources, "收的源（模型的默认值；界面每批开始时由 ConversionTargets.apply 设成两种都收）")
 expectSame(gui.options.jobs, cli.jobs, "并发数")
 
 // verify 是有意分叉：界面结果直接给人看，默认校验；命令行按需开关。

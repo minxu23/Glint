@@ -56,10 +56,11 @@ public func displayedExifComment(of url: URL, image: CGImageSource) -> String? {
     return displayedUserComment(seenByImageIO: exif[kCGImagePropertyExifUserComment] as? String, reading: reading)
 }
 
-/// 勾「把备注写进文件」时这张图的「照片」说明能不能写进去：是 JPEG，且 captionPlan 判定要写
+/// 勾「把备注写进文件」时这张图的「照片」说明能不能写进去：是能转换的源（JPEG 或相机 RAW，按内容
+/// 判定，同 SourceKind(typeIdentifier:)；转换时两种都走 captionPlan），且 captionPlan 判定要写
 /// （与转换时同一把尺子）。`image` 是 `url` 打开的图像。
 public func captionCanBeEmbedded(_ url: URL, image: CGImageSource) -> Bool {
-    guard (CGImageSourceGetType(image) as String?) == UTType.jpeg.identifier else { return false }
+    guard SourceKind(typeIdentifier: CGImageSourceGetType(image) as String?) != nil else { return false }
     let xmp = CGImageSourceCopyMetadataAtIndex(image, 0, nil)
     if case .write = captionPlan(source: url, properties: imageProperties(image), xmp: xmp) { return true }
     return false

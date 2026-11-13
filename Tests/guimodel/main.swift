@@ -277,4 +277,9 @@ if growing.count == 1 {
 
 runBrowsingTests(work: work)
 
+// MARK: - 10. 相机 RAW（用例在 raw.swift）
+
+let rawSource = work.appendingPathComponent("RAW/源.jpg")
+runRAWTests(work: work.appendingPathComponent("RAW"), source: fm.fileExists(atPath: rawSource.path) ? rawSource : nil)
+
 finish("界面模型测试")

@@ -249,8 +249,7 @@ struct PhotoInfo: Equatable {
     var location: GeoPoint?
     var notes: [Note] = []
     /// 「照片」的说明在、而文件里没有说明字段——勾「把备注写进文件」能写进去的那种
-    /// （判定用 Eclose 的 captionCanBeEmbedded，与转换时同一把尺子）。它只对 JPEG 说「能」：RAW 的
-    /// 这一项总是 false，面板上「这批里有几张的备注存在文件之外」不数 RAW。
+    /// （判定用 Eclose 的 captionCanBeEmbedded，与转换时同一把尺子；JPEG 与相机 RAW 都算）。
     var captionOutsideOnly = false
     /// 色彩模型是 CMYK（判定用 Eclose 的 isCMYK，与转换时同一把尺子）。这种 JPEG 转换时默认跳过。
     var isCMYK = false
