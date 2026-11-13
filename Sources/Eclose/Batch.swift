@@ -6,8 +6,6 @@ import Foundation
 
 // MARK: - 收集输入文件
 
-public let jpegExtensions: Set<String> = ["jpg", "jpeg", "jpe", "jfif", "jif"]
-
 /// `url` 相对于 `base` 的路径；不在 `base` 之下就返回 nil。
 /// 扫描输入和显示进度行都要做这件事，别各写一遍补斜杠的逻辑。
 public func relativePath(of url: URL, under base: URL) -> String? {
@@ -35,9 +33,12 @@ public struct Job {
 }
 
 /// 扫描命令行/拖拽进来的路径，展开成待转换文件列表。
+/// 目录里按扩展名挑 `opts.sources` 那几种源的文件（SourceKind.extensions）；直接点名的文件不挑，
+/// 转不转由 convert 按内容判定。
 /// 警告随返回值一起交出去，由调用方决定怎么呈现（终端 stderr 或界面提示）。
 public func collectInputs(_ opts: ConversionOptions) -> (jobs: [Job], warnings: [String]) {
     let fm = FileManager.default
+    let extensions = opts.sources.reduce(into: Set<String>()) { $0.formUnion($1.extensions) }
     var out: [Job] = []
     var warnings: [String] = []
     var seen = Set<String>()
@@ -62,12 +63,12 @@ public func collectInputs(_ opts: ConversionOptions) -> (jobs: [Job], warnings: 
                 let e = fm.enumerator(at: url, includingPropertiesForKeys: keys,
                                       options: [.skipsHiddenFiles, .skipsPackageDescendants])
                 while let f = e?.nextObject() as? URL {
-                    if jpegExtensions.contains(f.pathExtension.lowercased()) { add(f, relativeTo: url) }
+                    if extensions.contains(f.pathExtension.lowercased()) { add(f, relativeTo: url) }
                 }
             } else {
                 let items = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: keys,
                                                         options: [.skipsHiddenFiles])) ?? []
-                for f in items where jpegExtensions.contains(f.pathExtension.lowercased()) {
+                for f in items where extensions.contains(f.pathExtension.lowercased()) {
                     add(f, relativeTo: url)
                 }
             }

@@ -3,14 +3,16 @@ SWIFTC ?= swiftc
 DEPLOY ?= $(shell uname -m)-apple-macos13.0
 SWIFTFLAGS ?= -O -swift-version 5 -target $(DEPLOY)
 
-BIN  := glint
+# 两个命令行工具，都由 eclose 模块构建：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。
+CLIS := jpeg2heif raw2heif
 # 应用的名字（应用包名、Info.plist 的 CFBundleName / CFBundleDisplayName 都由它来）。
 # 改名只改这里和 Sources/GUI/AppName.swift。可执行文件名 Glint 和标识符 local.minxu.glint
 # 写在 Info.plist 里，改名时不动（用户设置跟着标识符走，不用迁）。
 APP_NAME := Glint
 APP  := $(APP_NAME).app
 ECLOSE := $(wildcard Sources/Eclose/*.swift)
-CLI  := $(wildcard Sources/CLI/*.swift)
+# 两个命令共用的源码；各自的入口在 Sources/CLI/<命令>/main.swift。
+CLI_SHARED := $(wildcard Sources/CLI/*.swift)
 # GUI_MODEL 是界面里不依赖 AppKit 的模型层，Tests/guimodel 直接链它。
 # GUI_LIB 是界面代码里不含入口的部分，截图工具要用自己的 main。
 GUI_MODEL := Sources/GUI/Model.swift Sources/GUI/PhotoInfo.swift Sources/GUI/Library.swift \
@@ -36,7 +38,7 @@ ECLOSE_TESTING := build/testing/libEclose.a
 
 all: cli app
 
-cli: $(BIN)
+cli: $(CLIS)
 app: $(APP)
 
 # 同一份 Eclose 源码，$(1) 是额外的编译标志。库和 .swiftmodule 一次编出来，放在目标库旁边。
@@ -57,7 +59,7 @@ $(ECLOSE_TESTING): $(ECLOSE)
 # 库重建 → 依赖它的产物全部重建。
 eclose-flags = -I $(dir $(filter %/libEclose.a,$^))
 
-$(BIN): $(ECLOSE_RELEASE) $(CLI)
+$(CLIS): %: $(ECLOSE_RELEASE) $(CLI_SHARED) Sources/CLI/%/main.swift
 	$(SWIFTC) $(SWIFTFLAGS) $(eclose-flags) -o $@ $^
 
 $(APP): $(ECLOSE_RELEASE) $(GUI) Sources/GUI/Info.plist Resources/AppIcon.icns
@@ -81,10 +83,10 @@ run: $(APP)
 # 应用不往 /Applications 装，只用 install-dev 放进 ~/Developer；install 只装命令行。
 install: install-cli
 
-install-cli: $(BIN)
+install-cli: $(CLIS)
 	install -d $(PREFIX)/bin
-	install -m 755 $(BIN) $(PREFIX)/bin/$(BIN)
-	@echo "命令行工具已装到 $(PREFIX)/bin/$(BIN)"
+	install -m 755 $(CLIS) $(PREFIX)/bin/
+	@echo "命令行工具已装到 $(PREFIX)/bin/：$(CLIS)"
 
 # 在仓库的上一级目录（~/Developer）放一份应用，和那里的 Spark.app 一样随手能点开。
 # 是独立的一份拷贝，make clean 不会碰它；改了界面代码后重跑一次才会更新。
@@ -94,7 +96,7 @@ install-dev: $(APP)
 	@echo "应用已放到 $(abspath ..)/$(APP)"
 
 uninstall:
-	rm -f $(PREFIX)/bin/$(BIN)
+	rm -f $(addprefix $(PREFIX)/bin/,$(CLIS))
 
 # 测试工具一律按同一条规则构建：目标依赖它链的那一份 Eclose 库（ECLOSE_LIB），
 # 各自的额外源码写在 TOOL_SRC 里。加一个工具只改这一处。
@@ -118,7 +120,7 @@ Tests/uisnapshot:    TOOL_SRC := $(GUI_LIB) Tests/snapshot/main.swift
 # 好断言命令行与界面的默认值没跑偏。
 Tests/unit-test:     ECLOSE_LIB := $(ECLOSE_TESTING)
 Tests/unit-test:     TOOL_SRC := Sources/GUI/Model.swift Sources/CLI/Arguments.swift \
-                                  Tests/harness.swift Tests/unit/main.swift
+                                  Tests/harness.swift Tests/DNG.swift Tests/unit/main.swift
 # 界面模型的测试：只需 Eclose + 模型层（都不依赖 AppKit）。
 Tests/guimodel-test: ECLOSE_LIB := $(ECLOSE_TESTING)
 Tests/guimodel-test: TOOL_SRC := $(GUI_MODEL) Tests/harness.swift Tests/guimodel/main.swift Tests/guimodel/browsing.swift
@@ -128,16 +130,16 @@ Tests/mangle-tool:   TOOL_SRC := Tests/mangle/main.swift
 $(TEST_TOOLS): $$(ECLOSE_LIB) $$(TOOL_SRC)
 	$(SWIFTC) $(SWIFTFLAGS) $(eclose-flags) -o $@ $^
 
-# 夹具不需要 Eclose，单独一条。
-Tests/fixture: Tests/fixture.swift
-	$(SWIFTC) $(SWIFTFLAGS) -o $@ $<
+# 夹具不需要 Eclose，单独一条。DNG.swift 是现场生成 DNG 的那一段，单测也链它。
+Tests/fixture: Tests/fixture-src/main.swift Tests/DNG.swift
+	$(SWIFTC) $(SWIFTFLAGS) -o $@ $^
 
 snapshot: Tests/uisnapshot
 	./Tests/uisnapshot $(or $(OUT),/tmp/glint-ui.png) $(ARGS)
 
 # 「跑一遍自检需要哪些产物」只定义一处：test 的前置和 selftest.sh 的新鲜度
 # 守卫都从这里取。
-ARTIFACTS := $(BIN) Tests/fixture $(TEST_TOOLS)
+ARTIFACTS := $(CLIS) Tests/fixture $(TEST_TOOLS)
 
 # selftest.sh 用它来问「该检查哪些产物」，免得在脚本里抄一份。
 print-artifacts:
@@ -147,4 +149,4 @@ test: $(ARTIFACTS)
 	@Tests/selftest.sh
 
 clean:
-	rm -rf $(BIN) $(APP) build Tests/fixture $(TEST_TOOLS) Tests/.work*
+	rm -rf $(CLIS) $(APP) build Tests/fixture $(TEST_TOOLS) Tests/.work*

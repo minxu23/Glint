@@ -5,10 +5,16 @@
 @testable import Eclose
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 // 下面这些 expectXxx 都是同一个形状：喂一组输入给某条判定规则，比对结果。
 // 打印与失败计数一律交给 harness 的 checkRule：自己写 print + failedChecks
 // 的话，漏掉一处 failedChecks 就会让失败悄悄变成通过。
+/// 这个扩展名在 UTType 里是不是相机 RAW。
+func utTypeIsRAW(_ ext: String) -> Bool {
+    UTType(filenameExtension: ext)?.conforms(to: .rawImage) ?? false
+}
+
 func expect(_ a: String, _ b: String, same expected: Bool, _ why: String) {
     checkRule("\(a) vs \(b)", valuesMatch(a, b), expected, why)
 }
@@ -2384,14 +2390,198 @@ check("-v 那一行：写了", CaptionOutcome.written(characters: 12).descriptio
 check("-v 那一行：没写", CaptionOutcome.skipped("文件里已有说明").description, "「照片」的说明：没写（文件里已有说明）")
 check("-v 那一行：没写成", CaptionOutcome.failed.description, "「照片」的说明：没写成")
 
+print("源的种类：按内容判定，符合 public.camera-raw-image 才算 RAW")
+checkRule("public.jpeg", SourceKind(typeIdentifier: "public.jpeg"), .jpeg, "JPEG")
+checkRule("com.adobe.raw-image", SourceKind(typeIdentifier: "com.adobe.raw-image"), .raw, "DNG 是 RAW")
+checkRule("com.canon.cr3-raw-image", SourceKind(typeIdentifier: "com.canon.cr3-raw-image"), .raw, "CR3 是 RAW")
+checkRule("com.panasonic.rw2-raw-image", SourceKind(typeIdentifier: "com.panasonic.rw2-raw-image"), .raw, "RW2 是 RAW")
+checkRule("public.tiff", SourceKind(typeIdentifier: "public.tiff"), nil, "门槛下的 DNG 被认作 TIFF：不是 RAW")
+checkRule("public.heic", SourceKind(typeIdentifier: "public.heic"), nil, "HEIC 两种都不是")
+checkRule("nil", SourceKind(typeIdentifier: nil), nil, "认不出类型的两种都不是")
+check("RAW 扩展名清单里的每一个，UTType 都认作 RAW", rawExtensions.filter { !utTypeIsRAW($0) }.sorted(), [])
+check("RAW 扩展名清单不收 tif（普通 TIFF 也叫这个）", rawExtensions.contains("tif"), false)
+check("RAW 扩展名与 JPEG 扩展名不相交", rawExtensions.isDisjoint(with: SourceKind.jpeg.extensions), true)
+check("只收 JPEG 时遇到 RAW：指路", skipReason(type: "com.canon.cr3-raw-image", accepted: [.jpeg]),
+      "是 RAW 文件（用 raw2heif）")
+check("只收 RAW 时遇到 JPEG：指路", skipReason(type: "public.jpeg", accepted: [.raw]), "是 JPEG 文件（用 jpeg2heif）")
+check("只收 JPEG 时遇到别的：照旧", skipReason(type: "public.png", accepted: [.jpeg]), "不是 JPEG 文件")
+check("只收 RAW 时遇到 TIFF：说出系统认作什么", skipReason(type: "public.tiff", accepted: [.raw]),
+      "不是 RAW 文件（系统认作 public.tiff）")
+check("只收 RAW 时认不出类型", skipReason(type: nil, accepted: [.raw]), "不是 RAW 文件")
+check("两种都收", skipReason(type: "public.png", accepted: [.jpeg, .raw]), "不是 JPEG 或 RAW 文件")
+
+print("RAW 的版本号：整理成写入器能往返的形式")
+func versions(_ props: [CFString: Any]) -> [String] {
+    let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+    let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+    return [exif[kCGImagePropertyExifVersion], exif[kCGImagePropertyExifFlashPixVersion], gps[kCGImagePropertyGPSVersion]]
+        .map { v in (v as? [NSNumber]).map { "[" + $0.map(\.stringValue).joined(separator: ",") + "]" } ?? "无" }
+}
+func versionProps(_ exifVersion: [NSNumber]?, _ flashPix: [NSNumber]?, _ gps: [NSNumber]?) -> [CFString: Any] {
+    var exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: "2024:05:06 07:08:09"]
+    exif[kCGImagePropertyExifVersion] = exifVersion
+    exif[kCGImagePropertyExifFlashPixVersion] = flashPix
+    var p: [CFString: Any] = [kCGImagePropertyExifDictionary: exif]
+    if let gps { p[kCGImagePropertyGPSDictionary] = [kCGImagePropertyGPSVersion: gps, kCGImagePropertyGPSLatitudeRef: "N"] }
+    return p
+}
+let ints = { (a: [Int]) in a.map { NSNumber(value: $0) } }
+let floats = { (a: [Double]) in a.map { NSNumber(value: $0) } }
+let cr3Like = versionProps(ints([48, 50, 51, 49]), ints([48, 49, 48, 48]), floats([2, 3, 0, 0]))
+check("CR3 那样的字符码与浮点数：换成整数形式", versions(versionFieldsForHEIFWriter(cr3Like)),
+      ["[2,3,1]", "[1,0]", "[2,3,0,0]"])
+check("浮点数换成整数类型（写入器丢浮点数）",
+      ((versionFieldsForHEIFWriter(cr3Like)[kCGImagePropertyGPSDictionary] as? [CFString: Any])?[kCGImagePropertyGPSVersion]
+          as? [NSNumber])?.contains { CFNumberIsFloatType($0) }, false)
+let rw2Like = versionProps(ints([2, 3]), ints([1, 0]), ints([2, 3, 0, 0]))
+check("RW2 那样的整数形式：原样", versions(versionFieldsForHEIFWriter(rw2Like)), ["[2,3]", "[1,0]", "[2,3,0,0]"])
+check("不需要整理时原样返回同一个字典",
+      (versionFieldsForHEIFWriter(rw2Like) as NSDictionary).isEqual(to: rw2Like as [AnyHashable: Any]), true)
+check("字符码只认恰好 4 个 ASCII 数字：[48,50,51] 原样",
+      versions(versionFieldsForHEIFWriter(versionProps(ints([48, 50, 51]), nil, nil))), ["[48,50,51]", "无", "无"])
+check("GPSVersion 不按字符码读：[50,46,51,46] 原样",
+      versions(versionFieldsForHEIFWriter(versionProps(nil, nil, ints([50, 46, 51, 46])))), ["无", "无", "[50,46,51,46]"])
+check("不是整数值的浮点数原样", versions(versionFieldsForHEIFWriter(versionProps(floats([2.5, 3]), nil, nil))),
+      ["[2.5,3]", "无", "无"])
+checkRule("0231", versionDigits("0231"), [2, 3, 1], "0231 → [2,3,1]")
+checkRule("0230", versionDigits("0230"), [2, 3], "末尾的 0 去掉")
+checkRule("0100", versionDigits("0100"), [1, 0], "至少留两个")
+checkRule("0220", versionDigits("0220"), [2, 2], "0220 → [2,2]")
+checkRule("02a1", versionDigits("02a1"), nil, "不是数字")
+for (elements, codes, want) in [
+    (["48", "50", "51", "49"], true, "0231"), (["2", "3", "1"], true, "0231"), (["2", "3"], true, "0230"),
+    (["1", "0"], true, "0100"), (["48", "0", "1"], true, "4801"), (["48", "9", "8"], true, "4898"),
+    (["2", "3", "0", "0"], false, "2.3.0.0"), (["2", "3"], false, "2.3.0.0"),
+] as [([String], Bool, String)] {
+    checkRule(elements.joined(separator: ","), canonicalVersion(elements, characterCodes: codes), want,
+              "版本号的规范写法：[\(elements.joined(separator: ","))] → \(want)")
+}
+checkRule("2.5", canonicalVersion(["2.5"], characterCodes: true), nil, "不是整数：不规范化")
+checkRule("2,13", canonicalVersion(["2", "13"], characterCodes: true), nil, "后面的数超出一位：不规范化")
+
+// 写进 HEIC 再读回：拿现场生成的 DNG 当源，AddImageFromSource 时覆盖版本号字段，和 RAW 管线一样。
+// 先钉住前提（不整理时写入器真会写坏、写丢），再断言整理过的读回与源等价。
+let versionRoot = FileManager.default.temporaryDirectory.appendingPathComponent("glint-version-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: versionRoot, withIntermediateDirectories: true)
+let versionDNG = versionRoot.appendingPathComponent("源.dng")
+try? makeDNG(DNGSpec()).write(to: versionDNG)
+/// 用 `props` 覆盖源的属性写一张 HEIC，读回三个版本号字段的规范写法（读不出是「无」）。
+func roundTripVersions(_ props: [CFString: Any]) -> [String] {
+    guard let src = CGImageSourceCreateWithURL(versionDNG as CFURL, nil) else { return ["源读不出"] }
+    var p = imageProperties(src)
+    for (k, v) in props {
+        var d = p[k] as? [CFString: Any] ?? [:]
+        for (kk, vv) in v as? [CFString: Any] ?? [:] { d[kk] = vv }
+        p[k] = d
+    }
+    let out = versionRoot.appendingPathComponent("\(UUID().uuidString).heic")
+    guard let dest = CGImageDestinationCreateWithURL(out as CFURL, "public.heic" as CFString, 1, nil) else { return ["写不出"] }
+    CGImageDestinationAddImageFromSource(dest, src, 0, p as CFDictionary)
+    guard CGImageDestinationFinalize(dest), let back = CGImageSourceCreateWithURL(out as CFURL, nil) else { return ["写不出"] }
+    var flat: [String: String] = [:]
+    flatten(imageProperties(back), into: &flat)
+    func field(_ key: String, _ codes: Bool) -> String {
+        let elements = (0..<8).compactMap { flat["\(key)[\($0)]"] }
+        return elements.isEmpty ? "无" : canonicalVersion(elements, characterCodes: codes) ?? elements.joined(separator: ",")
+    }
+    return [field("{Exif}/ExifVersion", true), field("{Exif}/FlashPixVersion", true), field("{GPS}/GPSVersion", false)]
+}
+check("前提：源是 RAW", CGImageSourceCreateWithURL(versionDNG as CFURL, nil).flatMap { CGImageSourceGetType($0) as String? },
+      "com.adobe.raw-image")
+check("前提：不整理时字符码被写坏、浮点数的 GPSVersion 写丢", roundTripVersions(cr3Like), ["4801", "4898", "无"])
+check("整理过的读回与源等价（0231、0100、2.3.0.0）", roundTripVersions(versionFieldsForHEIFWriter(cr3Like)),
+      ["0231", "0100", "2.3.0.0"])
+check("RW2 那样的整数形式本来就能往返", roundTripVersions(rw2Like), ["0230", "0100", "2.3.0.0"])
+
+print("RAW 的转换：10 位、不重编、不删、不是 RAW 的跳过")
+let rawRoot = versionRoot.appendingPathComponent("转换")
+try? FileManager.default.createDirectory(at: rawRoot, withIntermediateDirectories: true)
+var rawOpts = ConversionOptions()
+rawOpts.sources = [.raw]
+/// 8 位的产物：把源解码后画进 8 位的位图再编码。模拟显影没走 RAW 的路。
+let eightBit: HEIFEncoder = { src, props, _, url in
+    guard let image = CGImageSourceCreateImageAtIndex(src, 0, nil),
+          let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+          let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.heic" as CFString, 1, nil) else { return false }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    guard let flat = ctx.makeImage() else { return false }
+    CGImageDestinationAddImage(dest, flat, props as CFDictionary)
+    return CGImageDestinationFinalize(dest)
+}
+let depthDest = rawRoot.appendingPathComponent("八位.heic")
+let depthResult = convert(versionDNG, opts: rawOpts, dest: depthDest, encode: eightBit)
+if case .failed(let why) = depthResult {
+    check("产物不是 10 位：转换失败并说明", why, "产物不是 10 位（Depth = 8），没有交出")
+} else {
+    fail("产物不是 10 位却没有失败（\(depthResult)）")
+}
+check("产物不是 10 位：目标没有产物", FileManager.default.fileExists(atPath: depthDest.path), false)
+check("产物不是 10 位：不留临时文件",
+      ((try? FileManager.default.contentsOfDirectory(atPath: rawRoot.path)) ?? []).filter { $0.hasPrefix(".glint-") }, [])
+
+// 产物比源大也不重编：真编码一遍，再在末尾接一个大 free 盒子撑大产物。
+var rawEncodes = 0
+let padded: HEIFEncoder = { src, props, xmp, url in
+    rawEncodes += 1
+    guard encodeHEIF(src, properties: props, xmp: xmp, to: url),
+          let handle = try? FileHandle(forWritingTo: url) else { return false }
+    defer { try? handle.close() }
+    let size = 4 * fileSize(versionDNG)
+    let header = [24, 16, 8, 0].map { UInt8(size >> $0 & 0xFF) } + Array("free".utf8)
+    handle.seekToEndOfFile()
+    handle.write(Data(header + [UInt8](repeating: 0, count: size - 8)))
+    return true
+}
+let grownDest = rawRoot.appendingPathComponent("变大.heic")
+let grownResult = convert(versionDNG, opts: rawOpts, dest: grownDest, encode: padded)
+check("RAW 的产物比源大：编码步骤只调用 1 次（不重编）", rawEncodes, 1)
+if case .converted(let r) = grownResult {
+    check("RAW 的产物比源大：没有重编那一行", r.reencode == nil, true)
+    check("RAW 的产物比源大：照常说明变大", r.note?.contains("HEIF 比原图大") ?? false, true)
+} else {
+    fail("撑大的 RAW 产物没转成（\(grownResult)）"); fail("RAW 的产物比源大：变大说明")
+}
+
+var deleting = rawOpts
+deleting.deleteOriginal = true
+let keptDest = rawRoot.appendingPathComponent("不删.heic")
+let keptResult = convert(versionDNG, opts: deleting, dest: keptDest)
+check("RAW 永远不删：源还在", FileManager.default.fileExists(atPath: versionDNG.path), true)
+if case .converted(let r) = keptResult {
+    check("RAW 永远不删：说明为什么没删", r.note, "RAW 原片永远保留，没有删除")
+    check("RAW 的产物是 10 位", imageDepth(keptDest), 10)
+    check("RAW 的 EXIF 照搬那一步：本段还没有", r.rawExif, .kept("RAW 的 EXIF 还不能整块照搬"))
+} else {
+    fail("RAW 没转成（\(keptResult)）"); fail("RAW 的产物是 10 位"); fail("RAW 的 EXIF 照搬那一步")
+}
+let jpegOnly = convert(versionDNG, opts: ConversionOptions(), dest: rawRoot.appendingPathComponent("只收JPEG.heic"))
+if case .skipped(let why) = jpegOnly {
+    check("只收 JPEG 时 RAW 跳过并指路", why, "是 RAW 文件（用 raw2heif）")
+} else {
+    fail("只收 JPEG 时 RAW 没有跳过（\(jpegOnly)）")
+}
+let tinyDNG = rawRoot.appendingPathComponent("小.dng")
+var tinySpec = DNGSpec()
+(tinySpec.width, tinySpec.height) = (64, 48)
+try? makeDNG(tinySpec).write(to: tinyDNG)
+let tinyResult = convert(tinyDNG, opts: rawOpts, dest: rawRoot.appendingPathComponent("小.heic"))
+if case .skipped(let why) = tinyResult {
+    check("门槛下的 DNG 按「不是 RAW」跳过", why, "不是 RAW 文件（系统认作 public.tiff）")
+} else {
+    fail("门槛下的 DNG 没有跳过（\(tinyResult)）")
+}
+try? FileManager.default.removeItem(at: versionRoot)
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
-    guard case .run(let o)? = try? parseArguments(args) else { return nil }
+    guard case .run(let o)? = try? parseArguments(args, command: .jpeg2heif) else { return nil }
     return o
 }
 func expectRejected(_ args: [String], _ why: String) {
     do {
-        _ = try parseArguments(args)
+        _ = try parseArguments(args, command: .jpeg2heif)
         fail("\(why)：本该报错却接受了")
     } catch {
         pass("\(why)：\(error.localizedDescription)")
@@ -2408,13 +2598,43 @@ check("--embed-caption 打开写说明", parsed(["--embed-caption", "a.jpg"])?.e
 check("-- 之后的横杠开头当文件名",
       parsed(["--", "-奇怪的文件名.jpg"])?.inputs, ["-奇怪的文件名.jpg"])
 check("-o 展开 ~", parsed(["-o", "~/out", "a.jpg"])?.output?.path.hasPrefix("/"), true)
-check("--help 退出码 0", try? parseArguments(["--help"]), .showUsage(exitCode: 0))
-check("没给输入时退出码 1", try? parseArguments([]), .showUsage(exitCode: 1))
+check("--help 退出码 0", try? parseArguments(["--help"], command: .jpeg2heif), .showUsage(exitCode: 0))
+check("没给输入时退出码 1", try? parseArguments([], command: .jpeg2heif), .showUsage(exitCode: 1))
 expectRejected(["-q", "1.5", "a.jpg"], "质量超出 0–1")
 expectRejected(["-q", "abc", "a.jpg"], "质量不是数字")
 expectRejected(["-j", "0", "a.jpg"], "并发数为零")
 expectRejected(["--bogus", "a.jpg"], "未知选项")
 expectRejected(["-q"], "选项缺少参数")
+check("jpeg2heif 只收 JPEG", parsed(["a.jpg"])?.sources, [.jpeg])
+check("jpeg2heif 默认并发数是核数", parsed(["a.jpg"])?.jobs, ProcessInfo.processInfo.activeProcessorCount)
+check("jpeg2heif 接受 --delete-original", parsed(["--delete-original", "a.jpg"])?.deleteOriginal, true)
+
+print("raw2heif 的参数：只收 RAW、默认并发数保守、不接受 --delete-original")
+func parsedRAW(_ args: [String]) -> ConversionOptions? {
+    guard case .run(let o)? = try? parseArguments(args, command: .raw2heif) else { return nil }
+    return o
+}
+check("raw2heif 只收 RAW", parsedRAW(["a.CR3"])?.sources, [.raw])
+check("raw2heif 默认并发数是 min(核数, 4)", parsedRAW(["a.CR3"])?.jobs, min(ProcessInfo.processInfo.activeProcessorCount, 4))
+check("raw2heif 的 -j 照给的来", parsedRAW(["-j", "9", "a.CR3"])?.jobs, 9)
+check("raw2heif 的其余选项与 jpeg2heif 同义",
+      parsedRAW(["-r", "-f", "-n", "-v", "--verify", "--no-raw-exif", "--embed-caption", "-q", "0.6", "-o", "/tmp/出", "目录"])
+          .map { [$0.recursive, $0.overwrite, $0.dryRun, $0.verbose, $0.verify, !$0.rawExif, $0.embedCaption,
+                  $0.quality == 0.6, $0.output?.path == "/tmp/出"] },
+      [true, true, true, true, true, true, true, true, true])
+do {
+    _ = try parseArguments(["--delete-original", "a.CR3"], command: .raw2heif)
+    fail("raw2heif 接受了 --delete-original")
+} catch {
+    check("raw2heif 拒绝 --delete-original 并说明", error.localizedDescription, "raw2heif 不删除 RAW 原片，不接受 --delete-original")
+}
+do {
+    _ = try parseArguments(["a.CR3", "-v", "--delete-original"], command: .raw2heif)
+    fail("raw2heif 接受了放在后面的 --delete-original")
+} catch {
+    pass("raw2heif 拒绝放在后面的 --delete-original")
+}
+check("raw2heif --help 退出码 0", try? parseArguments(["--help"], command: .raw2heif), .showUsage(exitCode: 0))
 
 print("命令行与界面的默认值")
 // 两端都取自 ConversionOptions.default，这组断言守住它们不各自漂移。
@@ -2423,7 +2643,7 @@ func expectSame<T: Equatable>(_ gui: T, _ cli: T, _ why: String) {
                : fail("\(why) 不一致：界面 \(gui)，命令行 \(cli)")
 }
 // 命令行这一侧必须真的解析一遍参数再读默认值，否则"两端一致"从未碰过命令行。
-guard case .run(let cli) = (try? parseArguments(["照片.jpg"])) else {
+guard case .run(let cli) = (try? parseArguments(["照片.jpg"], command: .jpeg2heif)) else {
     fail("命令行解析不出最简单的一条命令"); finish("单元测试")
 }
 let gui = ConversionModel()
@@ -2432,6 +2652,8 @@ expectSame(gui.options.quality, cli.quality, "质量")
 expectSame(gui.options.overwrite, cli.overwrite, "覆盖同名文件")
 expectSame(gui.options.deleteOriginal, cli.deleteOriginal, "删除源文件")
 expectSame(gui.options.rawExif, cli.rawExif, "整块照搬 EXIF")
+expectSame(gui.options.sources, cli.sources, "收的源（界面目前只转 JPEG）")
+expectSame(gui.options.jobs, cli.jobs, "并发数")
 
 // verify 是有意分叉：界面结果直接给人看，默认校验；命令行按需开关。
 // 若哪天两端被"统一"成一样，这条会失败，提醒连同 Model.swift 的注释一起改。

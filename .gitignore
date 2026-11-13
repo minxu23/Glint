@@ -1,6 +1,9 @@
 # 构建产物（Makefile 的 clean 目标清的就是这些）
-/glint
+/jpeg2heif
+/raw2heif
 /build/
+# 拆成两个命令之前的命令行工具
+/glint
 /Glint.app/
 # 改名 Glint 之前的应用包
 /吉光.app/

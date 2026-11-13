@@ -1,5 +1,6 @@
 // 生成一张带完整元数据的测试 JPEG：拍摄时间、GPS 位置、备注、相机参数、
 // IPTC 与 XMP 字段一应俱全，供 selftest.sh 校验转换后是否原样保留。
+// 加 --dng 时改为生成一张拜耳 DNG（相机 RAW），结构与门槛见 Tests/DNG.swift。
 //
 // 用法串是下面的 `usage` 常量，不在注释里另写一份：改了旗标只改一处就够。
 // 各旗标的含义：
@@ -51,6 +52,10 @@
 //            和 --no-text 一起用：只加回一个说明字段，值是「只有 <种类> 的说明」。tiff 是 TIFF
 //            ImageDescription，iptc 是 IPTC Caption/Abstract（这两种写进属性字典），xmp 是 XMP 包里的
 //            dc:description（并 XMP 包时加，属性字典里没有）。
+//   --dng    生成 DNG 而不是 JPEG：默认 256×192、方向 1，带拍摄时间、作者、版权、说明和 GPS
+//            （秒带小数，好暴露写入器的取整）。--orientation <n> 改方向；--size <宽>x<高> 改尺寸
+//            （64x48 这种小于门槛的，ImageIO 认作 public.tiff）；--no-gps 不带 GPS；
+//            --no-description 不带说明（TIFF ImageDescription），好测 --embed-caption 写进去。
 //   --unique-id <值>
 //            EXIF ImageUniqueID（ExifIFD 0xA420）写成 <值>。ImageIO 的写入器什么长度都照写
 //            （值的 UTF-8 加一个 NUL），读的时候却只认恰好 33 字节的写法，所以给别的长度的值
@@ -63,6 +68,46 @@ import ImageIO
 import UniformTypeIdentifiers
 
 var args = Array(CommandLine.arguments.dropFirst())
+
+if args.first == "--dng" {
+    args.removeFirst()
+    let dngUsage = "用法: fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--no-description] <输出.dng>"
+    func dngFail() -> Never {
+        FileHandle.standardError.write(Data("\(dngUsage)\n".utf8))
+        exit(2)
+    }
+    var spec = DNGSpec()
+    while let flag = args.first, flag.hasPrefix("--") {
+        args.removeFirst()
+        switch flag {
+        case "--orientation":
+            guard let v = args.first.flatMap(Int.init), (1...8).contains(v) else { dngFail() }
+            spec.orientation = v
+            args.removeFirst()
+        case "--size":
+            let parts = (args.first ?? "").split(separator: "x").compactMap { Int($0) }
+            guard parts.count == 2, parts.allSatisfy({ $0 >= 16 && $0 % 2 == 0 }) else { dngFail() }
+            (spec.width, spec.height) = (parts[0], parts[1])
+            args.removeFirst()
+        case "--no-gps":
+            spec.gps = nil
+        case "--no-description":
+            spec.imageDescription = nil
+        default:
+            dngFail()
+        }
+    }
+    guard args.count == 1 else { dngFail() }
+    do {
+        try makeDNG(spec).write(to: URL(fileURLWithPath: args[0]))
+    } catch {
+        FileHandle.standardError.write(Data("写不出 \(args[0])：\(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    print("已生成 \(args[0])（\(spec.width)×\(spec.height)，方向 \(spec.orientation)）")
+    exit(0)
+}
+
 let lossy = args.contains("--lossy")
 let noExifOffset = args.contains("--no-exif-offset")
 let cmyk = args.contains("--cmyk")
@@ -80,6 +125,7 @@ args.removeAll {
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
     + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap]"
     + " [--unique-id <值>] [--caption-only tiff|iptc|xmp] <输出.jpg>"
+    + "\n      fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--no-description] <输出.dng>"
 var uniqueID: String?
 if let at = args.firstIndex(of: "--unique-id") {
     guard at + 1 < args.count else {

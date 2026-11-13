@@ -32,6 +32,8 @@ let usage = """
                                                      「不同（N 字节 → M 字节，第 K 个字节起不同）」
           probe --exif-at-end <文件.heic>            Exif 项是否结束在文件末尾：「末尾」或「不在末尾」
           probe --pixels <文件>                      解码出的 8 位 RGBA 像素的宽高与散列（FNV-1a 64 位）
+          probe --image <文件>                       类型、第 0 张的位深、存储的宽高与方向标签，
+                                                     如「public.heic 10 位 256x192 方向 6」
     辅助图类型是 kCGImageAuxiliaryDataType 后面那一截，如 HDRGainMap、Depth。
     """
 func die(_ message: String) -> Never {
@@ -100,6 +102,16 @@ if args.first == "--exif-at-end", args.count == 2 {
     guard let b = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: args[1]))) else { print("<无法读取>"); exit(1) }
     guard case .tiff = heifExif(b) else { print("<无>"); exit(0) }
     print(heifExifEndsAtFileEnd(b) ? "末尾" : "不在末尾")
+    exit(0)
+}
+// 文件本身的描述：ImageIO 给的类型，第 0 张的位深、存储的宽高（不按方向转正）、方向标签。
+// 键空间里没有这几样（imageProperties 去掉了宽高，位深是尺子不比的键），RAW 的断言要它们。
+if args.first == "--image", args.count == 2 {
+    guard let image = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[1]) as CFURL, nil),
+          let type = CGImageSourceGetType(image) as String?,
+          let p = CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any] else { print("<无法读取>"); exit(1) }
+    func n(_ key: CFString) -> String { (p[key] as? NSNumber)?.stringValue ?? "?" }
+    print("\(type) \(n(kCGImagePropertyDepth)) 位 \(n(kCGImagePropertyPixelWidth))x\(n(kCGImagePropertyPixelHeight)) 方向 \(n(kCGImagePropertyOrientation))")
     exit(0)
 }
 // 按方向转正之前的原始像素：解码第 0 张，画进 8 位 sRGB RGBA，散列全部字节。

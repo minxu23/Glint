@@ -1,9 +1,11 @@
 #!/bin/bash
-# glint 自检：造一张元数据齐全的 JPEG，转成 HEIC，然后逐项校验。
+# 自检：造一张元数据齐全的 JPEG，用 jpeg2heif 转成 HEIC，然后逐项校验；再造拜耳 DNG，
+# 用 raw2heif 转成 10 位 HEIC，核对显影、方向与校验规则。
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-BIN="./glint"
+BIN="./jpeg2heif"
+RAW_BIN="./raw2heif"
 # 每次运行一个独立的工作目录（见下面 mktemp），并发的两次运行互不相干。
 # 成功结束时删掉；失败或提前退出时留着供诊断，并打印路径。
 WORK=""
@@ -17,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=615
-EXPECTED_UNIT=883
+EXPECTED_ASSERTIONS=649
+EXPECTED_UNIT=949
 EXPECTED_GUI=226
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -114,6 +116,7 @@ expect_carried() {
 make_sample() { "$@" >/dev/null 2>&1 || fail "造不出样本：$*"; }
 
 [ -x "$BIN" ] || bail "先运行 make 构建 $BIN"
+[ -x "$RAW_BIN" ] || bail "先运行 make 构建 $RAW_BIN"
 
 # 所有测试工具都由 Makefile 构建，这里只管用。
 for tool in fixture probe; do
@@ -1575,6 +1578,88 @@ for b in 1 2 3; do
     [ "$carried" = 40 ] || grep -F "EXIF 没有照搬" <<< "$out" | sort | uniq -c | sed 's/^/     /'
     rm -rf "$N/批$b"
 done
+
+round "7r. raw2heif：RAW 按系统默认显影转成 10 位 HEIF"
+# 测试用的 RAW 是现场生成的拜耳 DNG（Tests/DNG.swift），不提交二进制。256×192 时 ImageIO 认作
+# RAW；转出来必须真是 10 位、存储的宽高不变、方向标签照抄（方向 6 不被转两遍：像素不转，
+# 标签仍是 6），只看「转换成功」不够——门槛下的 DNG 也能「成功」转出一张 8 位预览图。
+R="$WORK/RAW"
+mkdir -p "$R"
+./Tests/fixture --dng "$R/横.dng" >/dev/null || fail "造不出 DNG"
+./Tests/fixture --dng --orientation 6 "$R/竖.dng" >/dev/null || fail "造不出方向 6 的 DNG"
+check "前提：夹具被 ImageIO 认作 RAW（16 位）" "$(./Tests/probe --image "$R/横.dng")" "com.adobe.raw-image 16 位 256x192 方向 1"
+check "前提：方向 6 的夹具" "$(./Tests/probe --image "$R/竖.dng")" "com.adobe.raw-image 16 位 256x192 方向 6"
+make_sample xattr -w com.apple.metadata:kMDItemFinderComment "RAW 的访达备注" "$R/横.dng"
+touch -t 202001020304 "$R/横.dng"
+out=$("$RAW_BIN" -v "$R/横.dng" "$R/竖.dng" 2>&1); st=$?
+check "两张都转成，退出码 0" "$st" "0"
+check "产物：10 位、宽高不变、方向 1" "$(./Tests/probe --image "$R/横.heic")" "public.heic 10 位 256x192 方向 1"
+check "产物：方向 6 照抄、像素不转" "$(./Tests/probe --image "$R/竖.heic")" "public.heic 10 位 256x192 方向 6"
+check "-v 说明 RAW 的 EXIF 还不能整块照搬" "$(grep -c '^    EXIF 没有照搬：RAW 的 EXIF 还不能整块照搬$' <<< "$out")" "2"
+refute "RAW 不重编（-v 里没有重编那一行）" "$st" grep -qF "重编了一次" <<< "$out"
+check_same "修改时间照抄" "$(stat -f %m "$R/横.heic")" "$(stat -f %m "$R/横.dng")"
+check_same "扩展属性照抄" "$(xattr -p com.apple.metadata:kMDItemFinderComment "$R/横.heic" 2>/dev/null)" \
+    "$(xattr -p com.apple.metadata:kMDItemFinderComment "$R/横.dng" 2>/dev/null)"
+check_same "拍摄时间带过去" "$(./Tests/probe "$R/横.heic" '{Exif}/DateTimeOriginal')" "$(./Tests/probe "$R/横.dng" '{Exif}/DateTimeOriginal')"
+check_same "作者带过去" "$(./Tests/probe "$R/横.heic" '{TIFF}/Artist')" "$(./Tests/probe "$R/横.dng" '{TIFF}/Artist')"
+# 门槛下的 DNG 被 ImageIO 认作 TIFF，读到的是预览图：按「不是 RAW」跳过，不交出一张 8 位的图。
+./Tests/fixture --dng --size 64x48 "$R/小.dng" >/dev/null || fail "造不出门槛下的 DNG"
+check "前提：门槛下的 DNG 被认作 TIFF" "$(./Tests/probe --image "$R/小.dng")" "public.tiff 8 位 4x3 方向 1"
+out=$("$RAW_BIN" "$R/小.dng" 2>&1); st=$?
+check "门槛下的 DNG：跳过并说明系统认作什么" "$out" "跳过 小.dng: 不是 RAW 文件（系统认作 public.tiff）"
+refute "门槛下的 DNG：没有产物" "$st" test -e "$R/小.heic"
+# --delete-original：报错退出，一张都不转，RAW 原样还在。
+mkdir -p "$R/删"
+./Tests/fixture --dng "$R/删/原片.dng" >/dev/null
+before=$(shasum "$R/删/原片.dng")
+out=$("$RAW_BIN" --delete-original "$R/删/原片.dng" 2>&1); st=$?
+check "--delete-original：退出码 2" "$st" "2"
+check "--delete-original：说明 raw2heif 不删 RAW" "$out" "错误: raw2heif 不删除 RAW 原片，不接受 --delete-original"
+check "--delete-original：RAW 原样还在" "$(shasum "$R/删/原片.dng")" "$before"
+check "--delete-original：没有产物" "$(find "$R/删" -name '*.heic' | wc -l | tr -d ' ')" "0"
+# 预演、-r -o 镜像子目录、--embed-caption：和 JPEG 同一套实现。
+mkdir -p "$R/树/子"
+./Tests/fixture --dng "$R/树/顶.dng" >/dev/null
+./Tests/fixture --dng --no-description "$R/树/子/深.dng" >/dev/null
+make_sample xattr -w com.apple.assetsd.description "RAW 里的说明" "$R/树/子/深.dng"
+out=$("$RAW_BIN" -n -r "$R/树" -o "$R/树出" 2>&1); st=$?
+check "预演：两张都列出来" "$(grep -c '^\[预演\] ' <<< "$out")" "2"
+refute "预演：不建输出目录" "$st" test -e "$R/树出"
+out=$("$RAW_BIN" -v -r --embed-caption "$R/树" -o "$R/树出" 2>&1)
+[ -f "$R/树出/顶.heic" ] && [ -f "$R/树出/子/深.heic" ] \
+    && pass "-r -o：镜像子目录" || { fail "-r -o：子目录没镜像"; sed 's/^/     /' <<< "$out"; }
+grep -qF "「照片」的说明：写进了 XMP 的 dc:description（8 个字符）" <<< "$out" \
+    && pass "--embed-caption：说明写进 RAW 的产物" || { fail "--embed-caption：说明没写进去"; sed 's/^/     /' <<< "$out"; }
+check "--embed-caption：产物 XMP 里读得到" "$(./Tests/probe "$R/树出/子/深.heic" 'XMP/dc:description[x-default]')" "RAW 里的说明"
+grep -qF "「照片」的说明：没写（没有说明）" <<< "$out" \
+    && pass "--embed-caption：没有说明的那张照实说" || fail "--embed-caption：没有说明的那张没说"
+
+round "7s. 混合目录：两个命令各转各的，遇到另一种指路"
+M="$WORK/混合"
+mkdir -p "$M"
+cp "$WORK/照片.jpg" "$M/照片.jpg"
+./Tests/fixture --dng "$M/甲.dng" >/dev/null
+./Tests/fixture --dng --size 64x48 "$M/小.dng" >/dev/null
+# RAW 与同名 JPEG 并存：两个命令都输出 同名.heic，后转的因「输出已存在」跳过。
+cp "$WORK/照片.jpg" "$M/同名.jpg"
+./Tests/fixture --dng "$M/同名.dng" >/dev/null
+echo "not an image" > "$M/说明.txt"
+out=$("$BIN" -n "$M" 2>&1)
+check "jpeg2heif 扫目录只挑 JPEG" "$(grep '^\[预演\]' <<< "$out" | sed 's/ →.*//' | sort | tr '\n' ' ')" "[预演] 同名.jpg [预演] 照片.jpg "
+out=$("$RAW_BIN" -n "$M" 2>&1)
+check "raw2heif 扫目录只挑 RAW" "$(grep '^\[预演\]' <<< "$out" | sed 's/ →.*//' | sort | tr '\n' ' ')" "[预演] 同名.dng [预演] 甲.dng "
+grep -qxF "跳过 小.dng: 不是 RAW 文件（系统认作 public.tiff）" <<< "$out" \
+    && pass "raw2heif 扫到门槛下的 DNG：按内容跳过" || { fail "raw2heif 没有跳过门槛下的 DNG"; sed 's/^/     /' <<< "$out"; }
+check "jpeg2heif 点名 RAW：跳过并指路" "$("$BIN" "$M/甲.dng" 2>&1)" "跳过 甲.dng: 是 RAW 文件（用 raw2heif）"
+check "raw2heif 点名 JPEG：跳过并指路" "$("$RAW_BIN" "$M/照片.jpg" 2>&1)" "跳过 照片.jpg: 是 JPEG 文件（用 jpeg2heif）"
+refute "点名另一种时都没有产物" 0 test -e "$M/甲.heic" -o -e "$M/照片.heic"
+"$BIN" "$M" >/dev/null 2>&1
+check "jpeg2heif 转了同名的 JPEG" "$(./Tests/probe --image "$M/同名.heic" | cut -d' ' -f2)" "8"
+out=$("$RAW_BIN" "$M" 2>&1)
+grep -qxF "跳过 同名.dng: 输出已存在: 同名.heic（用 -f 覆盖）" <<< "$out" \
+    && pass "后转的 RAW 因输出已存在跳过" || { fail "同名的 RAW 没有跳过"; sed 's/^/     /' <<< "$out"; }
+check "同名的产物仍是 JPEG 转的那份（8 位）" "$(./Tests/probe --image "$M/同名.heic" | cut -d' ' -f2)" "8"
+check "甲.dng 转成 10 位" "$(./Tests/probe --image "$M/甲.heic" | cut -d' ' -f2)" "10"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

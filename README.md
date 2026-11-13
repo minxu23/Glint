@@ -1,10 +1,12 @@
 # Glint
 
 把 JPEG 转成 HEIF（`.heic`），并完整保留元数据——拍摄时间、拍摄位置、备注、
-相机参数、版权、访达备注与标签、文件时间戳，一样不丢。
+相机参数、版权、访达备注与标签、文件时间戳，一样不丢。相机 RAW 也能按系统默认的显影
+转成 10 位 HEIF，RAW 原片永远保留。
 
-提供**图形界面**和**命令行**两种用法，两者共用同一套转换核心
-（[Sources/Eclose/Converter.swift](Sources/Eclose/Converter.swift)）。
+提供**图形界面**和**命令行**两种用法，两者共用同一个格式转换模块 eclose（羽化，
+[Sources/Eclose/](Sources/Eclose/)）。命令行是两个命令：`jpeg2heif` 转 JPEG，`raw2heif` 转 RAW；
+图形界面目前只转 JPEG。
 
 macOS 原生实现（Swift + ImageIO + AppKit），**零依赖**：不需要 ImageMagick、
 libheif、exiftool 或 Python 包，也不需要安装完整的 Xcode——命令行工具即可构建。
@@ -16,7 +18,7 @@ libheif、exiftool 或 Python 包，也不需要安装完整的 Xcode——命�
 make
 ```
 
-`make` 会同时产出命令行工具 `glint` 和应用 `Glint.app`。命令行工具装到系统里：
+`make` 会同时产出两个命令行工具 `jpeg2heif`、`raw2heif` 和应用 `Glint.app`。命令行工具装到系统里：
 
 ```bash
 sudo make install          # 或 make install-cli PREFIX=~/.local
@@ -78,19 +80,22 @@ sudo make install          # 或 make install-cli PREFIX=~/.local
 
 ## 命令行
 
+两个命令，选项相同：`jpeg2heif` 转 JPEG，`raw2heif` 转相机 RAW（见下面「RAW」）。
+
 ```bash
-glint 照片.jpg
+jpeg2heif 照片.jpg
 ```
 
 整个文件夹批量转换（`-r` 递归子目录，`-o` 指定输出位置）：
 
 ```bash
-glint -r ~/Pictures/2024 -o ~/Pictures/2024-heic
+jpeg2heif -r ~/Pictures/2024 -o ~/Pictures/2024-heic
 ```
 
 不加 `-r` 只处理该文件夹顶层，不下钻子目录；不加 `-o` 就把 `.heic` 输出到每张
 源图旁边。文件夹里的非 JPEG（`.png`、`.txt`、已有的 `.heic`）会被自动跳过，
-`.JPG` / `.jpeg` / `.JPEG` 等大小写写法都认。
+`.JPG` / `.jpeg` / `.JPEG` 等大小写写法都认。点名一张 RAW 给 `jpeg2heif`（或一张 JPEG
+给 `raw2heif`）时跳过并指路：`跳过 IMG_0001.CR3: 是 RAW 文件（用 raw2heif）`。
 
 | 选项 | 说明 |
 | --- | --- |
@@ -109,8 +114,33 @@ glint -r ~/Pictures/2024 -o ~/Pictures/2024-heic
 想在替换原图前确认万无一失：
 
 ```bash
-glint --verify -r ~/Pictures/相册 -o /tmp/heic-试转
+jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
 ```
+
+### RAW
+
+```bash
+raw2heif -r ~/Pictures/RAW -o ~/Pictures/RAW-heic
+```
+
+- **显影**：系统默认显影（ImageIO 从 RAW 直接编码成 HEIC，与 `CIRAWFilter` 默认参数的输出实测
+  平均差 0.08%），产物全尺寸、**10 位**。写完读回核对位深，不是 10 位就算失败，不交出一张 8 位的图。
+  方向标签照抄、像素不转（不用 `CIRAWFilter` + `writeHEIF10Representation`：它把方向转进像素
+  又保留方向标签，竖拍的照片转两遍）。
+- **RAW 永远保留**：`raw2heif` 没有删除源文件的选项，给了 `--delete-original` 就报错退出、一张都不转。
+- **认哪些文件**：扫目录时按扩展名挑（本机 ImageIO 能读的 RAW：CR2 CR3 CRW NEF NRW ARW SRF SR2
+  RAF ORF RW2 RWL DNG PEF SRW 3FR IIQ ERF MOS MRW DCR FFF 等，清单见
+  [`rawExtensions`](Sources/Eclose/SourceKind.swift)），转不转按内容判定：ImageIO 给的类型符合
+  `public.camera-raw-image` 才转。很小的 DNG 会被 ImageIO 当成 TIFF、只读到里面的预览图，按
+  「不是 RAW 文件（系统认作 public.tiff）」跳过。
+- **默认并发数** `min(核数, 4)`：RAW 显影吃内存，先取一个保守值，`-j` 照给的来。
+- **RAW 和同名 JPEG 放在一起**时两个命令都输出同一个 `X.heic`，后转的那个按现有规则
+  「输出已存在」跳过（`-f` 覆盖）。
+- **EXIF**：RAW 的 EXIF 还不能整块照搬（`-v` 里写着），由系统从属性字典重写；`--no-raw-exif`
+  目前对 RAW 不起作用。写入前整理版本号：ImageIO 读佳能 CR3 时 `ExifVersion` 给的是字符码
+  `[48,50,51,49]`（"0231"），原样交给写入器会被写坏成 `[48,0,1]`，所以先换成写入器认的 `[2,3,1]`
+  （规则见 [`versionFieldsForHEIFWriter`](Sources/Eclose/CameraRaw.swift)）。
+- 时间戳、扩展属性、`--embed-caption`、`-n`、`-f`、`-o` 镜像目录与 JPEG 同一套实现。
 
 ## 保留了哪些元数据
 
@@ -802,6 +832,13 @@ make test
 窗口跑一遍完整流程，并确认只浏览不转换时文件夹里的文件一样都不变。产物比原图大时的重编没法让系统编码器按需出错，
 单元测试给转换注入假的编码步骤来测。
 
+RAW 用现场生成的拜耳 DNG 测（[`Tests/DNG.swift`](Tests/DNG.swift)，`Tests/fixture --dng`），不提交
+二进制 RAW。ImageIO 能读 DNG 却不能写，夹具按 DNG 规范自己拼：IFD0 是 8 位小预览加 DNG 标签，
+原始数据是 SubIFD 里的 16 位 RGGB 拜耳阵列，推荐的那一串标签（黑白电平、默认裁切、色彩矩阵、
+AsShotNeutral……）都要带上，原始数据还得从 4096 字节以后开始，ImageIO 才认作 RAW；尺寸也有门槛：
+256×192 认作 RAW，128×96、64×48 被当成 TIFF。所以测试一律断言「类型是 RAW、产物是 10 位」，
+不只看转换成功。
+
 每次运行在独立的 `Tests/.work.XXXXXX` 目录里进行，两个 `make test` 可以同时跑。
 全部通过时这个目录会被删掉；有失败或提前退出时保留，并在末尾打印路径供诊断。
 
@@ -839,9 +876,12 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 | `Sources/Eclose/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）、MPF 索引与尾部记账、APP13 里的 Photoshop 资源 |
 | `Sources/Eclose/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
 | `Sources/Eclose/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
+| `Sources/Eclose/SourceKind.swift` | 源的两种（JPEG、RAW）：扫目录用的扩展名、按内容判定、跳过时指路 |
+| `Sources/Eclose/CameraRaw.swift` | 相机 RAW 专有的规则：写入前整理版本号、产物必须是 10 位（项目里别的 `Raw` 说的是 EXIF 原始字节） |
 | `Sources/Eclose/PhotoNotes.swift` | 界面信息栏读备注用的几条规则（「照片」的说明、访达备注、EXIF 备注该显示什么、说明能不能写进文件），只公开结果 |
-| `Sources/CLI/Arguments.swift` | 命令行参数解析（纯函数，可被测试直接调用） |
-| `Sources/CLI/main.swift` | 命令行入口：串起解析、转换与输出 |
+| `Sources/CLI/Arguments.swift` | 两个命令共用的参数解析（纯函数，可被测试直接调用），两者只差收的源、默认并发数与 `--delete-original` |
+| `Sources/CLI/Run.swift` | 两个命令共用的流程：用法、串起解析、转换与输出 |
+| `Sources/CLI/jpeg2heif/main.swift`、`Sources/CLI/raw2heif/main.swift` | 两个命令的入口，各一行 |
 | `Sources/GUI/AppName.swift` | 应用的名字（与 `Makefile` 的 `APP_NAME` 一起，改名只动这两处） |
 | `Resources/` | 应用图标：`AppIcon.icns` 装进应用包，`AppIcon-1024.png` 是大图 |
 | `Tools/make_icon.swift` | 生成应用图标（`make icon`）：极光色渐变底上一根白色羽毛，羽尖化成光——「吉光片羽」「极光」与把格式转换看作「羽化」 |
@@ -858,4 +898,4 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 | `Sources/GUI/Thumbnails.swift` | 后台生成缩略图（带缓存、并发上限、可取消） |
 | `Sources/GUI/Views.swift` | 网格单元与角标、空状态、活动条、整窗拖放等小视图 |
 | `Sources/GUI/main.swift` | 应用入口与菜单 |
-| `Tests/` | 自检脚本、测试图生成器、元数据探针、界面截图工具、模型层集成测试 |
+| `Tests/` | 自检脚本、测试图生成器（JPEG 与 DNG）、元数据探针、界面截图工具、模型层集成测试 |

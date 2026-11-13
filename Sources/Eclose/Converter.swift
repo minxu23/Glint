@@ -41,6 +41,15 @@ public struct ConversionOptions: Equatable {
     public var embedCaption = false
     public var jobs = ProcessInfo.processInfo.activeProcessorCount
     public var inputs: [String] = []
+    /// 收哪几种源：jpeg2heif 是 [.jpeg]，raw2heif 是 [.raw]。界面目前只转 JPEG。
+    /// 目录扫描按它挑扩展名，convert 按内容判定后不在这里的跳过（并指路到另一个命令）。
+    public var sources: Set<SourceKind> = [.jpeg]
+
+    /// RAW 的默认并发数：min(核数, 4)。保守的临时值：一张 4500 万像素的 CR3 显影时要把全尺寸的
+    /// 16 位数据和显影结果都放在内存里，按核数开满可能把内存吃紧；4 这个数没有实测依据，
+    /// 待用真 RAW 量峰值内存（`/usr/bin/time -l`）后再定。
+    /// 手写的小 DNG 量不出真 RAW 的量级。用户给了 -j 时照 -j。
+    public static let defaultRAWJobs = min(ProcessInfo.processInfo.activeProcessorCount, 4)
 
     /// 要删除源文件就必须先校验——否则一旦有元数据丢失，原始信息将无法找回。
     public var verifyEnabled: Bool { verify || deleteOriginal }
@@ -174,8 +183,9 @@ func userCommentForHEIFWriter(_ comment: String) -> String {
     return String(decoding: units + [UInt16](repeating: 0, count: units.count), as: UTF16.self)
 }
 
-/// 写 HEIC 前对属性字典做的唯一一处改写：UserComment 换成
-/// `userCommentForHEIFWriter` 的结果。不需要改写时原样返回同一个字典。
+/// encodeHEIF 对属性字典做的唯一一处改写：UserComment 换成 `userCommentForHEIFWriter` 的结果。
+/// 不需要改写时原样返回同一个字典。（RAW 源的版本号在这之前由 convert 整理，见
+/// versionFieldsForHEIFWriter。）
 func propertiesForHEIFWriter(_ properties: [CFString: Any]) -> [CFString: Any] {
     guard var exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
           let comment = exif[kCGImagePropertyExifUserComment] as? String else { return properties }
@@ -321,7 +331,17 @@ public enum ConvertResult {
 /// 转换单张。`dest` 由 assignDestinations 预先定好且保证全局唯一——不要在这里
 /// 自行推导目标路径，并发下那样会让两个任务抢同一个文件。
 ///
-/// 「编码 + EXIF 整块照搬」得到的产物比源大（判据是 growthPercent）时，这一段原样再做
+/// 源按内容分成 JPEG 与 RAW（SourceKind），不在 `opts.sources` 里的跳过。两种共用同一套编码
+/// （encodeHEIF）、文件层属性、说明、校验与删除的流程，不同之处按源类型显式分派：
+/// - 写进产物的属性：JPEG 修补 UserComment、补回 ImageUniqueID（都要解析 JPEG 的段结构）；
+///   RAW 只整理版本号（versionFieldsForHEIFWriter）。
+/// - 编码之后、校验之前对产物 EXIF 的那一步（carryExif）：JPEG 整块照搬源 EXIF；RAW 本段还没有。
+/// - RAW 的产物必须是 10 位，读回确认，不是就算失败。系统默认显影：AddImageFromSource 从 RAW
+///   直接编码就是，方向标签照抄、像素不转。
+/// - 产物比源大时重编一次：只对 JPEG。RAW 显影后的 HEIF 总比 RAW 小得多，不做。
+/// - RAW 永远不删，`deleteOriginal` 对它不起作用（raw2heif 在解析参数时就拒绝 --delete-original）。
+///
+/// JPEG 的「编码 + EXIF 整块照搬」得到的产物比源大（判据是 growthPercent）时，这一段原样再做
 /// 一遍写到另一个临时文件，第二份更小就用第二份，否则（一样大、更大、第二遍编码失败）
 /// 用第一份，没用上的那份删掉。只重编这一次。硬件编码器偶尔会把一张图按高得多的质量
 /// 编出来，这一遍能把它换回正常大小的产物。
@@ -337,8 +357,9 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     guard let src = CGImageSourceCreateWithURL(input as CFURL, nil) else {
         return .failed("无法读取图像")
     }
-    guard let type = CGImageSourceGetType(src) as String?, type == UTType.jpeg.identifier else {
-        return .skipped("不是 JPEG 文件")
+    let type = CGImageSourceGetType(src) as String?
+    guard let kind = SourceKind(typeIdentifier: type), opts.sources.contains(kind) else {
+        return .skipped(skipReason(type: type, accepted: opts.sources))
     }
     guard CGImageSourceGetCount(src) > 0 else { return .failed("文件中没有图像") }
 
@@ -352,7 +373,11 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     }
 
     let inBytes = fileSize(input)   // 要在可能删除源文件之前读
-    let props = propertiesToWrite(repairedProperties(src, url: input), source: input)
+    let props: [CFString: Any]
+    switch kind {
+    case .jpeg: props = propertiesToWrite(repairedProperties(src, url: input), source: input)
+    case .raw: props = versionFieldsForHEIFWriter(imageProperties(src))
+    }
     let sourceXMP = CGImageSourceCopyMetadataAtIndex(src, 0, nil)
 
     var flatProps: [String: String] = [:]
@@ -391,12 +416,16 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
             try? fm.removeItem(at: tmp)
             return nil
         }
-        return (tmp, opts.rawExif ? carryRawExif(source: input, product: tmp) : nil)
+        return (tmp, opts.rawExif ? carryExif(kind, source: input, product: tmp) : nil)
     }
     guard var product = encodeAndCarry() else { return .failed("HEIC 编码失败") }
+    if kind == .raw, let problem = rawProductDepthProblem(product.url) {
+        try? fm.removeItem(at: product.url)
+        return .failed(problem)
+    }
     var reencode: Reencode?
     let firstBytes = fileSize(product.url)
-    if growthPercent(inBytes: inBytes, outBytes: firstBytes) != nil {
+    if kind == .jpeg, growthPercent(inBytes: inBytes, outBytes: firstBytes) != nil {
         let second = encodeAndCarry()
         let secondBytes = second.map { fileSize($0.url) }
         reencode = Reencode(first: firstBytes, second: secondBytes)
@@ -438,7 +467,9 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     // 没校验时差异列表不存在，没写成的说明放进状态说明，不让它静默。
     if !opts.verifyEnabled, let issue = captionIssues.first { notes.append(issue) }
     if opts.deleteOriginal {
-        if verification != .passed {
+        if kind == .raw {
+            notes.append("RAW 原片永远保留，没有删除")
+        } else if verification != .passed {
             notes.append("因元数据校验未通过，保留了源文件")
         } else if growth != nil {
             notes.append("因产物比原图大，保留了源文件")
@@ -562,6 +593,17 @@ public enum RawExifOutcome: Equatable {
         case .kept(let why):
             return "EXIF 没有照搬：\(why)"
         }
+    }
+}
+
+/// 编码之后、校验之前对产物 EXIF 做的那一步，按源类型分派。
+/// - JPEG：整块照搬源 EXIF（carryRawExif）。
+/// - RAW：要照搬的是 RAW 自己的 EXIF（CR3 的 CMT1/CMT2/CMT4，TIFF 系 RAW 的 IFD0/ExifIFD/GPS IFD，
+///   整理成一块干净的 TIFF 再交给 carryingExif），还没做，产物保持 ImageIO 写出来的样子。
+func carryExif(_ kind: SourceKind, source: URL, product: URL) -> RawExifOutcome {
+    switch kind {
+    case .jpeg: return carryRawExif(source: source, product: product)
+    case .raw: return .kept("RAW 的 EXIF 还不能整块照搬")
     }
 }
 

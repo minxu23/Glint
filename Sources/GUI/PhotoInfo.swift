@@ -19,7 +19,7 @@ enum ImageFormat: Hashable {
 
     init(url: URL) {
         let ext = url.pathExtension.lowercased()
-        if jpegExtensions.contains(ext) {
+        if SourceKind.jpeg.extensions.contains(ext) {
             self = .jpeg
         } else if ["heic", "heif", "hif"].contains(ext) {
             self = .heif

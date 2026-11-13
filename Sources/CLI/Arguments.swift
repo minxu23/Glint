@@ -1,4 +1,4 @@
-// 命令行参数解析。
+// 两个命令共用的参数解析。
 //
 // 单独成文件、不碰 CommandLine 也不 exit()，是为了能链进测试里直接调用：
 // "命令行与界面默认值是否一致"这类断言要真的解析一遍命令行。
@@ -6,11 +6,32 @@
 import Eclose
 import Foundation
 
+/// 两个命令：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。选项完全相同，只差三处：收的源、
+/// 默认并发数（RAW 用 ConversionOptions.defaultRAWJobs），以及 raw2heif 不接受 --delete-original。
+enum Command {
+    case jpeg2heif, raw2heif
+
+    var name: String {
+        switch self {
+        case .jpeg2heif: return "jpeg2heif"
+        case .raw2heif: return "raw2heif"
+        }
+    }
+
+    var source: SourceKind {
+        switch self {
+        case .jpeg2heif: return .jpeg
+        case .raw2heif: return .raw
+        }
+    }
+}
+
 enum ArgumentError: Error, LocalizedError {
     case missingValue(flag: String)
     case badQuality(String)
     case badJobs(String)
     case unknownOption(String)
+    case keepsRAW(flag: String)
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +39,7 @@ enum ArgumentError: Error, LocalizedError {
         case .badQuality(let raw): return "质量必须是 0.0 到 1.0 之间的数字，收到: \(raw)"
         case .badJobs(let raw): return "并发数必须是正整数，收到: \(raw)"
         case .unknownOption(let opt): return "未知选项: \(opt)（用 --help 查看用法）"
+        case .keepsRAW(let flag): return "raw2heif 不删除 RAW 原片，不接受 \(flag)"
         }
     }
 }
@@ -28,8 +50,10 @@ enum ParsedArguments: Equatable {
     case showUsage(exitCode: Int32)
 }
 
-func parseArguments(_ arguments: [String]) throws -> ParsedArguments {
+func parseArguments(_ arguments: [String], command: Command) throws -> ParsedArguments {
     var o = ConversionOptions.default
+    o.sources = [command.source]
+    if command == .raw2heif { o.jobs = ConversionOptions.defaultRAWJobs }
     var args = arguments
     var sawSeparator = false
 
@@ -52,7 +76,10 @@ func parseArguments(_ arguments: [String]) throws -> ParsedArguments {
             o.output = URL(fileURLWithPath: (try next(a) as NSString).expandingTildeInPath)
         case "-r", "--recursive": o.recursive = true
         case "-f", "--overwrite": o.overwrite = true
-        case "--delete-original": o.deleteOriginal = true
+        case "--delete-original":
+            // RAW 永远保留：报错退出，一张都不转。
+            guard command != .raw2heif else { throw ArgumentError.keepsRAW(flag: a) }
+            o.deleteOriginal = true
         case "--verify": o.verify = true
         case "--no-raw-exif": o.rawExif = false
         case "--embed-caption": o.embedCaption = true
