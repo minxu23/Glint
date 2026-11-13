@@ -1,6 +1,6 @@
 # 图形界面重做：图片管理 + 格式转换（设计规格）
 
-Status: ready-for-agent
+Status: resolved
 
 对象是 `Sources/GUI/`（AppKit）。`Sources/Core/` 和命令行的行为不变。
 可视化参照：[`mockup.html`](mockup.html)（浏览器打开，A–D 四张）。草图只定排版、层级和文案；
@@ -327,3 +327,10 @@ Status: ready-for-agent
 
 交付报告：每批的提交 SHA；每个源文件负责什么；第 11 节各块落在哪；截图的路径；性能数字；
 自查清单逐条；三个计数及增量来源；与本稿不一致的地方及理由；没完成或没覆盖到的。
+
+## Comments
+
+2026-11-13：已按本稿分四批实现并合并到 main：`e36ff7c`（模型层与测试）、`8011fde`（三栏窗口与浏览）、
+`6ababf8`（转换面板、活动条与记录）、`6a58606`（README）。之后改了本稿段落的只有 CMYK（`922a2c7`）和窄窗口的副标题
+（`4e3fd5a`）。应用改名 Glint（本稿还写着 `吉光.app`）和界面转 RAW 没写回本稿，以 README、
+`.scratch/eclose/spec.md` 与 `stage-2b-handoff.md` 为准。

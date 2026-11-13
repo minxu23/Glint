@@ -160,7 +160,7 @@
     - 提交历史里留着一个误提交的 1.5 MB 测试二进制（`bc8bcf7` 加入，`16a0dcd` 删除）；
     - 中间提交 `72e82ab` 单独检出时，测试计数可能对不上。
 14. ~~`.scratch/eclose/` 下规格与交接稿的状态还写着 `ready-for-agent`~~：已改成 resolved。
-    `.scratch/gui-redesign/spec.md` 也还写着 `ready-for-agent`，界面早已做完，没动，等确认。
+    `.scratch/gui-redesign/spec.md` 也改成了 resolved。
 15. 本机临时目录里留着 3 个风景 CR3 和用户指定的 RW2，用来验收；不再需要时删除。
 
 ---
