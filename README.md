@@ -139,10 +139,11 @@ raw2heif -r ~/Pictures/RAW -o ~/Pictures/RAW-heic
 - **默认并发数** `min(核数, 4)`：RAW 显影吃内存，先取一个保守值，`-j` 照给的来。
 - **RAW 和同名 JPEG 放在一起**时两个命令都输出同一个 `X.heic`，后转的那个按现有规则
   「输出已存在」跳过（`-f` 覆盖）。
-- **EXIF**：RAW 的 EXIF 还不能整块照搬（`-v` 里写着），由系统从属性字典重写；`--no-raw-exif`
-  目前对 RAW 不起作用。写入前整理版本号：ImageIO 读佳能 CR3 时 `ExifVersion` 给的是字符码
-  `[48,50,51,49]`（"0231"），原样交给写入器会被写坏成 `[48,0,1]`，所以先换成写入器认的 `[2,3,1]`
-  （规则见 [`versionFieldsForHEIFWriter`](Sources/Eclose/CameraRaw.swift)）。
+- **EXIF**：整块照搬 RAW 自己的 EXIF——从 RAW 里取出来拼成一块干净的 TIFF，再和 JPEG 一样换进
+  产物（见下面「EXIF 整块照搬」里「RAW」那一段）；`-v` 里写着 `EXIF 整块照搬（N 字节）` 或没照搬的原因。
+  `--no-raw-exif` 或照搬不成时，EXIF 由系统从属性字典重写，写入前整理版本号：ImageIO 读佳能 CR3 时
+  `ExifVersion` 给的是字符码 `[48,50,51,49]`（"0231"），原样交给写入器会被写坏成 `[48,0,1]`，所以先换成
+  写入器认的 `[2,3,1]`（规则见 [`versionFieldsForHEIFWriter`](Sources/Eclose/CameraRaw.swift)）。
 - 时间戳、扩展属性、`--embed-caption`、`-n`、`-f`、`-o` 镜像目录与 JPEG 同一套实现。
 
 ## 保留了哪些元数据
@@ -263,6 +264,41 @@ EXIF 压过 XMP，ImageIO 显示的值就变回 EXIF 的原值；调和出的那
 EXIF 原值的组写在分号后面，例如 `EXIF 整块照搬（786 字节；说明、作者与 IPTC 不一致，保留 EXIF 的原值）`，
 与备注改写可以同时出现；没照搬时是 `EXIF 没有照搬：原因`（例如
 `照搬后 {Exif}/DateTimeOriginal 会与源不一致`、`源里的 EXIF 段不止一个`）。
+
+**RAW：先从 RAW 里拼出一块 EXIF，再照搬。** RAW 里没有一段现成的 EXIF，它散在 RAW 容器里
+（[`CameraRawExif.swift`](Sources/Eclose/CameraRawExif.swift)）：
+
+| 格式 | EXIF 在哪 |
+|---|---|
+| 佳能 CR3 | `moov` 里 UUID 为 `85c0b687-820f-11e0-8111-f4ce462b6a48` 的 `uuid` 盒子：`CMT1` 是 IFD0、`CMT2` 是 Exif IFD、`CMT4` 是 GPS IFD（各是一个完整的 TIFF；`CMT3` 是 MakerNote，不搬） |
+| DNG、CR2、NEF、NRW、ARW、PEF、SRW、RW2、ORF | 文件本身就是 TIFF（RW2 的魔数是 0x55，ORF 是 `IIRO`/`IIRS`/`MMOR`）：IFD0 里 0x8769 指向 Exif IFD、0x8825 指向 GPS IFD |
+| 富士 RAF | 文件头后面内嵌的 JPEG 的 EXIF 段 |
+
+别的格式（CRW、MRW、X3F、IIQ、SR2、RWL……）不照搬，`-v` 里写「这种 RAW（类型）的 EXIF 还不能整块照搬」。
+格式按 ImageIO 给的类型认，再核对文件头。拼出来的块：
+
+- **字节序与源相同**，值的字节一个不改（GPS 的分数不重算，坐标的精度就这样保住）。
+- **IFD0 只留描述照片的标签**：Make、Model、Orientation、DateTime、ImageDescription、Artist、Copyright、
+  Software、HostComputer、DocumentName、XResolution、YResolution、ResolutionUnit、Rating、RatingPercent、
+  Windows XP 的五个标签。描述图像数据的（宽高、BitsPerSample、Compression、PhotometricInterpretation、
+  StripOffsets、TileOffsets……）说的是 RAW 里的预览图或原始数据；描述 RAW 容器的（SubIFDs、DNG 的
+  50706 起、各家私有标签）显影完就没有意义；ICC、XMP、IPTC 另有去处。这些一概不要。
+- **Exif IFD 全部照搬，只去掉 MakerNote**（里面满是相对原文件的偏移，挪了就指错）。Interop IFD
+  （R98/R03 那两三条）跟着搬，指针改到新位置。**GPS IFD 全部照搬**。
+- 值重新排布、偏移全部重算，块里不留指向原文件的偏移；IFD1 的缩略图不搬。
+- 块里 IFD0 的方向（没有按 1 算）必须与产物的方向相同（ImageIO 写的就是源的方向），不同就不照搬。
+
+源的长度、偏移、个数一律不信：IFD 越界、值越界、条目数超过 1000、IFD 互相指向、同一个标签出现
+两次、类型不认识、子 IFD 指针出现在不该在的地方、CR3 的 `CMT1`/`CMT2`/`CMT4` 缺了或不止一个……
+任何一条就不照搬，产物保持 ImageIO 写的样子（`--no-raw-exif` 的产物），转换照常完成。换的那一步、
+「先写另一个临时文件、自检过了才替换」都与 JPEG 同一套；自检用 RAW 校验的那把尺子（见「RAW 源比
+什么」）：读回的块逐字节相同，宽高、方向、位深（10）不变，照搬前与源一致的键照搬后一个都不许变坏，
+没有放行。`-v` 里的 N 是拼出来的块的字节数。
+
+照搬的块保住了系统重写会丢的：GPS 的原始分数、值是空串的标签（佳能的 `CameraOwnerName`、GPS 的
+`Satellites`）、只有 `GPSVersion` 的 GPS IFD。但 ImageIO 的视图看不出其中两样：它读 HEIC（和 JPEG）时
+把 GPS 坐标取整到分的 4 位小数、不显示空串（读 DNG 时不取整），所以 `--verify` 的 GPS 那一行与
+空串的丢失照样会报，见「RAW 源比什么」。
 
 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，或上面退回时），EXIF 由 ImageIO 从属性
 字典写出，丢的东西见「已知限制」。这条路上本工具补两处 ImageIO 读不出的写法：
@@ -684,28 +720,39 @@ JPEG 段结构的核对（原始 EXIF 清点、打架合成一行、备注与文
   - **结构字段不比**：源里描述传感器原始数据或 RAW 容器本身的键，HEIC 是显影后的图像，没有它们。
     只收实测过的：`{raw}/…`（裁切、传感器尺寸、内嵌缩略图）、`{DNG}/…`（色彩矩阵、黑白电平、
     默认裁切、DNG 版本……）、`{Exif}/CFAPattern…`、`{TIFF}/BitsPerPixel…`、`{TIFF}/Width`、
-    `{TIFF}/Height`、`XMP/tiff:Compression`。GPS、版本号、`CameraOwnerName`（哪怕是空串）、MakerNote
-    那一行照报。
+    `{TIFF}/Height`、`XMP/tiff:Compression`，以及 `{TIFF}/PhotometricInterpretation` 与
+    `XMP/tiff:PhotometricInterpretation`（DNG 给的是原始数据那一层的 32803，即 CFA；系统重写时原样抄进
+    产物，照搬的块不带它）。GPS、版本号、`CameraOwnerName`（哪怕是空串）、MakerNote 那一行照报。
   - **版本号按规范写法比**：`ExifVersion`、`FlashPixVersion` 写成 4 位（字符码 `[48,50,51,49]` 与
     `[2,3,1]` 都是 `0231`），`GPSVersion` 写成 `2.3.0.0`。修整好了不报，没修好（`0231 → 4801`）照报。
     XMP 里的 `exif:ExifVersion`、`exif:FlashPixVersion`、`exif:GPSVersionID` 是 ImageIO 从属性视图派生的
     （CR3 自带的 XMP 包里没有它们，源侧照读坏的字符码合成出 `485051`）：源的属性视图里有对应字段时
     交给属性视图那一侧比，不单独报；只有 XMP 有时照原样比。
-  - **GPS 取整压成一行**：RAW 的 EXIF 还不能整块照搬，写入器重新编码坐标时把分取整到 4 位小数，
-    视图里的 `{GPS}/Latitude` 在第 6–7 位小数变了，XMP 里 `69,11.645100N` 变成 `69,11.6452N`、
-    `GPSLatitudeRef` 并进坐标里。只差在这个范围内时不逐字段报，报一行
+  - **GPS 取整压成一行**：系统重写时写入器重新编码坐标（秒的分母改成 100），照搬时产物里的分数
+    逐字节是源的，但 ImageIO 读 HEIC 时把分取整到 4 位小数——两条路的视图里 `{GPS}/Latitude` 都在第
+    6–7 位小数变了，XMP 里 `69,11.645100N` 变成 `69,11.6452N`、`GPSLatitudeRef` 并进坐标里。只差在这个范围内时不逐字段报，报一行
     `GPS 精度降低：最大偏差 4 厘米（ImageIO 写入时取整）`（偏差按真实距离：纬度差 × 111 km，
     经度差 × 111 km × cos 纬度），算差异。上限很严：偏差超过 1 米、方向（N/S/E/W）变了、或一边
     有一边没有，一律照原来逐字段报——这一行只吞几厘米的取整，不吞真的坐标改动。
 - **扩展属性**，与 JPEG 同一套。
 
-现场生成的 DNG 转出来，`--verify` 恰好只有 GPS 那一行；不带 GPS 的校验通过。
+现场生成的 DNG 转出来，`--verify` 恰好只有 GPS 那一行（照搬与 `--no-raw-exif` 都是）；不带 GPS 的校验通过。
+照搬没照搬、照搬的值对不对，看 `-v` 那一行与产物的原始 EXIF，视图分不出来（上面说的取整与空串）。
 
 ## 已知限制
 
-- **RAW 的 EXIF 还不能整块照搬**：EXIF 由写入器从属性字典重写，MakerNote（`{MakerCanon}` 等）丢失、
-  GPS 精度降低几厘米（`--verify` 都如实报）。只有 `GPSVersion`、没有坐标的 GPS 字典会被写入器整个
-  丢掉，照报丢失。真 CR3、RW2 上实测：版本号修整生效，GPS 那一行的偏差是 18 厘米和 7 厘米。
+- **RAW 的 MakerNote 不搬**：照搬的块里去掉了 MakerNote（`{MakerCanon}` 等），`--verify` 照报那一行。
+- **RAW 照搬后 `--verify` 仍会报 GPS 那一行和空串的丢失**：产物里的 GPS 分数、空串的
+  `CameraOwnerName`/`Satellites` 逐字节是源的，但 ImageIO 读 HEIC 时把坐标取整到分的 4 位小数、
+  不显示空串（ImageIO 读 CR3、DNG 时不取整，读 CR3 时显示空串），视图比对看到的是读法的差别。
+  只有 `GPSVersion` 一条的 GPS IFD 也一样：照搬后在产物里，ImageIO 读 HEIC 时不显示（多一条哪怕是
+  空串的条目就显示）。
+- **RAW 的 EXIF 照搬只在 CR3、RW2 的真样本上量过**（主会话），DNG 有现场生成的夹具；CR2、NEF、
+  NRW、ARW、PEF、SRW、ORF、RAF 只有按格式结构手搭的单测样本。拼错了的块过不了照搬前的自检（视图
+  不许变坏），会退回系统重写。
+- **（系统重写时）RAW 的 GPS 精度降低几厘米**，空串的标签丢失，只有 `GPSVersion`、没有坐标的 GPS
+  字典被写入器整个丢掉（`--verify` 都如实报）。真 CR3、RW2 上实测：版本号修整生效，GPS 那一行的
+  偏差是 18 厘米和 7 厘米。
 
 - **`--embed-caption` 写进的 `dc:description` 没在鸿蒙、安卓的图库上验证过**读不读得出；量过的是
   ImageIO（照片、预览、访达）和 exiftool。源里几乎没有元数据时写不进去（见「把「照片」的说明写进
@@ -876,7 +923,10 @@ RAW 用现场生成的拜耳 DNG 测（[`Tests/DNG.swift`](Tests/DNG.swift)，`T
 原始数据是 SubIFD 里的 16 位 RGGB 拜耳阵列，推荐的那一串标签（黑白电平、默认裁切、色彩矩阵、
 AsShotNeutral……）都要带上，原始数据还得从 4096 字节以后开始，ImageIO 才认作 RAW；尺寸也有门槛：
 256×192 认作 RAW，128×96、64×48 被当成 TIFF。所以测试一律断言「类型是 RAW、产物是 10 位」，
-不只看转换成功。
+不只看转换成功。夹具里还有佳能 CR3 那样的空串 `CameraOwnerName`（32 个 NUL）与 GPS `Satellites`、
+一段 MakerNote，`--gps-version-only` 造只有 `GPSVersion` 的 GPS IFD；照搬对不对按产物的原始 EXIF
+逐字节核对（`Tests/probe --raw-exif`、`--raw-gps`）。造不出 ImageIO 能解码的 CR3、RAF 等，它们的拼块
+用单测里按格式结构手搭的字节测。
 
 每次运行在独立的 `Tests/.work.XXXXXX` 目录里进行，两个 `make test` 可以同时跑。
 全部通过时这个目录会被删掉；有失败或提前退出时保留，并在末尾打印路径供诊断。
@@ -916,7 +966,8 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 | `Sources/Eclose/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
 | `Sources/Eclose/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
 | `Sources/Eclose/SourceKind.swift` | 源的两种（JPEG、RAW）：扫目录用的扩展名、按内容判定、跳过时指路 |
-| `Sources/Eclose/CameraRaw.swift` | 相机 RAW 专有的规则：写入前整理版本号、产物必须是 10 位（项目里别的 `Raw` 说的是 EXIF 原始字节） |
+| `Sources/Eclose/CameraRaw.swift` | 相机 RAW 专有的规则：写入前整理版本号、产物必须是 10 位、RAW 的校验规则（项目里别的 `Raw` 说的是 EXIF 原始字节） |
+| `Sources/Eclose/CameraRawExif.swift` | 从相机 RAW 里取出 EXIF 拼成一块干净的 TIFF（CR3、TIFF 系、RAF），白名单与闸门（纯函数） |
 | `Sources/Eclose/PhotoNotes.swift` | 界面信息栏读备注用的几条规则（「照片」的说明、访达备注、EXIF 备注该显示什么、说明能不能写进文件），只公开结果 |
 | `Sources/CLI/Arguments.swift` | 两个命令共用的参数解析（纯函数，可被测试直接调用），两者只差收的源、默认并发数与 `--delete-original` |
 | `Sources/CLI/Run.swift` | 两个命令共用的流程：用法、串起解析、转换与输出 |
