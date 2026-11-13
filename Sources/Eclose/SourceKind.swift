@@ -16,7 +16,7 @@ public enum SourceKind: Hashable, CaseIterable {
     }
 
     /// 「JPEG」「RAW」。
-    public var label: String {
+    var label: String {
         switch self {
         case .jpeg: return "JPEG"
         case .raw: return "RAW"
