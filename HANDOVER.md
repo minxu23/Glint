@@ -125,7 +125,7 @@
   - `verify-hardening/issues/11-16`：根因是并发的两次测试共用 `Tests/.work`，`10c2dfd` 起每次运行用独立的 mktemp 目录；
   - `verify-hardening/issues/01-03`、`02-05`、`03-04`：9 个点逐条对照代码，都已落地。
 - README：「把备注写进文件」的张数改成 JPEG 和 RAW 都数（`bc8bcf7` 起就是这样，旧说法没改）。
-- `.scratch` 里现在只剩 `encoder-variance/issues/01` 一张 needs-triage，没有 ready-for-agent 的文档。
+- `encoder-variance/issues/01` 改为 wontfix。`.scratch` 里现在没有 needs-triage 的问题单，也没有 ready-for-agent 的文档。
 
 ### 验收现状
 
@@ -163,7 +163,7 @@
 
 ### 遗留问题单
 
-9. `encoder-variance/issues/01`（needs-triage）：别的进程同时在编码时，产物大小偶尔不同（系统编码器从硬件退到软件）。原因在系统里，README 已列为已知限制；可以考虑改成 wontfix。
+9. ~~`encoder-variance/issues/01`~~：已改为 wontfix（产物大小偶尔不同，原因在系统编码器里，README 已列为已知限制）。`.scratch` 里现在没有 needs-triage 的问题单。
 
 ### 收尾小事
 
