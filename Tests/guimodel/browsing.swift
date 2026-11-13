@@ -556,8 +556,9 @@ func testSettings() {
     var del = back
     del.deleteOriginal = true
     check("勾了删除：校验被锁上并生效", [del.effectiveVerify, del.verifyLocked], [true, true])
-    check("勾了删除：主按钮", del.primaryTitle, "转换并删除源文件")
-    check("没勾删除：主按钮", back.primaryTitle, "转换")
+    let jpegBatch = ConversionTargets(selected: [item("/库/a.jpg")], visible: [], entry: .all, entryName: "", search: "")
+    check("勾了删除：主按钮", jpegBatch.primaryTitle(del), "转换并删除源文件")
+    check("没勾删除：主按钮", jpegBatch.primaryTitle(back), "转换")
     var opts = ConversionOptions.default
     del.apply(to: &opts)
     check("落到 ConversionOptions 上", [opts.verify, opts.deleteOriginal, opts.embedCaption, opts.rawExif], [true, true, true, false])

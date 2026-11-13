@@ -325,7 +325,7 @@ final class BrowserViewController: NSViewController {
         }
         guard !selection.isEmpty else { return nil }
         let menu = NSMenu()
-        if selectedItems.contains(where: \.isJPEG) {
+        if selectedItems.contains(where: \.isConvertible) {
             menu.addItem(withTitle: "转换…", action: #selector(convertSelected), keyEquivalent: "").target = self
             menu.addItem(.separator())
         }

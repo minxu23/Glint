@@ -50,6 +50,9 @@ struct PhotoItem {
     var path: String { url.path }
     var name: String { url.lastPathComponent }
     var isJPEG: Bool { format == .jpeg }
+    var isRAW: Bool { format == .raw }
+    /// 能转：JPEG 或相机 RAW（按扩展名；转不转最终由 Eclose 按内容判定）。
+    var isConvertible: Bool { format.sourceKind != nil }
     var hasNotes: Bool { info?.hasNotes ?? false }
 
     /// 排序用的拍摄时间：没有拍摄时间（或还没读到）时用修改时间。
@@ -291,7 +294,7 @@ struct Library {
     func items(in entry: LibraryEntry, record: ConversionRecord? = nil) -> [PhotoItem] {
         switch entry {
         case .all: return listed
-        case .convertible: return listed.filter(\.isJPEG)
+        case .convertible: return listed.filter(\.isConvertible)
         case .withNotes: return listed.filter(\.hasNotes)
         case .folder(let path): return listed.filter { isPath($0.path, inside: path) }
         case .looseFiles: return items.values.filter(\.isLoose)
@@ -351,28 +354,38 @@ struct Library {
 
 // MARK: - 副标题与汇总
 
-/// 工具栏副标题：`248 张，其中 JPEG 196 张，共 612 MB`；有选中时 `选中 3 张，共 6.6 MB`；
-/// 还在扫描时末尾加 `，正在读取…`。
+/// 工具栏副标题：`248 张，其中 JPEG 196 张、RAW 30 张，共 612 MB`（能转的两种，没有的那种不写）；
+/// 有选中时 `选中 3 张，共 6.6 MB`；还在扫描时末尾加 `，正在读取…`。
 func subtitle(items: [PhotoItem], selected: [PhotoItem], scanning: Bool) -> String {
     var text: String
     if !selected.isEmpty {
         text = "选中 \(selected.count) 张，共 \(shortSize(selected.reduce(0) { $0 + $1.size }))"
     } else {
-        let jpegs = items.filter(\.isJPEG).count
         let total = items.reduce(0) { $0 + $1.size }
         text = "\(items.count) 张"
-        if jpegs > 0 { text += "，其中 JPEG \(jpegs) 张" }
+        let kinds = convertibleCounts(items)
+        if !kinds.isEmpty { text += "，其中 " + kinds }
         if !items.isEmpty { text += "，共 \(shortSize(total))" }
     }
     if scanning { text += "，正在读取…" }
     return text
 }
 
+/// 能转的两种各几张：`JPEG 196 张、RAW 30 张`，没有的那种不写；一张都没有是空串。
+func convertibleCounts(_ items: [PhotoItem]) -> String {
+    let jpegs = items.filter(\.isJPEG).count
+    let raws = items.filter(\.isRAW).count
+    var parts: [String] = []
+    if jpegs > 0 { parts.append("JPEG \(jpegs) 张") }
+    if raws > 0 { parts.append("RAW \(raws) 张") }
+    return parts.joined(separator: "、")
+}
+
 /// 信息栏在选中多张或没选中时的汇总（第 7.3 节，不含转换汇总）。
 struct ItemsSummary: Equatable {
     /// `选中 12 张`；没选中时是 nil（标题由当前条目给）。
     var title: String?
-    /// `JPEG 10 张，共 31 MB` 这样的每种格式一行，JPEG、HEIF 在前。
+    /// `JPEG 10 张，共 31 MB` 这样的每种格式一行，JPEG、RAW、HEIF 在前。
     var formatLines: [String]
     /// `有备注 3 张`；没有就是 nil。
     var notesLine: String?

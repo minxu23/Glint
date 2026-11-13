@@ -55,17 +55,12 @@ final class ThumbnailLoader {
     /// 还在排队或正在生成的个数（测量用）。
     var pendingCount: Int { queue.operationCount }
 
-    /// 生成一张缩略图：长边不超过 `maxPixels`，按 EXIF 方向转正。
+    /// 生成一张缩略图：长边不超过 `maxPixels`，按 EXIF 方向转正。相机 RAW 先用内嵌的预览，不整幅
+    /// 显影（取法见 makeThumbnail）。
     static func render(_ url: URL, maxPixels: Int) -> CGImage? {
         dispatchPrecondition(condition: .notOnQueue(.main))
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
         else { return nil }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+        return makeThumbnail(src, maxPixels: maxPixels)
     }
 }

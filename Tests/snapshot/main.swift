@@ -2,7 +2,7 @@
 // 这样不需要屏幕录制权限也能检查界面排版。设置存在内存里，不碰用户的 UserDefaults。
 //
 // 用法见下面的 usage。`--convert` 的语义：把给出的目录加进来，扫完后把当前视图里全部的
-// JPEG 按默认设置转完，再截图。
+// JPEG 和 RAW 按默认设置转完，再截图。
 
 import AppKit
 
@@ -16,7 +16,8 @@ let usage = """
   --select <文件名>         选中这张（可以重复）
   --search <词>             搜索
   --sheet                   显示转换面板
-  --convert                 把当前视图里全部的 JPEG 转完再截图
+  --sheet-delete            显示转换面板，并勾上「删除源文件」
+  --convert                 把当前视图里全部的 JPEG 和 RAW 转完再截图
   --measure                 打印从加文件夹到第一屏缩略图出齐的时间
   --scroll                  把网格从头滚到尾，打印每一步主线程上花的最长时间
   --inspector <宽>          把信息栏拖到这个宽度（240–400）
@@ -42,6 +43,7 @@ var sidebarEntry: String?
 var selectNames: [String] = []
 var searchText: String?
 var showSheet = false
+var sheetDelete = false
 var shouldConvert = false
 var measure = false
 var scrollTest = false
@@ -66,6 +68,7 @@ while !args.isEmpty {
     case "--select": selectNames.append(value())
     case "--search": searchText = value()
     case "--sheet": showSheet = true
+    case "--sheet-delete": showSheet = true; sheetDelete = true
     case "--convert": shouldConvert = true
     case "--measure": measure = true
     case "--scroll": scrollTest = true
@@ -291,8 +294,9 @@ do {
 }
 
 if showSheet {
-    guard let sheet = controller.makeConversionSheet() else { die("当前视图里没有可以转换的 JPEG，没有面板可显示") }
+    guard let sheet = controller.makeConversionSheet() else { die("当前视图里没有可以转换的 JPEG 或 RAW，没有面板可显示") }
     let sheetWindow = sheet.makeWindow()
+    if sheetDelete { sheet.checkDeleteForSnapshot() }
     sheetWindow.setFrameOrigin(NSPoint(x: -20000, y: -20000))
     sheetWindow.orderBack(nil)
     sheet.view.layoutSubtreeIfNeeded()

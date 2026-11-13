@@ -11,16 +11,22 @@ import UniformTypeIdentifiers
 
 // MARK: - 格式
 
-/// 界面上说的「格式」。按扩展名定：列文件那一步要快，不打开文件。
-/// 内容与扩展名不符的（改了扩展名的 HEIC）转换时由 Eclose 跳过并说明原因。
+/// 界面上说的「格式」。按扩展名定：列文件那一步要快，不打开文件。JPEG 与 RAW 的扩展名用 Eclose 的
+/// SourceKind.extensions（与命令行扫目录同一份清单）。转不转仍由 Eclose 按内容判定：内容与扩展名
+/// 不符的（改了扩展名的 HEIC、小到被 ImageIO 当成 TIFF 的 DNG）转换时跳过并说明原因。
+///
+/// 相机 RAW 统一叫「RAW」，不分 CR3、NEF、ARW：副标题、汇总、排序都按格式归类，相机的 RAW 是
+/// 同一类东西（都能转、都不删）；具体是哪家的 RAW 看文件名的扩展名就知道。
 enum ImageFormat: Hashable {
-    case jpeg, heif
+    case jpeg, raw, heif
     case other(String)
 
     init(url: URL) {
         let ext = url.pathExtension.lowercased()
         if SourceKind.jpeg.extensions.contains(ext) {
             self = .jpeg
+        } else if SourceKind.raw.extensions.contains(ext) {
+            self = .raw
         } else if ["heic", "heif", "hif"].contains(ext) {
             self = .heif
         } else {
@@ -32,17 +38,28 @@ enum ImageFormat: Hashable {
     var label: String {
         switch self {
         case .jpeg: return "JPEG"
+        case .raw: return "RAW"
         case .heif: return "HEIF"
         case .other(let name): return name
         }
     }
 
-    /// 排序用的先后：JPEG、HEIF，其余按名字。
+    /// 能转的源是哪一种；不能转的格式是 nil。
+    var sourceKind: SourceKind? {
+        switch self {
+        case .jpeg: return .jpeg
+        case .raw: return .raw
+        default: return nil
+        }
+    }
+
+    /// 排序用的先后：能转的 JPEG、RAW 在前，然后 HEIF，其余按名字。
     var sortKey: String {
         switch self {
         case .jpeg: return "0"
-        case .heif: return "1"
-        case .other(let name): return "2" + name
+        case .raw: return "1"
+        case .heif: return "2"
+        case .other(let name): return "3" + name
         }
     }
 
@@ -51,6 +68,42 @@ enum ImageFormat: Hashable {
         guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
         return type.conforms(to: .image)
     }
+}
+
+// MARK: - 缩略图的取法
+
+/// `src` 是不是相机 RAW：按内容，CGImageSourceGetType 给的类型符合 public.camera-raw-image
+/// （与 Eclose 判定 RAW 是同一条）。
+func isCameraRAW(_ src: CGImageSource) -> Bool {
+    guard let type = CGImageSourceGetType(src) as String?, let t = UTType(type) else { return false }
+    return t.conforms(to: .rawImage)
+}
+
+/// 生成缩略图时交给 CGImageSourceCreateThumbnailAtIndex 的选项：长边不超过 `maxPixels`，按 EXIF
+/// 方向转正。`fromPreview` 为真时文件里有内嵌的缩略图或预览就用它（FromImageIfAbsent），否则从全图
+/// 缩（FromImageAlways）。
+func thumbnailOptions(fromPreview: Bool, maxPixels: Int) -> [CFString: Any] {
+    [
+        fromPreview ? kCGImageSourceCreateThumbnailFromImageIfAbsent : kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        kCGImageSourceShouldCacheImmediately: true,
+    ]
+}
+
+/// 生成一张缩略图：长边不超过 `maxPixels`，按 EXIF 方向转正。会读文件，只在后台调用。
+/// - JPEG 等：从全图缩。文件里自带的 EXIF 缩略图常常只有 160×120，放大了是糊的。
+/// - 相机 RAW：先用内嵌的预览。RAW 的「全图」要整幅显影，又慢又吃内存（手写的 6000×4000 DNG
+///   实测：从预览出 336 px 的缩略图 73 ms、峰值内存 19 MB；整幅显影 217 ms、259 MB），网格里一屏
+///   几十张会把缩略图队列和内存都占满。预览的长边不到要的一半（只带了一张小缩略图）时才整幅显影，
+///   免得网格里一片糊。
+func makeThumbnail(_ src: CGImageSource, maxPixels: Int) -> CGImage? {
+    if isCameraRAW(src),
+       let preview = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbnailOptions(fromPreview: true, maxPixels: maxPixels) as CFDictionary),
+       max(preview.width, preview.height) * 2 >= maxPixels {
+        return preview
+    }
+    return CGImageSourceCreateThumbnailAtIndex(src, 0, thumbnailOptions(fromPreview: false, maxPixels: maxPixels) as CFDictionary)
 }
 
 // MARK: - 拍摄时间
@@ -196,7 +249,8 @@ struct PhotoInfo: Equatable {
     var location: GeoPoint?
     var notes: [Note] = []
     /// 「照片」的说明在、而文件里没有说明字段——勾「把备注写进文件」能写进去的那种
-    /// （判定用 Eclose 的 captionCanBeEmbedded，与转换时同一把尺子）。只对 JPEG 有意义。
+    /// （判定用 Eclose 的 captionCanBeEmbedded，与转换时同一把尺子）。它只对 JPEG 说「能」：RAW 的
+    /// 这一项总是 false，面板上「这批里有几张的备注存在文件之外」不数 RAW。
     var captionOutsideOnly = false
     /// 色彩模型是 CMYK（判定用 Eclose 的 isCMYK，与转换时同一把尺子）。这种 JPEG 转换时默认跳过。
     var isCMYK = false

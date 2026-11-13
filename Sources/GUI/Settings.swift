@@ -87,11 +87,9 @@ struct PanelSettings: Equatable {
     /// 「转完逐项校验」能不能改。
     var verifyLocked: Bool { deleteOriginal }
 
-    /// 主按钮的字。
-    var primaryTitle: String { deleteOriginal ? "转换并删除源文件" : "转换" }
-
     /// 把面板设置落到 ConversionOptions 上。输入输出不在这里：输入是 Job，输出由
-    /// ConversionModel 的 outputMode/outputFolder 管。
+    /// ConversionModel 的 outputMode/outputFolder 管。收哪几种源、并发数、删除对这批生不生效
+    /// 跟着这批的对象走，由 ConversionTargets.apply 在这之上再定。
     func apply(to options: inout ConversionOptions) {
         options.quality = quality
         options.verify = effectiveVerify

@@ -185,7 +185,7 @@ final class InspectorViewController: NSViewController {
                                  sourceStillThere: Bool, product: PhotoItem?) -> NSView {
         let isSource = row.job.input.standardizedFileURL.path == item.path
         guard let mark = ConversionRecord.mark(of: row) else { return NSView() }
-        // 还在的源 JPEG、已经转出了 HEIF：只写一句，详情在产物上。
+        // 还在的源（JPEG 或 RAW）、已经转出了 HEIF：只写一句，详情在产物上。
         if isSource, let dest = row.dest, row.status == .done {
             let title = verdictRow("已转成 HEIF", symbol: "checkmark.circle.fill", color: .systemGreen)
             let link = LinkButton("显示转出的文件") { [weak self] in

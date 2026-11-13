@@ -107,7 +107,7 @@ uninstall:
 .SECONDEXPANSION:
 
 TEST_TOOLS := Tests/probe Tests/uisnapshot Tests/unit-test \
-              Tests/guimodel-test Tests/mangle-tool
+              Tests/guimodel-test Tests/guiraw-test Tests/mangle-tool
 
 # 测的是内部规则的工具链测试版（@testable import Eclose）。
 Tests/probe:         ECLOSE_LIB := $(ECLOSE_TESTING)
@@ -124,6 +124,13 @@ Tests/unit-test:     TOOL_SRC := Sources/GUI/Model.swift Sources/CLI/Arguments.s
 # 界面模型的测试：只需 Eclose + 模型层（都不依赖 AppKit）。
 Tests/guimodel-test: ECLOSE_LIB := $(ECLOSE_TESTING)
 Tests/guimodel-test: TOOL_SRC := $(GUI_MODEL) Tests/harness.swift Tests/guimodel/main.swift Tests/guimodel/browsing.swift
+# 界面模型里相机 RAW 的用例（eclose 第 2 段 b）：要现场生成 DNG，链 DNG.swift；造样本的小函数借
+# browsing.swift 的。暂时单独成一个工具，由下面的 test 目标在 selftest.sh 之后跑、核对条数：
+# 并进 guimodel-test 就得改 selftest.sh 里的 EXPECTED_GUI，而第 2 段 b 不动 selftest.sh
+# （另一个代理同时在改它）。合并以后可以并回 guimodel-test、删掉这条和 test 里那一段。
+Tests/guiraw-test:   ECLOSE_LIB := $(ECLOSE_TESTING)
+Tests/guiraw-test:   TOOL_SRC := $(GUI_MODEL) Tests/harness.swift Tests/DNG.swift Tests/guimodel/browsing.swift \
+                                  Tests/guimodel/raw.swift Tests/guiraw/main.swift
 Tests/mangle-tool:   ECLOSE_LIB := $(ECLOSE_TESTING)
 Tests/mangle-tool:   TOOL_SRC := Tests/mangle/main.swift
 
@@ -145,8 +152,19 @@ ARTIFACTS := $(CLIS) Tests/fixture $(TEST_TOOLS)
 print-artifacts:
 	@echo $(ARTIFACTS)
 
+# guiraw-test 的断言条数：少了说明有用例被静默跳过（与 selftest.sh 的 EXPECTED_GUI 同一个用意）。
+# 工作目录 Tests/.work-guiraw 每次覆盖着用（用例各自先清掉自己的子目录），make clean 清掉。
+EXPECTED_GUI_RAW := 75
+
 test: $(ARTIFACTS)
 	@Tests/selftest.sh
+	@mkdir -p Tests/.work-guiraw && ./Tests/fixture Tests/.work-guiraw/源.jpg >/dev/null
+	@out=$$(./Tests/guiraw-test Tests/.work-guiraw 2>&1); status=$$?; \
+	n=$$(printf '%s\n' "$$out" | grep -c '^  [✓✗]'); \
+	if [ $$status -ne 0 ]; then printf '%s\n' "$$out" | grep '✗'; echo "界面模型（RAW）有用例没通过"; exit 1; fi; \
+	if [ "$$n" -ne $(EXPECTED_GUI_RAW) ]; then \
+	    echo "界面模型（RAW）执行了 $$n 项断言，预期 $(EXPECTED_GUI_RAW) 项（改动断言后请同步 EXPECTED_GUI_RAW）"; exit 1; fi; \
+	echo "界面模型（RAW）全部通过（$$n 项断言）"
 
 clean:
 	rm -rf $(CLIS) $(APP) build Tests/fixture $(TEST_TOOLS) Tests/.work*

@@ -1,6 +1,8 @@
 // 转换面板：点「转换…」从工具栏下滑出的 sheet（宽 460，规格第 8.1 节）。
 // 打开时从存储读设置，「删除源文件」「覆盖同名的 HEIF」「也转 CMYK 的 JPEG」每次都是关的；
 // 点「转换」时写回存储。
+// 「源文件」一栏照 ConversionTargets.deleteChoice 摆：有 JPEG 时是删除的复选框（混着 RAW 时
+// 写明只删 JPEG、RAW 原片始终保留），只有 RAW 时没有复选框，只写一句不删。
 
 import AppKit
 
@@ -78,7 +80,16 @@ final class ConversionSheetController: NSViewController {
         }
         let verifyBlock = check(verifyCheck, "比对拍摄时间、位置、备注和扩展属性，列出丢失或变化的每一项")
         let captionBlock = check(captionCheck, targets.captionHint)
-        let deleteBlock = check(deleteCheck, "有差异的、HEIF 反而更大的，源文件都留着", extra: deleteNote)
+        let deleteBlock: NSView
+        switch targets.deleteChoice {
+        case let .offered(title, hint, _):
+            deleteCheck.title = title
+            deleteBlock = check(deleteCheck, hint, extra: deleteNote)
+        case .unavailable(let text):
+            let label = makeWrappingLabel(text, size: 13)
+            label.preferredMaxLayoutWidth = 320
+            deleteBlock = label
+        }
         let metaBlock = vstack([verifyBlock, captionBlock], spacing: 6)
 
         advancedToggle.bezelStyle = .disclosure
@@ -102,6 +113,10 @@ final class ConversionSheetController: NSViewController {
 
         let rule = NSBox()
         rule.boxType = .separator
+        // 横跨两列的分隔线给定宽度：不给的话，「源文件」那栏的说明折成两行时，合并单元格里的
+        // 分隔线会被压成一个点（混着 RAW 的那段说明就是这样）。
+        rule.translatesAutoresizingMaskIntoConstraints = false
+        rule.widthAnchor.constraint(equalToConstant: 420).isActive = true
         grid = NSGridView(views: [
             [formLabel("转成"), formatPopup],
             [formLabel("画质"), qualityRow],
@@ -210,9 +225,10 @@ final class ConversionSheetController: NSViewController {
         exifCheck.state = settings.systemExif ? .on : .off
         overwriteCheck.state = settings.overwrite ? .on : .off
         cmykCheck.state = settings.convertCMYK ? .on : .off
-        startButton.title = settings.primaryTitle
-        startButton.bezelColor = settings.deleteOriginal ? .systemRed : nil
-        startButton.hasDestructiveAction = settings.deleteOriginal
+        startButton.title = targets.primaryTitle(settings)
+        let deleting = targets.deletes(settings)
+        startButton.bezelColor = deleting ? .systemRed : nil
+        startButton.hasDestructiveAction = deleting
     }
 
     @objc private func qualityChanged() {
@@ -268,6 +284,13 @@ final class ConversionSheetController: NSViewController {
         var final = settings
         if !captionCheck.isEnabled { final.embedCaption = false }
         onStart?(final)
+    }
+
+    /// 截图工具用：勾上「删除源文件」（这批里没有 JPEG、没有这个选项时什么都不做）。
+    func checkDeleteForSnapshot() {
+        guard case .offered = targets.deleteChoice else { return }
+        deleteCheck.state = .on
+        toggled(deleteCheck)
     }
 
     /// 截图工具用：把面板放进一个窗口里渲染。

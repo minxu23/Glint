@@ -7,21 +7,28 @@ import Foundation
 
 // MARK: - 转换的对象
 
-/// 点「转换…」时要转的那些 JPEG。
+/// 点「转换…」时要转的那些图：JPEG 和相机 RAW，一批里可以混着，每张由 Eclose 按内容分派到对应的
+/// 管线。删除源文件只对 JPEG 生效，RAW 原片始终保留（Eclose 那层也挡着，见 apply）。
 struct ConversionTargets {
     enum Scope: Equatable {
-        /// 选中的那些里的 JPEG。
+        /// 选中的那些里能转的。
         case selection
-        /// 当前视图里全部的 JPEG；带上条目名和搜索词。
+        /// 当前视图里全部能转的；带上条目名和搜索词。
         case entry(name: String, search: String)
     }
 
+    /// 能转的：按扩展名是 JPEG 或 RAW（PhotoItem.isConvertible）。
     let items: [PhotoItem]
+    let jpegCount: Int
+    let rawCount: Int
     let scope: Scope
     /// 范围里还有别的格式（它们不动）。
     let hasOtherFormats: Bool
     /// 交给 ConversionModel 的任务，各带来源根目录。
     let jobs: [Job]
+
+    /// 一张能转的都没有时，「转换…」按钮的悬停提示。
+    static let emptyHint = "这里没有可以转换的 JPEG 或 RAW"
 
     /// - Parameters:
     ///   - selected: 选中的图片；空表示没选中。
@@ -30,7 +37,9 @@ struct ConversionTargets {
     ///     从这一层往下镜像；否则取图片所属的已添加文件夹。单独添加的图片没有根。
     init(selected: [PhotoItem], visible: [PhotoItem], entry: LibraryEntry, entryName: String, search: String) {
         let pool = selected.isEmpty ? visible : selected
-        items = pool.filter(\.isJPEG)
+        items = pool.filter(\.isConvertible)
+        jpegCount = items.filter(\.isJPEG).count
+        rawCount = items.filter(\.isRAW).count
         hasOtherFormats = items.count < pool.count
         scope = selected.isEmpty ? .entry(name: entryName, search: search.trimmingCharacters(in: .whitespacesAndNewlines))
                                  : .selection
@@ -45,8 +54,20 @@ struct ConversionTargets {
     var isEmpty: Bool { items.isEmpty }
     var totalBytes: Int { items.reduce(0) { $0 + $1.size } }
 
-    /// `转换 196 张 JPEG`
-    var title: String { "转换 \(items.count) 张 JPEG" }
+    /// 这批是哪几种：`JPEG`、`RAW` 或 `JPEG 和 RAW`。
+    private var kinds: String {
+        switch (jpegCount > 0, rawCount > 0) {
+        case (true, true): return "JPEG 和 RAW"
+        case (false, true): return "RAW"
+        default: return "JPEG"
+        }
+    }
+
+    /// `转换 196 张 JPEG`、`转换 4 张 RAW`；两种混着时 `转换 12 张（JPEG 8 张、RAW 4 张）`。
+    var title: String {
+        if jpegCount > 0 && rawCount > 0 { return "转换 \(items.count) 张（JPEG \(jpegCount) 张、RAW \(rawCount) 张）" }
+        return "转换 \(items.count) 张 \(kinds)"
+    }
 
     /// 面板标题下那一句。
     var detail: String {
@@ -54,11 +75,55 @@ struct ConversionTargets {
         let others = hasOtherFormats ? "别的格式不动。" : ""
         switch scope {
         case .selection:
-            return "选中的 \(items.count) 张 JPEG，共 \(size)。" + others
+            return "选中的 \(items.count) 张 \(kinds)，共 \(size)。" + others
         case .entry(let name, let search):
-            let what = search.isEmpty ? "「\(name)」里的全部 JPEG" : "「\(name)」里符合「\(search)」的 JPEG"
+            let what = search.isEmpty ? "「\(name)」里的全部 \(kinds)" : "「\(name)」里符合「\(search)」的 \(kinds)"
             return "\(what)，共 \(size)。" + others
         }
+    }
+
+    // MARK: 删除源文件
+
+    /// 面板「源文件」一栏。删除只对 JPEG 生效：RAW 原片始终保留。
+    enum DeleteChoice: Equatable {
+        /// 这批里有 JPEG：一个复选框。`title` 是复选框的字，`hint` 是下面那行说明，
+        /// `primary` 是勾上以后主按钮的字。
+        case offered(title: String, hint: String, primary: String)
+        /// 这批里只有 RAW：没有删除这个选项，只写一句（不放一个灰掉的复选框）。
+        case unavailable(String)
+    }
+
+    var deleteChoice: DeleteChoice {
+        if jpegCount == 0 { return .unavailable("RAW 原片始终保留，不删除") }
+        if rawCount == 0 {
+            return .offered(title: "校验无差异后删除源文件", hint: "有差异的、HEIF 反而更大的，源文件都留着",
+                            primary: "转换并删除源文件")
+        }
+        return .offered(title: "校验无差异后删除源 JPEG",
+                        hint: "这批里的 \(rawCount) 张 RAW 原片始终保留；有差异的、HEIF 反而更大的 JPEG 也留着",
+                        primary: "转换并删除源 JPEG")
+    }
+
+    /// 这批真的要删源文件：勾了删除，而且这批里有 JPEG。只有 RAW 时面板上没有这个选项、
+    /// 存储里也不记它，这里再挡一道。
+    func deletes(_ settings: PanelSettings) -> Bool { settings.deleteOriginal && jpegCount > 0 }
+
+    /// 主按钮的字：要删就是 `转换并删除源文件`（混着 RAW 时 `转换并删除源 JPEG`），否则 `转换`。
+    func primaryTitle(_ settings: PanelSettings) -> String {
+        if deletes(settings), case .offered(_, _, let primary) = deleteChoice { return primary }
+        return "转换"
+    }
+
+    /// 把面板设置连同这批的情况落到 ConversionOptions 上。输入输出不在这里（见 PanelSettings.apply）。
+    /// - 两种源都收，每张由 Eclose 按内容分派；
+    /// - 这批里有 RAW 时，并发数用 Eclose 给 RAW 的默认值（显影吃内存，见
+    ///   ConversionOptions.defaultRAWJobs），只有 JPEG 时用默认的核数；
+    /// - 删除只在这批有 JPEG 时打开（deletes）。混着 RAW 时照样交给 Eclose，RAW 由它跳过不删。
+    func apply(_ settings: PanelSettings, to options: inout ConversionOptions) {
+        settings.apply(to: &options)
+        options.sources = [.jpeg, .raw]
+        options.jobs = rawCount > 0 ? ConversionOptions.defaultRAWJobs : ConversionOptions.default.jobs
+        options.deleteOriginal = deletes(settings)
     }
 
     /// 这批里「照片」说明在、文件里没有说明的张数（勾「把备注写进文件」能写进去的）。
@@ -181,7 +246,7 @@ struct SentencePart: Equatable {
 struct ConversionRecord {
     var rows: [FileRow]
     var startedAt: Date
-    /// 这批勾了「校验无差异后删除源文件」。
+    /// 这批勾了「校验无差异后删除源文件」（且有 JPEG 可删，见 ConversionTargets.deletes）。
     var deleteRequested: Bool
     var isRunning: Bool
     var wasCancelled: Bool
@@ -209,9 +274,14 @@ struct ConversionRecord {
         rows.contains { $0.dest.map(ConversionRecord.key) == path }
     }
 
-    /// 源文件按 Eclose 的规则被删掉了：勾了删除、校验无差异、产物不比源大。
+    /// 这一行的源是相机 RAW（按扩展名，与图库的格式同一个判定）。
+    static func isRAWSource(_ row: FileRow) -> Bool { ImageFormat(url: row.job.input) == .raw }
+
+    /// 源文件按 Eclose 的规则被删掉了：勾了删除、源不是 RAW（RAW 原片永远保留）、校验无差异、
+    /// 产物不比源大。
     func sourceDeleted(_ row: FileRow) -> Bool {
-        guard deleteRequested, row.status == .done, row.verification == .passed else { return false }
+        guard deleteRequested, !ConversionRecord.isRAWSource(row), row.status == .done, row.verification == .passed
+        else { return false }
         return growthPercent(inBytes: row.inBytes, outBytes: row.outBytes) == nil
     }
 
@@ -338,7 +408,8 @@ struct ConversionRecord {
     /// 活动条的那句话。
     /// - 进行中：`正在转换　已转 82 张，共 196 张`
     /// - 转完：`转完 195 张，省下 398 MB。9 张有差异，1 张失败，它们的源文件都还在。`
-    ///   没有的类不写；没开删除就不提源文件。`N 张有差异` 可以点。
+    ///   没有的类不写；没开删除就不提源文件。`N 张有差异` 可以点。开了删除而这批里有 RAW 时，
+    ///   末尾再加 `RAW 原片都留着。`
     /// - 取消：`已取消。转完 82 张，还有 114 张没转。`，后面同样跟着各类。
     var activitySentence: [SentencePart] {
         let t = tally
@@ -361,12 +432,15 @@ struct ConversionRecord {
         if deleteRequested && t.grew > 0 { classes.append(SentencePart(text: "\(t.grew) 张 HEIF 比源文件大")) }
         if t.skipped > 0 { classes.append(SentencePart(text: "\(t.skipped) 张跳过")) }
         if t.failed > 0 { classes.append(SentencePart(text: "\(t.failed) 张失败", link: .conversion(.failures))) }
-        guard !classes.isEmpty else { return parts }
         for (i, part) in classes.enumerated() {
             if i > 0 { parts.append(SentencePart(text: "，")) }
             parts.append(part)
         }
-        parts.append(SentencePart(text: deleteRequested ? "，它们的源文件都还在。" : "。"))
+        if !classes.isEmpty { parts.append(SentencePart(text: deleteRequested ? "，它们的源文件都还在。" : "。")) }
+        // 勾了删除、这批里又有 RAW：说一句 RAW 没删，免得以为漏删了。
+        if deleteRequested && rows.contains(where: ConversionRecord.isRAWSource) {
+            parts.append(SentencePart(text: "RAW 原片都留着。"))
+        }
         return parts
     }
 

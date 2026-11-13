@@ -12,6 +12,7 @@
 /Tests/uisnapshot
 /Tests/unit-test
 /Tests/guimodel-test
+/Tests/guiraw-test
 /Tests/mangle-tool
 /Tests/.work*/
 

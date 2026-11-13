@@ -274,7 +274,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func refreshToolbar() {
         let targets = currentTargets()
         convertButton.isEnabled = !targets.isEmpty && !conversion.isRunning
-        convertButton.toolTip = conversion.isRunning ? "正在转换" : targets.isEmpty ? "这里没有可以转换的 JPEG" : targets.title
+        convertButton.toolTip = conversion.isRunning ? "正在转换" : targets.isEmpty ? ConversionTargets.emptyHint : targets.title
         viewModeItem?.selectedIndex = browserSettings.mode == .grid ? 0 : 1
         rebuildSortMenu()
     }
@@ -372,8 +372,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         conversion.replaceJobs(targets.jobs)
         conversion.outputFolder = settings.outputFolder
         conversion.outputMode = settings.outputFolder == nil ? .sameFolder : .chosenFolder
-        conversion.updateOptions { settings.apply(to: &$0) }
-        record = ConversionRecord(rows: conversion.rows, startedAt: Date(), deleteRequested: settings.deleteOriginal,
+        conversion.updateOptions { targets.apply(settings, to: &$0) }
+        record = ConversionRecord(rows: conversion.rows, startedAt: Date(), deleteRequested: targets.deletes(settings),
                                   isRunning: true)
         activityDismissed = false
         conversion.start()

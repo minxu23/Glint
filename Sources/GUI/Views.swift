@@ -290,7 +290,7 @@ final class EmptyStateView: NSView {
         title.stringValue = welcome ? "把装照片的文件夹拖进来" : message
         title.font = .systemFont(ofSize: welcome ? 17 : 15, weight: welcome ? .semibold : .regular)
         title.textColor = welcome ? .labelColor : .secondaryLabelColor
-        detail.stringValue = "在这里看照片的拍摄时间、位置和备注，把 JPEG 转成更省空间的 HEIF。"
+        detail.stringValue = "在这里看照片的拍摄时间、位置和备注，把 JPEG 和 RAW 转成更省空间的 HEIF。"
     }
 }
 

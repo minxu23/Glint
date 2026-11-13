@@ -21,7 +21,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>把 JPEG 转成 HEIF，完整保留元数据。</string>
+	<string>把 JPEG 和相机 RAW 转成 HEIF，完整保留元数据。</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.photography</string>
 	<key>CFBundleDocumentTypes</key>
