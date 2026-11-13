@@ -2613,6 +2613,30 @@ check("顶层 Orientation 不在键空间里报（rawProductIssues 核对）",
       rawKeySpaceDiff(before: ["Orientation": "6", "{TIFF}/Orientation": "6"], after: ["Orientation": "1", "{TIFF}/Orientation": "1"]),
       ["变化 {TIFF}/Orientation: 6 → 1"])
 
+print("RAW 的校验：XMP 的版本号键是从属性视图派生的，交给属性视图那一侧比")
+// 真 CR3 上量到的：源的 XMP 视图是 ImageIO 照读坏的字符码合成的（485051），产物修整后是 0231。
+var cr3XMP = cr3Version
+cr3XMP["XMP/exif:ExifVersion"] = "485051"; cr3XMP["XMP/exif:FlashPixVersion"] = "484948"; cr3XMP["XMP/exif:GPSVersionID"] = "2.3.0.0"
+var fixedXMP = fixedVersion
+fixedXMP["XMP/exif:ExifVersion"] = "0231"; fixedXMP["XMP/exif:FlashPixVersion"] = "0100"; fixedXMP["XMP/exif:GPSVersionID"] = "2.3.0.0"
+check("源 XMP 版本键是乱码、属性视图正常往返：不报", rawKeySpaceDiff(before: cr3XMP, after: fixedXMP), [])
+var gpsVersionLost = fixedXMP
+for k in ["{GPS}/GPSVersion[0]", "{GPS}/GPSVersion[1]", "{GPS}/GPSVersion[2]", "{GPS}/GPSVersion[3]", "XMP/exif:GPSVersionID"] {
+    gpsVersionLost.removeValue(forKey: k)
+}
+check("属性视图里丢了：仍报一行（XMP 那行不另报）", rawKeySpaceDiff(before: cr3XMP, after: gpsVersionLost),
+      ["丢失 {GPS}/GPSVersion = 2.3.0.0"])
+var xmpBroken = fixedXMP
+xmpBroken["{Exif}/ExifVersion[0]"] = "48"; xmpBroken["{Exif}/ExifVersion[1]"] = "0"; xmpBroken["{Exif}/ExifVersion[2]"] = "1"
+check("属性视图里改坏了：照报", rawKeySpaceDiff(before: cr3XMP, after: xmpBroken), ["变化 {Exif}/ExifVersion: 0231 → 4801"])
+let xmpOnlySource = ["XMP/exif:ExifVersion": "0231", "XMP/exif:FlashPixVersion": "0100", "XMP/exif:GPSVersionID": "2.3.0.0"]
+check("源只有 XMP 版本键：照原样比", rawKeySpaceDiff(before: xmpOnlySource,
+                                                after: ["XMP/exif:ExifVersion": "0230", "XMP/exif:FlashPixVersion": "0100"]),
+      ["变化 XMP/exif:ExifVersion: 0231 → 0230", "丢失 XMP/exif:GPSVersionID = 2.3.0.0"])
+check("盖哪几个：属性视图里有的那几个（带下标、规范化不了的也算）",
+      derivedXMPVersionKeys(["{Exif}/ExifVersion": "0231", "{GPS}/GPSVersion[0]": "2.5", "XMP/exif:FlashPixVersion": "0100"]),
+      ["XMP/exif:ExifVersion", "XMP/exif:GPSVersionID"])
+
 print("RAW 的校验：GPS 只差在取整范围内时合成一行")
 // 夹具 DNG 转出来的真实值：{GPS} 的差在数值容差以内，XMP 的分被取整到 4 位、方向键丢了。
 let gpsSource = ["{GPS}/Latitude": "31.22935525", "{GPS}/LatitudeRef": "N",

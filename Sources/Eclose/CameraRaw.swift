@@ -19,8 +19,10 @@ import ImageIO
 /// - 浮点数一律写不进去：`[2.0,3.0,1.0]`、`[2.0,3.0,0.0,0.0]` 在产物里整个字段都没有了。
 /// - 字符码被当成数字写：`[48,50,51,49]` 写成 "4801"，读回 `[48,0,1]`；`[48,49,48,48]` 读回 `[48,9,8]`。
 ///
-/// ImageIO 读 CR3 时 ExifVersion、FlashPixVersion 给的正是字符码（主会话实测 `[48,50,51,49]`），
-/// GPSVersion `[2,3,0,0]` 写不进去——和浮点数的表现一样，推测是浮点数（待用真 CR3 确认）。所以：
+/// ImageIO 读 CR3 时 ExifVersion、FlashPixVersion 给的正是字符码（主会话实测 `[48,50,51,49]`，修整后
+/// 在真 CR3 上读回 0231、0100）。GPSVersion 不是浮点数的问题：主会话用真 CR3 实测，GPS 字典里有坐标
+/// 时 GPSVersion 保得住；只有 GPSVersion 一个键、没有坐标的 GPS 字典被写入器整个丢掉，这是真丢失，
+/// 校验照报。浮点数那一条是对写入器的防御（实测浮点数写不进去），不对应已知的源。所以：
 /// - ExifVersion、FlashPixVersion 是恰好 4 个 ASCII 数字的字符码时，换成上面那种整数形式
 ///   （versionDigits）；
 /// - 三个字段里的数都是整数值、但有浮点类型的，换成整数。
@@ -135,13 +137,31 @@ func rawMetadataDiff(source: URL, dest: URL, sourceImage: CGImageSource, destIma
 
 /// RAW 源的键空间比对，纯函数，单测直接喂字典：两边先规范化版本号（collapsingVersions），源侧去掉
 /// 结构字段（isRawStructuralKey），GPS 取整合成一行（gpsRounding，行排在最后），其余照 keySpaceDiff。
-/// 顶层的 Orientation 由 rawProductIssues 核对（源里没有时按 1 算），这里不再报一遍。
+/// 顶层的 Orientation 由 rawProductIssues 核对（源里没有时按 1 算），这里不再报一遍。XMP 的三个版本号键
+/// 见 derivedXMPVersionKeys。
 func rawKeySpaceDiff(before: [String: String], after: [String: String]) -> [String] {
     let before = collapsingVersions(before).filter { !isRawStructuralKey($0.key) }
     let after = collapsingVersions(after)
     let gps = gpsRounding(before: before, after: after)
-    return keySpaceDiff(before: before, after: after, covered: gps.covered.union([kCGImagePropertyOrientation as String]))
-        + gps.issues
+    let covered = gps.covered.union([kCGImagePropertyOrientation as String]).union(derivedXMPVersionKeys(before))
+    return keySpaceDiff(before: before, after: after, covered: covered) + gps.issues
+}
+
+/// XMP 的版本号键与它在属性视图里的来源：ImageIO 合成 XMP 视图时从属性视图派生这三个键。
+let xmpVersionSources: [(xmp: String, view: String)] = [
+    (xmpKey("exif:ExifVersion"), exifKey(kCGImagePropertyExifVersion)),
+    (xmpKey("exif:FlashPixVersion"), exifKey(kCGImagePropertyExifFlashPixVersion)),
+    (xmpKey("exif:GPSVersionID"), metadataKey(kCGImagePropertyGPSDictionary, kCGImagePropertyGPSVersion)),
+]
+
+/// 源 `before` 里交给属性视图那一侧比、不再单独报的 XMP 版本号键：源的属性视图里有对应的字段（合成过的
+/// 一个键，或规范化不了时带下标的几个键）。CR3 自带的 XMP 包里没有这几个字段，源侧的 XMP 值是 ImageIO
+/// 照读坏的字符码合成的（`485051`），产物的 `0231` 反而是对的，单独比只会误报。属性视图那一侧按规范写法
+/// 比，丢了或改坏了照报，不会漏。源的属性视图里没有、只有 XMP 有时不盖，照原样比。
+func derivedXMPVersionKeys(_ before: [String: String]) -> Set<String> {
+    Set(xmpVersionSources.filter { pair in
+        before.keys.contains { $0 == pair.view || strippingArrayIndex($0) == pair.view }
+    }.map(\.xmp))
 }
 
 /// RAW 的产物另外核对的三样，`source`、`product` 是两边第 0 张图的属性：
