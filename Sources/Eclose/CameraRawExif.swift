@@ -8,9 +8,13 @@
 //
 // - 佳能 CR3（ISO BMFF）：moov 里 UUID 为 85c0b687-820f-11e0-8111-f4ce462b6a48 的 uuid 盒子，
 //   CMT1 是 IFD0、CMT2 是 Exif IFD、CMT4 是 GPS IFD，每个都是带 TIFF 头的完整 TIFF。CMT3 是佳能的
-//   MakerNote，不搬。
-// - TIFF 系 RAW（DNG、CR2、NEF、NRW、ARW、PEF、SRW、RW2、ORF）：文件本身就是 TIFF（RW2、ORF 换了
-//   头里的魔数），IFD0 里的 0x8769 指向 Exif IFD、0x8825 指向 GPS IFD。
+//   MakerNote，不搬。没有 CMT4（关着定位的机身可能这样）就不带 GPS。
+// - TIFF 系 RAW（DNG、CR2、NEF、NRW、ARW、PEF、SRW、ORF）：文件本身就是 TIFF（ORF 换了头里的魔数），
+//   IFD0 里的 0x8769 指向 Exif IFD、0x8825 指向 GPS IFD。
+// - 松下 RW2：文件是魔数 0x55 的 TIFF，但 IFD0 的 0x8769 指向的 Exif IFD 只有十来项；完整的 EXIF 在
+//   IFD0 的 0x002E（JpgFromRaw，内嵌的 JPEG 预览）的 APP1 里，ImageIO 读 RW2 用的也是那一份（主会话
+//   用真 RW2 实测）。所以从内嵌 JPEG 取（sourceExifTIFF），再按 TIFF 系拼；RW2 自己那份 Exif IFD 的每个
+//   条目都得在内嵌那份里逐字节相同地出现，否则两份对不上，不照搬（GPS IFD 同理）。
 // - 富士 RAF：文件头后面嵌着一张 JPEG，EXIF 在它的 APP1 里（sourceExifTIFF），取出来再按 TIFF 系拼。
 // 支持哪些格式按 ImageIO 给的类型查表（cameraRawExifLayouts）。别的格式（CRW、MRW、X3F、IIQ、
 // SR2、RWL……）不照搬：没有样本、单测里也没有按它的结构搭的样本，结构没把握。
@@ -35,7 +39,9 @@
 //
 // 这里只有纯函数，进字节出字节。落盘、方向核对与自检在 Converter.swift 的 carryCameraRawExif。
 
+import CoreGraphics
 import Foundation
+import ImageIO
 
 // MARK: - 格式
 
@@ -45,6 +51,8 @@ enum CameraRawExifLayout: Equatable {
     case tiff(magic: Set<Int>)
     /// 佳能 CR3：CMT1/CMT2/CMT4。
     case cr3
+    /// 松下 RW2：IFD0 的 JpgFromRaw 里内嵌 JPEG 的 APP1。
+    case rw2
     /// 富士 RAF：内嵌 JPEG 的 APP1。
     case raf
 }
@@ -63,7 +71,7 @@ let cameraRawExifLayouts: [String: CameraRawExifLayout] = [
     "com.sony.arw-raw-image": .tiff(magic: [42]),
     "com.pentax.raw-image": .tiff(magic: [42]),         // PEF
     "com.samsung.raw-image": .tiff(magic: [42]),        // SRW
-    "com.panasonic.rw2-raw-image": .tiff(magic: [0x55]),
+    "com.panasonic.rw2-raw-image": .rw2,
     "com.olympus.or-raw-image": .tiff(magic: orfMagic),
     "com.olympus.sr-raw-image": .tiff(magic: orfMagic),
     "com.canon.cr3-raw-image": .cr3,
@@ -97,6 +105,10 @@ let rawExifIFD0Tags: [Int: String] = [
     0x0131: "Software", 0x0132: "DateTime", 0x013B: "Artist", 0x013C: "HostComputer",
     0x4746: "Rating", 0x4749: "RatingPercent", 0x8298: "Copyright",
     0x9C9B: "XPTitle", 0x9C9C: "XPComment", 0x9C9D: "XPAuthor", 0x9C9E: "XPKeywords", 0x9C9F: "XPSubject",
+    // 松下的标题（PanasonicTitle、PanasonicTitle2）：机身上给照片输入的标题文字，和 ImageDescription 一样是
+    // 用户写的描述，写在 RW2 内嵌 JPEG 的 IFD0 里。号码落在 DNG 私有标签（50706 起）的范围里，但 DNG
+    // 规范没有用到这两个号。
+    0xC6D2: "PanasonicTitle", 0xC6D3: "PanasonicTitle2",
 ]
 
 /// Exif IFD 里不搬的标签：MakerNote（理由见文件头）。
@@ -226,7 +238,7 @@ func tiffRawExifParts(_ tiff: TIFFStructure) throws -> RawExifParts {
 }
 
 /// CR3：顶层 ftyp 的主品牌是 `crx `、恰好一个 moov，moov 里恰好一个佳能元数据 uuid 盒子，里面
-/// CMT1、CMT2、CMT4 各恰好一个、都是合法的 TIFF、字节序相同。各取第一个 IFD。
+/// CMT1、CMT2 各恰好一个，CMT4 至多一个（没有就不带 GPS），都是合法的 TIFF、字节序相同。各取第一个 IFD。
 func cr3RawExifParts(_ bytes: [UInt8]) throws -> RawExifParts {
     guard let top = heifBoxes(bytes, in: 0..<bytes.count) else { throw RawExifSkip("CR3 的顶层盒子读不通") }
     guard let ftyp = top.first, ftyp.type == "ftyp", ftyp.content.count >= 4,
@@ -244,42 +256,75 @@ func cr3RawExifParts(_ bytes: [UInt8]) throws -> RawExifParts {
     guard let cmts = heifBoxes(bytes, in: (canon[0].content.lowerBound + 16)..<canon[0].content.upperBound) else {
         throw RawExifSkip("CR3 的佳能元数据盒子读不通")
     }
-    func cmt(_ name: String) throws -> (tiff: TIFFStructure, ifd: Int) {
+    func cmt(_ name: String, optional: Bool = false) throws -> (tiff: TIFFStructure, ifd: Int)? {
         let found = cmts.filter { $0.type == name }
+        if found.isEmpty, optional { return nil }
         guard found.count == 1 else { throw RawExifSkip(found.isEmpty ? "CR3 里没有 \(name)" : "CR3 里的 \(name) 不止一个") }
         guard let tiff = TIFFStructure(bytes, base: found[0].content.lowerBound, length: found[0].content.count),
               let ifd = tiff.ifd0 else { throw RawExifSkip("CR3 的 \(name) 不是合法的 TIFF") }
         return (tiff, ifd)
     }
-    let cmt1 = try cmt("CMT1"), cmt2 = try cmt("CMT2"), cmt4 = try cmt("CMT4")
-    guard cmt1.tiff.bigEndian == cmt2.tiff.bigEndian, cmt2.tiff.bigEndian == cmt4.tiff.bigEndian else {
+    guard let cmt1 = try cmt("CMT1"), let cmt2 = try cmt("CMT2") else { throw RawExifSkip("CR3 里没有 CMT1、CMT2") }
+    let cmt4 = try cmt("CMT4", optional: true)
+    guard cmt1.tiff.bigEndian == cmt2.tiff.bigEndian, cmt4.map({ $0.tiff.bigEndian == cmt1.tiff.bigEndian }) ?? true else {
         throw RawExifSkip("CR3 的 CMT1、CMT2、CMT4 字节序不一致")
     }
     var parts = RawExifParts(bigEndian: cmt1.tiff.bigEndian)
     // CMT1 是独立的 TIFF，它的 IFD0 里就算有 Exif/GPS 指针也只指向 CMT1 自己的范围；Exif 与 GPS 取 CMT2、CMT4。
     parts.ifd0 = try keptIFD0(try carriedIFD(cmt1.tiff, at: cmt1.ifd, name: "CMT1"), bigEndian: parts.bigEndian, in: "CMT1")
     (parts.exif, parts.interop) = try exifAndInterop(cmt2.tiff, at: cmt2.ifd, name: "CMT2", taken: [])
-    parts.gps = try rejectingPointers(try carriedIFD(cmt4.tiff, at: cmt4.ifd, name: "CMT4"), in: "CMT4")
+    if let cmt4 { parts.gps = try rejectingPointers(try carriedIFD(cmt4.tiff, at: cmt4.ifd, name: "CMT4"), in: "CMT4") }
     return parts
 }
 
 /// RAF 的文件头：前 16 字节，后面第 84、88 字节起是内嵌 JPEG 的偏移与长度（大端 4 字节）。
 let rafMagic: [UInt8] = Array("FUJIFILMCCD-RAW ".utf8)
 
-/// RAF：内嵌 JPEG 里恰好一个 EXIF 段（sourceExifTIFF 的闸门），它的 TIFF 按 TIFF 系拼。
+/// 内嵌 JPEG 里恰好一个 EXIF 段（sourceExifTIFF 的闸门），它的 TIFF 按 TIFF 系拼。`format` 写进原因里。
+func embeddedJPEGRawExifParts(_ jpeg: [UInt8], format: String) throws -> RawExifParts {
+    switch sourceExifTIFF(jpeg) {
+    case .success(let tiff):
+        guard let structure = TIFFStructure(tiff, base: 0, length: tiff.count) else {
+            throw RawExifSkip("\(format) 内嵌 JPEG 的 EXIF 不是合法的 TIFF")
+        }
+        return try tiffRawExifParts(structure)
+    case .failure(let skip):
+        throw RawExifSkip("\(format) 内嵌的 JPEG：\(skip.reason)")
+    }
+}
+
+/// RAF：文件头里写着内嵌 JPEG 的位置，EXIF 取它的。
 func rafRawExifParts(_ bytes: [UInt8]) throws -> RawExifParts {
     guard bytes.starts(with: rafMagic) else { throw RawExifSkip("不是 RAF 的文件头") }
     guard let at = bigEndianInt(bytes, 84, 4), let length = bigEndianInt(bytes, 88, 4),
           length > 0, at >= 92, at <= bytes.count - length else { throw RawExifSkip("RAF 里内嵌 JPEG 的位置越界") }
-    switch sourceExifTIFF(Array(bytes[at..<(at + length)])) {
-    case .success(let tiff):
-        guard let structure = TIFFStructure(tiff, base: 0, length: tiff.count) else {
-            throw RawExifSkip("RAF 内嵌 JPEG 的 EXIF 不是合法的 TIFF")
-        }
-        return try tiffRawExifParts(structure)
-    case .failure(let skip):
-        throw RawExifSkip("RAF 内嵌的 JPEG：\(skip.reason)")
+    return try embeddedJPEGRawExifParts(Array(bytes[at..<(at + length)]), format: "RAF")
+}
+
+/// RW2 IFD0 里放内嵌 JPEG（JpgFromRaw）的标签。
+let rw2JpgFromRawTag = 0x002E
+
+/// RW2：魔数 0x55 的 TIFF，EXIF 取 IFD0 里 JpgFromRaw（BYTE 或 UNDEFINED）内嵌 JPEG 的。RW2 自己的
+/// Exif IFD、GPS IFD（IFD0 的 0x8769、0x8825，读不通照样不照搬）里的每个条目，都要在内嵌那份的同一个
+/// IFD 里逐字节相同（类型、个数、值）；内嵌那份去掉的 MakerNote 也算不相同。
+func rw2RawExifParts(_ tiff: TIFFStructure) throws -> RawExifParts {
+    guard let ifd0At = tiff.ifd0 else { throw RawExifSkip("IFD0 的位置读不出") }
+    let ifd0 = try carriedIFD(tiff, at: ifd0At, name: "IFD0")
+    guard let jpg = ifd0.first(where: { $0.tag == rw2JpgFromRawTag }), jpg.type == 1 || jpg.type == 7 else {
+        throw RawExifSkip("RW2 里没有内嵌的 JPEG（JpgFromRaw）")
     }
+    let parts = try embeddedJPEGRawExifParts(jpg.value, format: "RW2")
+    for (tag, name, embedded) in [(0x8769, "Exif IFD", parts.exif), (0x8825, "GPS IFD", parts.gps)] {
+        guard let at = try pointer(ifd0, tag, bigEndian: tiff.bigEndian, in: "IFD0") else { continue }
+        guard tiff.bigEndian == parts.bigEndian else { throw RawExifSkip("RW2 与内嵌 JPEG 的 EXIF 字节序不同") }
+        for e in try carriedIFD(tiff, at: at, name: "RW2 的 \(name)") {
+            guard let other = embedded.first(where: { $0.tag == e.tag }) else {
+                throw RawExifSkip("RW2 的 \(name) 里有 \(tagName(e.tag))，内嵌 JPEG 的 EXIF 里没有")
+            }
+            guard other == e else { throw RawExifSkip("RW2 的 \(name) 里 \(tagName(e.tag)) 与内嵌 JPEG 的不同") }
+        }
+    }
+    return parts
 }
 
 // MARK: - 拼
@@ -330,8 +375,9 @@ func assembledExifTIFF(_ parts: RawExifParts) -> [UInt8]? {
 
 // MARK: - 入口
 
-/// 从 RAW 文件的字节里拼出照搬用的 TIFF；不照搬时是原因。`type` 是 ImageIO 给的类型。
-func cameraRawExifTIFF(_ bytes: [UInt8], type: String?) -> Result<[UInt8], RawExifSkip> {
+/// 从 RAW 文件的字节里取出要照搬的条目（拼块之前的材料）；不照搬时是原因。照搬后的自检与 --verify
+/// 拿它当源的原始条目，与拼出来的块、产物里的 Exif 项逐条比。
+func cameraRawExifParts(_ bytes: [UInt8], type: String?) -> Result<RawExifParts, RawExifSkip> {
     guard let type, let layout = cameraRawExifLayouts[type] else {
         return .failure(.init("这种 RAW（\(type ?? "类型不明")）的 EXIF 还不能整块照搬"))
     }
@@ -344,17 +390,31 @@ func cameraRawExifTIFF(_ bytes: [UInt8], type: String?) -> Result<[UInt8], RawEx
             }
             parts = try tiffRawExifParts(tiff)
         case .cr3: parts = try cr3RawExifParts(bytes)
+        case .rw2:
+            guard let tiff = TIFFStructure(bytes, base: 0, length: bytes.count, magic: [0x55]) else {
+                throw RawExifSkip("文件头不是 \(type) 应有的 TIFF 头")
+            }
+            parts = try rw2RawExifParts(tiff)
         case .raf: parts = try rafRawExifParts(bytes)
         }
         guard !(parts.ifd0.isEmpty && parts.exif.isEmpty && parts.interop.isEmpty && parts.gps.isEmpty) else {
             throw RawExifSkip("RAW 里没有可照搬的 EXIF")
         }
-        guard let block = assembledExifTIFF(parts) else { throw RawExifSkip("拼出来的 EXIF 太大，4 字节的偏移放不下") }
-        return .success(block)
+        return .success(parts)
     } catch let skip as RawExifSkip {
         return .failure(skip)
     } catch {
         return .failure(.init("\(error)"))
+    }
+}
+
+/// 从 RAW 文件的字节里拼出照搬用的 TIFF；不照搬时是原因。`type` 是 ImageIO 给的类型。
+func cameraRawExifTIFF(_ bytes: [UInt8], type: String?) -> Result<[UInt8], RawExifSkip> {
+    switch cameraRawExifParts(bytes, type: type) {
+    case .success(let parts):
+        guard let block = assembledExifTIFF(parts) else { return .failure(.init("拼出来的 EXIF 太大，4 字节的偏移放不下")) }
+        return .success(block)
+    case .failure(let skip): return .failure(skip)
     }
 }
 
@@ -379,4 +439,155 @@ func cameraRawCarryPlan(source: [UInt8], type: String?, productOrientation: Int)
         return .failure(.init("RAW 里 EXIF 的方向（\(carried.map(String.init) ?? "读不出")）与产物的方向（\(productOrientation)）不同"))
     }
     return .success(block)
+}
+
+// MARK: - 照搬之后的核对（自检与 --verify 共用）
+//
+// 同一组 EXIF 字节，ImageIO 按源的格式读和按 HEIC 读给出的视图不一样（主会话用真 CR3、本仓库用夹具
+// 实测）：读 CR3 时 ISO 叫 {Exif}/ISOSpeed、不显示 OffsetTime*；读 HEIC、JPEG 时叫 ISOSpeedRatings 加
+// PhotographicSensitivity，显示 OffsetTime*，把 GPS 坐标取整到分的 4 位小数，不显示空串，不显示只有
+// GPSVersion 一条的 GPS 字典；读 DNG 时坐标不取整、空串也不显示。所以照搬之后不拿源的视图当参照，
+// 改以字节为证：块里的条目与 RAW 里的逐字节相同；ImageIO 读 HEIC 读出的，与把同一个块包进一张 JPEG
+// 读出的相同（JPEG 与 HEIC 是同一套读法，实测只差 HEIC 的瓦片宽高）。
+
+/// 拼块时有意不搬的、拼的时候重新生成的标签以外，源的条目与产物 Exif 项里的条目逐个比（类型、个数、
+/// 值字节、字节序）。源里有、产物里没有的报「丢失」，不一样的报「变化」，产物里多出来的报「多出」；
+/// 子 IFD 指针不比（位置由拼块定）。`source` 是 cameraRawExifParts 取出的材料（IFD0 已按白名单筛过、
+/// Exif IFD 已去掉 MakerNote），`product` 读不出时报读不出。照搬后的自检（拿拼好的块当 `product`）与
+/// --verify（拿产物的 Exif 项）都用它。
+func carriedEntryIssues(source: RawExifParts, product: TIFFStructure?) -> [String] {
+    guard let product else { return ["产物里的 EXIF 读不出，无法按原始字节核对"] }
+    let pointers: [String: Set<Int>] = ["IFD0": [0x8769, 0x8825], "ExifIFD": [0xA005]]
+    var found: [String: RawExifEntry] = [:]
+    for e in rawExifEntries(product) where !(pointers[e.ifd]?.contains(e.tag) ?? false) {
+        found["\(e.ifd) \(e.tag)"] = e
+    }
+    var issues: [String] = []
+    var seen = Set<String>()
+    for (ifd, entries) in [("IFD0", source.ifd0), ("ExifIFD", source.exif), ("Interop", source.interop), ("GPS", source.gps)] {
+        for e in entries {
+            let key = "\(ifd) \(e.tag)"
+            seen.insert(key)
+            let mine = RawExifEntry(space: ifd == "GPS" ? .gps : ifd == "Interop" ? .interop : .main, ifd: ifd, tag: e.tag,
+                                    type: e.type, count: e.count, value: e.value, bigEndian: source.bigEndian)
+            guard let other = found[key] else { issues.append("丢失 \(carriedEntryName(ifd, e.tag))"); continue }
+            if other.type != e.type || other.count != e.count || other.value != e.value || other.bigEndian != source.bigEndian {
+                issues.append("变化 \(carriedEntryName(ifd, e.tag))：\(describeCarried(mine)) → \(describeCarried(other))")
+            }
+        }
+    }
+    for (key, e) in found.sorted(by: { $0.key < $1.key }) where !seen.contains(key) {
+        issues.append("多出 \(carriedEntryName(e.ifd, e.tag))")
+    }
+    return issues
+}
+
+/// 差异行里条目的名字：IFD 对应的属性字典与标签名，后面括上标签号，如 `{Exif}/OffsetTime（0x9010）`。
+func carriedEntryName(_ ifd: String, _ tag: Int) -> String {
+    let hex = String(format: "0x%04X", tag)
+    let name: String
+    switch ifd {
+    case "IFD0": name = "{TIFF}/\(mainExifTags[tag]?.name ?? hex)"
+    case "ExifIFD": name = "{Exif}/\(mainExifTags[tag]?.name ?? hex)"
+    case "GPS": name = "{GPS}/\(gpsExifTags[tag]?.view ?? hex)"
+    default: name = "\(ifd)/\(interopExifTags[tag]?.name ?? hex)"
+    }
+    return "\(name)（\(hex)）"
+}
+
+/// 「变化」那一行里一个条目的写法：类型、个数与值。
+private func describeCarried(_ e: RawExifEntry) -> String {
+    "\(tiffTypeName(e.type)) × \(e.count) \(describeExifValue(e))"
+}
+
+/// 视图里由 EXIF 派生的键：属性视图的 {Exif}、{GPS}、{TIFF}，以及 ImageIO 从 EXIF 合成的 XMP 键
+/// （exif:、exifEX:、tiff: 命名空间）。照搬成功时它们改由原始字节核对（carriedEntryIssues）。
+func isExifDerivedKey(_ key: String) -> Bool {
+    ["{Exif}/", "{GPS}/", "{TIFF}/", xmpKey("exif:"), xmpKey("exifEX:"), xmpKey("tiff:")].contains { key.hasPrefix($0) }
+}
+
+/// HEIC 的瓦片宽高：ImageIO 按 HEIC 的编码方式给出，在 {TIFF} 与 XMP 的 tiff: 里，与 EXIF 无关。
+func isTileKey(_ key: String) -> Bool {
+    [metadataKey(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFTileWidth),
+     metadataKey(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFTileLength),
+     xmpKey("tiff:TileWidth"), xmpKey("tiff:TileLength")].contains(key)
+}
+
+/// 源文件里所有 XMP 包的原文（`<x:xmpmeta` 到 `</x:xmpmeta>`）。XMP 规范本来就允许不懂容器的程序这样
+/// 扫出包来；RAW 里 XMP 放在哪各家不同（CR3 的 uuid 盒子、TIFF 的 0x02BC、内嵌 JPEG 的 APP1），扫一遍
+/// 全都找得到，宁可多找。
+func xmpPacketTexts(_ bytes: [UInt8]) -> [String] {
+    let data = Data(bytes)
+    let open = Data("<x:xmpmeta".utf8), close = Data("</x:xmpmeta>".utf8)
+    var texts: [String] = []
+    var from = data.startIndex
+    while texts.count < 100, let start = data.range(of: open, in: from..<data.endIndex),
+          let end = data.range(of: close, in: start.upperBound..<data.endIndex) {
+        texts.append(String(decoding: data[start.lowerBound..<end.upperBound], as: UTF8.self))
+        from = end.upperBound
+    }
+    return texts
+}
+
+/// XMP 视图里的这个键是不是源的 XMP 包自己写的（而不是 ImageIO 从 EXIF 合成的）：某个包的原文里有这个
+/// 属性名（任何前缀，后面紧跟 `=`、`>`、空白或 `/`）就算。分不清的都算包里写的，照常比，宁可多报。
+func isNativeXMPKey(_ key: String, packets: [String]) -> Bool {
+    guard key.hasPrefix(xmpKey("")) else { return false }
+    let path = key.dropFirst(xmpKey("").count)
+    guard let colon = path.firstIndex(of: ":") else { return false }
+    let local = path[path.index(after: colon)...].prefix { $0 != "[" && $0 != "/" }
+    guard !local.isEmpty else { return false }
+    return packets.contains { text in ["=", ">", " ", "\n", "\t", "\r", "/"].contains { text.contains(":\(local)\($0)") } }
+}
+
+/// 照搬成功时 --verify 不再拿源视图比的键：源视图里由 EXIF 派生的（isExifDerivedKey），源的 XMP 包里
+/// 自己写了的 XMP 键除外。
+func carriedCoveredKeys(_ before: [String: String], packets: [String]) -> Set<String> {
+    Set(before.keys.filter { isExifDerivedKey($0) && !isNativeXMPKey($0, packets: packets) })
+}
+
+/// 把 `block` 包进一张最小的 JPEG（一张 8×8 的图，APP1 是 `Exif\0\0` 加这块 TIFF），好让 ImageIO 按
+/// JPEG 读一遍。块放不进一个 APP1（64 KB）是 nil。
+func jpegWrapping(exif block: [UInt8]) -> [UInt8]? {
+    guard block.count + 8 <= 0xFFFF, let base = plainJPEGSegments else { return nil }
+    let length = block.count + 8
+    return [0xFF, 0xD8, 0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)] + exifHeader + block + base
+}
+
+/// ImageIO 编出来的一张 8×8 的 JPEG 去掉 SOI 与它自己写的 APP1 段之后的字节。
+private let plainJPEGSegments: [UInt8]? = {
+    guard let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+          let image = ctx.makeImage() else { return nil }
+    let data = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(dest, image, nil)
+    guard CGImageDestinationFinalize(dest) else { return nil }
+    let bytes = [UInt8](data as Data)
+    guard bytes.starts(with: [0xFF, 0xD8]) else { return nil }
+    var out: [UInt8] = []
+    var i = 2
+    while i + 4 <= bytes.count, bytes[i] == 0xFF, bytes[i + 1] != 0xDA {
+        let length = Int(bytes[i + 2]) << 8 | Int(bytes[i + 3])
+        guard i + 2 + length <= bytes.count else { return nil }
+        if bytes[i + 1] != 0xE1 { out += bytes[i..<(i + 2 + length)] }
+        i += 2 + length
+    }
+    return out + bytes[i...]
+}()
+
+/// 照搬后 ImageIO 读不读得懂这个块。三个视图都只取 EXIF 派生的键：`reference` 是同一个块包进 JPEG 读出的，
+/// `heic` 是照搬后的产物读出的，`before` 是照搬前的产物读出的。`reference` 里的每个键 `heic` 里都得有、
+/// 值逐字相同；`heic` 多出来的键只能是瓦片宽高，或照搬前就是这个值（它不是从块里读出来的：旧的 EXIF
+/// 已经清零，它来自 XMP 包与 EXIF 的调和）。不满足时是原因。
+func exifReadingMismatch(reference: [String: String], heic: [String: String], before: [String: String]) -> String? {
+    for (key, value) in reference.sorted(by: { $0.key < $1.key }) {
+        guard let got = heic[key] else { return "照搬后 HEIC 里读不出 \(key)（把块包进 JPEG 读得出）" }
+        guard got == value else { return "照搬后 HEIC 里 \(key) 与把块包进 JPEG 读出的不同" }
+    }
+    for (key, value) in heic.sorted(by: { $0.key < $1.key }) where reference[key] == nil && !isTileKey(key) {
+        guard before[key] == value else { return "照搬后 HEIC 里多出 \(key)（把块包进 JPEG 读不出）" }
+    }
+    return nil
 }

@@ -270,8 +270,9 @@ EXIF 原值的组写在分号后面，例如 `EXIF 整块照搬（786 字节；�
 
 | 格式 | EXIF 在哪 |
 |---|---|
-| 佳能 CR3 | `moov` 里 UUID 为 `85c0b687-820f-11e0-8111-f4ce462b6a48` 的 `uuid` 盒子：`CMT1` 是 IFD0、`CMT2` 是 Exif IFD、`CMT4` 是 GPS IFD（各是一个完整的 TIFF；`CMT3` 是 MakerNote，不搬） |
-| DNG、CR2、NEF、NRW、ARW、PEF、SRW、RW2、ORF | 文件本身就是 TIFF（RW2 的魔数是 0x55，ORF 是 `IIRO`/`IIRS`/`MMOR`）：IFD0 里 0x8769 指向 Exif IFD、0x8825 指向 GPS IFD |
+| 佳能 CR3 | `moov` 里 UUID 为 `85c0b687-820f-11e0-8111-f4ce462b6a48` 的 `uuid` 盒子：`CMT1` 是 IFD0、`CMT2` 是 Exif IFD、`CMT4` 是 GPS IFD（各是一个完整的 TIFF；`CMT3` 是 MakerNote，不搬；没有 `CMT4` 就不带 GPS） |
+| DNG、CR2、NEF、NRW、ARW、PEF、SRW、ORF | 文件本身就是 TIFF（ORF 的魔数是 `IIRO`/`IIRS`/`MMOR`）：IFD0 里 0x8769 指向 Exif IFD、0x8825 指向 GPS IFD |
+| 松下 RW2 | IFD0 的 0x002E（JpgFromRaw，内嵌的 JPEG 预览）的 EXIF 段——RW2 自己 IFD0 的 Exif IFD 只有十来项，ImageIO 读 RW2 用的也是内嵌那份。RW2 自己那份 Exif IFD（与 GPS IFD）的每个条目都得在内嵌那份里逐字节相同，否则不照搬 |
 | 富士 RAF | 文件头后面内嵌的 JPEG 的 EXIF 段 |
 
 别的格式（CRW、MRW、X3F、IIQ、SR2、RWL……）不照搬，`-v` 里写「这种 RAW（类型）的 EXIF 还不能整块照搬」。
@@ -280,7 +281,7 @@ EXIF 原值的组写在分号后面，例如 `EXIF 整块照搬（786 字节；�
 - **字节序与源相同**，值的字节一个不改（GPS 的分数不重算，坐标的精度就这样保住）。
 - **IFD0 只留描述照片的标签**：Make、Model、Orientation、DateTime、ImageDescription、Artist、Copyright、
   Software、HostComputer、DocumentName、XResolution、YResolution、ResolutionUnit、Rating、RatingPercent、
-  Windows XP 的五个标签。描述图像数据的（宽高、BitsPerSample、Compression、PhotometricInterpretation、
+  Windows XP 的五个标签、松下的两个标题（0xC6D2、0xC6D3，机身上输入的照片标题）。描述图像数据的（宽高、BitsPerSample、Compression、PhotometricInterpretation、
   StripOffsets、TileOffsets……）说的是 RAW 里的预览图或原始数据；描述 RAW 容器的（SubIFDs、DNG 的
   50706 起、各家私有标签）显影完就没有意义；ICC、XMP、IPTC 另有去处。这些一概不要。
 - **Exif IFD 全部照搬，只去掉 MakerNote**（里面满是相对原文件的偏移，挪了就指错）。Interop IFD
@@ -291,14 +292,18 @@ EXIF 原值的组写在分号后面，例如 `EXIF 整块照搬（786 字节；�
 源的长度、偏移、个数一律不信：IFD 越界、值越界、条目数超过 1000、IFD 互相指向、同一个标签出现
 两次、类型不认识、子 IFD 指针出现在不该在的地方、CR3 的 `CMT1`/`CMT2`/`CMT4` 缺了或不止一个……
 任何一条就不照搬，产物保持 ImageIO 写的样子（`--no-raw-exif` 的产物），转换照常完成。换的那一步、
-「先写另一个临时文件、自检过了才替换」都与 JPEG 同一套；自检用 RAW 校验的那把尺子（见「RAW 源比
-什么」）：读回的块逐字节相同，宽高、方向、位深（10）不变，照搬前与源一致的键照搬后一个都不许变坏，
-没有放行。`-v` 里的 N 是拼出来的块的字节数。
+「先写另一个临时文件、自检过了才替换」都与 JPEG 同一套。自检不拿源的视图当参照——同一组字节，ImageIO
+按 RAW 读与按 HEIC 读给出的视图不同（读 CR3 时 ISO 叫 `ISOSpeed`、不显示 `OffsetTime*`；读 HEIC、JPEG
+时叫 `ISOSpeedRatings` 加 `PhotographicSensitivity`、显示 `OffsetTime*`、把 GPS 坐标取整到分的 4 位小数、
+不显示空串；读 DNG 时坐标不取整），拿视图比必然「退步」。改以字节为证：读回的块与拼好的逐字节相同；
+块里每个条目与另读一遍的 RAW 条目逐字节相同（类型、个数、值）；宽高、方向、位深（10）不变；产物视图里
+EXIF 派生的键（`{Exif}`、`{GPS}`、`{TIFF}` 与 XMP 的 `exif:`、`exifEX:`、`tiff:`）与「同一个块包进一张
+最小 JPEG 后 ImageIO 读出的」相同（只许多出 HEIC 的瓦片宽高，和照搬前就有的、从 XMP 包调和来的键）。
+`-v` 里的 N 是拼出来的块的字节数。
 
-照搬的块保住了系统重写会丢的：GPS 的原始分数、值是空串的标签（佳能的 `CameraOwnerName`、GPS 的
-`Satellites`）、只有 `GPSVersion` 的 GPS IFD。但 ImageIO 的视图看不出其中两样：它读 HEIC（和 JPEG）时
-把 GPS 坐标取整到分的 4 位小数、不显示空串（读 DNG 时不取整），所以 `--verify` 的 GPS 那一行与
-空串的丢失照样会报，见「RAW 源比什么」。
+照搬的块保住了系统重写会丢的：GPS 的原始分数、`OffsetTime*`（ImageIO 读 CR3 时不显示它们，系统重写
+时悄悄丢了）、值是空串的标签（佳能的 `CameraOwnerName`、GPS 的 `Satellites`）、只有 `GPSVersion` 的
+GPS IFD。
 
 **EXIF 交给系统重写时**（加了 `--no-raw-exif`，或上面退回时），EXIF 由 ImageIO 从属性
 字典写出，丢的东西见「已知限制」。这条路上本工具补两处 ImageIO 读不出的写法：
@@ -716,7 +721,14 @@ JPEG 段结构的核对（原始 EXIF 清点、打架合成一行、备注与文
 标签、搬不走的段）对 RAW 不跑——RAW 里没有 APP1、APP13 这些段。比的是：
 
 - **产物本身**：位深是 10；存储的像素宽高与源相同（不按方向转正）；方向标签相同（没有的按 1 算）。
-- **键空间**，按源的原值比，与 JPEG 只有三处不同：
+- **EXIF 照搬过的产物**（Exif 项结束在文件末尾、源的 EXIF 取得出）：EXIF 与 GPS 按原始字节比——源的
+  条目（白名单内的 IFD0、去掉 MakerNote 的 Exif IFD、Interop、GPS）与产物 Exif 项里的逐条比类型、个数、
+  值，报成 `丢失 {Exif}/OffsetTime（0x9010）`、`变化 {GPS}/Altitude（0x0006）：…`、`多出 …`。源视图里由 EXIF
+  派生的键（`{Exif}`、`{GPS}`、`{TIFF}`，以及 ImageIO 从 EXIF 合成的 XMP `exif:`、`exifEX:`、`tiff:` 键）
+  不再拿源的视图比，GPS 那一行、ISO 换名、空串、`OffsetTime` 都不误报。源的 XMP 包原文里自己写了的
+  `exif:`/`exifEX:`/`tiff:` 属性（扫文件里所有的 `<x:xmpmeta>` 包，任何前缀的同名属性都算）不算派生，照比。
+  照报的：MakerNote 那一行、XMP 包里的别的键、IPTC 等。下面那些键空间的规矩只在没照搬时用。
+- **键空间**（没照搬时），按源的原值比，与 JPEG 只有三处不同：
   - **结构字段不比**：源里描述传感器原始数据或 RAW 容器本身的键，HEIC 是显影后的图像，没有它们。
     只收实测过的：`{raw}/…`（裁切、传感器尺寸、内嵌缩略图）、`{DNG}/…`（色彩矩阵、黑白电平、
     默认裁切、DNG 版本……）、`{Exif}/CFAPattern…`、`{TIFF}/BitsPerPixel…`、`{TIFF}/Width`、
@@ -728,28 +740,26 @@ JPEG 段结构的核对（原始 EXIF 清点、打架合成一行、备注与文
     XMP 里的 `exif:ExifVersion`、`exif:FlashPixVersion`、`exif:GPSVersionID` 是 ImageIO 从属性视图派生的
     （CR3 自带的 XMP 包里没有它们，源侧照读坏的字符码合成出 `485051`）：源的属性视图里有对应字段时
     交给属性视图那一侧比，不单独报；只有 XMP 有时照原样比。
-  - **GPS 取整压成一行**：系统重写时写入器重新编码坐标（秒的分母改成 100），照搬时产物里的分数
-    逐字节是源的，但 ImageIO 读 HEIC 时把分取整到 4 位小数——两条路的视图里 `{GPS}/Latitude` 都在第
-    6–7 位小数变了，XMP 里 `69,11.645100N` 变成 `69,11.6452N`、`GPSLatitudeRef` 并进坐标里。只差在这个范围内时不逐字段报，报一行
+  - **GPS 取整压成一行**：系统重写时写入器重新编码坐标（秒的分母改成 100），ImageIO 读 HEIC 时又把分
+    取整到 4 位小数，视图里的 `{GPS}/Latitude` 在第 6–7 位小数变了，XMP 里 `69,11.645100N` 变成
+    `69,11.6452N`、`GPSLatitudeRef` 并进坐标里。只差在这个范围内时不逐字段报，报一行
     `GPS 精度降低：最大偏差 4 厘米（ImageIO 写入时取整）`（偏差按真实距离：纬度差 × 111 km，
     经度差 × 111 km × cos 纬度），算差异。上限很严：偏差超过 1 米、方向（N/S/E/W）变了、或一边
     有一边没有，一律照原来逐字段报——这一行只吞几厘米的取整，不吞真的坐标改动。
 - **扩展属性**，与 JPEG 同一套。
 
-现场生成的 DNG 转出来，`--verify` 恰好只有 GPS 那一行（照搬与 `--no-raw-exif` 都是）；不带 GPS 的校验通过。
-照搬没照搬、照搬的值对不对，看 `-v` 那一行与产物的原始 EXIF，视图分不出来（上面说的取整与空串）。
+现场生成的 DNG 转出来（照搬了 EXIF），`--verify` 零差异；加 `--no-raw-exif` 时恰好只有 GPS 那一行，不带 GPS
+的校验通过。
 
 ## 已知限制
 
 - **RAW 的 MakerNote 不搬**：照搬的块里去掉了 MakerNote（`{MakerCanon}` 等），`--verify` 照报那一行。
-- **RAW 照搬后 `--verify` 仍会报 GPS 那一行和空串的丢失**：产物里的 GPS 分数、空串的
-  `CameraOwnerName`/`Satellites` 逐字节是源的，但 ImageIO 读 HEIC 时把坐标取整到分的 4 位小数、
-  不显示空串（ImageIO 读 CR3、DNG 时不取整，读 CR3 时显示空串），视图比对看到的是读法的差别。
-  只有 `GPSVersion` 一条的 GPS IFD 也一样：照搬后在产物里，ImageIO 读 HEIC 时不显示（多一条哪怕是
-  空串的条目就显示）。
-- **RAW 的 EXIF 照搬只在 CR3、RW2 的真样本上量过**（主会话），DNG 有现场生成的夹具；CR2、NEF、
-  NRW、ARW、PEF、SRW、ORF、RAF 只有按格式结构手搭的单测样本。拼错了的块过不了照搬前的自检（视图
-  不许变坏），会退回系统重写。
+- **照搬后 ImageIO 读 HEIC 时看不见其中几样**：产物里的空串 `CameraOwnerName`/`Satellites`、只有
+  `GPSVersion` 一条的 GPS IFD 逐字节在，但 ImageIO 读 HEIC 时不显示（多一条哪怕是空串的条目，GPS 字典
+  就显示）；坐标显示成分的 4 位小数。`--verify` 按原始字节核对它们，不误报。
+- **RAW 的 EXIF 照搬按 CR3、RW2 真样本的结构做了单测样本**（标签号与类型来自主会话的真样本），DNG 有
+  现场生成的夹具；CR2、NEF、NRW、ARW、PEF、SRW、ORF、RAF 只有按格式结构手搭的单测样本。拼错了的块
+  过不了照搬前的自检（逐字节与 RAW 核对、ImageIO 读得懂），会退回系统重写。
 - **（系统重写时）RAW 的 GPS 精度降低几厘米**，空串的标签丢失，只有 `GPSVersion`、没有坐标的 GPS
   字典被写入器整个丢掉（`--verify` 都如实报）。真 CR3、RW2 上实测：版本号修整生效，GPS 那一行的
   偏差是 18 厘米和 7 厘米。

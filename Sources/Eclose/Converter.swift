@@ -644,8 +644,7 @@ private func replacingProduct(_ product: URL, with carried: [UInt8], check: (URL
 ///
 /// 拼块与它的闸门见 CameraRawExif.swift；块里 IFD0 的方向必须与产物现在的方向相同（cameraRawCarryPlan）。
 /// 换的那一步与 JPEG 同一个 carryingExif，落盘前过 cameraRawExifRegression 的自检，闸门或自检不过，
-/// `product` 一个字节都不动，原因写进报告（-v 那一行）。照搬了 MakerNote 也不会回来：拼块时就去掉了，
-/// 校验照旧报 MakerNote 那一行。
+/// `product` 一个字节都不动，原因写进报告（-v 那一行）。MakerNote 拼块时就去掉了，校验照旧报那一行。
 func carryCameraRawExif(source: URL, product: URL) -> RawExifOutcome {
     guard let sourceData = try? Data(contentsOf: source, options: .mappedIfSafe),
           let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil) else { return .kept("读不出源文件") }
@@ -654,12 +653,14 @@ func carryCameraRawExif(source: URL, product: URL) -> RawExifOutcome {
         return .kept("读不出产物")
     }
     let orientation = (productProps[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+    let sourceBytes = [UInt8](sourceData), type = CGImageSourceGetType(sourceImage) as String?
     let tiff: [UInt8]
-    switch cameraRawCarryPlan(source: [UInt8](sourceData), type: CGImageSourceGetType(sourceImage) as String?,
-                              productOrientation: orientation) {
+    switch cameraRawCarryPlan(source: sourceBytes, type: type, productOrientation: orientation) {
     case .success(let t): tiff = t
     case .failure(let skip): return .kept(skip.reason)
     }
+    // 自检拿的源条目另读一遍（拼块之前的材料），不用拼块时那一份。
+    guard case .success(let parts) = cameraRawExifParts(sourceBytes, type: type) else { return .kept("另读一遍 RAW 的 EXIF 读不通") }
     guard let productData = try? Data(contentsOf: product) else { return .kept("读不出产物") }
     let carried: [UInt8]
     switch carryingExif(tiff, into: [UInt8](productData)) {
@@ -667,29 +668,32 @@ func carryCameraRawExif(source: URL, product: URL) -> RawExifOutcome {
     case .failure(let skip): return .kept(skip.reason)
     }
     if let problem = replacingProduct(product, with: carried, check: { candidate in
-        cameraRawExifRegression(source: source, intended: tiff, before: product, after: candidate)
+        cameraRawExifRegression(source: parts, intended: tiff, before: product, after: candidate)
     }) { return .kept(problem) }
     return .carried(bytes: tiff.count, commentRewritten: false)
 }
 
-/// RAW 照搬后的产物 `after` 与照搬前的 `before` 比，有没有退步：有就是原因，没有是 nil。
-/// 与 JPEG 的 rawExifRegression 同一个思路，尺子换成 RAW 校验的那一把（rawMetadataDiff）：
+/// RAW 照搬后的产物 `after` 能不能换上：不能时是原因，能是 nil。不拿源的视图当参照——同一组字节，
+/// ImageIO 按 RAW 读与按 HEIC 读给出的视图不同（见 CameraRawExif.swift「照搬之后的核对」），拿视图比
+/// 必然「退步」。改以字节为证：
 ///
 /// 1. 从 `after` 里重新取出 Exif 项，TIFF 字节与拼好的那块（`intended`）逐字节相同。
-/// 2. ImageIO 打得开，状态完整，图像数、顶层 PixelWidth/PixelHeight/Orientation/Depth 与 `before` 相同
+/// 2. 块里的每个条目与 RAW 里的（`source`，另读的一份材料）逐字节相同，一条不多一条不少
+///    （carriedEntryIssues）。拼块时按构造就是这样，这里独立再核一遍。
+/// 3. ImageIO 打得开，状态完整，图像数、顶层 PixelWidth/PixelHeight/Orientation/Depth 与 `before` 相同
 ///    （RAW 的产物必须是 10 位，照搬不能动它）。
-/// 3. 视图不退步：V源 是源的键空间（不修补 UserComment）按 RAW 的规矩整理过的——版本号按规范写法、
-///    去掉结构字段（isRawStructuralKey）、去掉交给别处核对的键（顶层 Orientation 在第 2 条，XMP 的
-///    版本号键交给属性视图那一侧，见 derivedXMPVersionKeys）；两边产物的视图也规范化版本号。
-///    `after` 里与 V源 不一致的键（inconsistentKeys）必须都已经在 `before` 里不一致。没有放行。
-func cameraRawExifRegression(source: URL, intended: [UInt8], before: URL, after: URL) -> String? {
+/// 4. ImageIO 读得懂这个块：产物视图里 EXIF 派生的键（isExifDerivedKey），与同一个块包进一张最小
+///    JPEG 后读出的相同（exifReadingMismatch）。块放不进 JPEG 的 APP1（64 KB）就核对不了，不换。
+func cameraRawExifRegression(source: RawExifParts, intended: [UInt8], before: URL, after: URL) -> String? {
     guard let afterData = try? Data(contentsOf: after),
           case .tiff(let readBack) = heifExif([UInt8](afterData)),
           Array(readBack.bytes[readBack.base..<(readBack.base + readBack.length)]) == intended else {
         return "照搬后读回的 EXIF 与打算照搬的不一致"
     }
-    guard let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil),
-          let beforeImage = CGImageSourceCreateWithURL(before as CFURL, nil),
+    if let issue = carriedEntryIssues(source: source, product: TIFFStructure(intended, base: 0, length: intended.count)).first {
+        return "拼出来的块与 RAW 里的条目不一致：\(issue)"
+    }
+    guard let beforeImage = CGImageSourceCreateWithURL(before as CFURL, nil),
           let afterImage = CGImageSourceCreateWithURL(after as CFURL, nil),
           CGImageSourceGetStatus(afterImage) == .statusComplete else {
         return "照搬后 ImageIO 打不开产物"
@@ -701,15 +705,15 @@ func cameraRawExifRegression(source: URL, intended: [UInt8], before: URL, after:
                 kCGImagePropertyDepth] {
         guard (a[key] as? NSNumber) == (b[key] as? NSNumber) else { return "照搬后 \(key as String) 变了" }
     }
-    let reference = rawReferenceView(metadataKeySpace(of: sourceImage, url: source, repairing: false))
-    let beforeView = collapsingVersions(metadataKeySpace(of: beforeImage, url: before, repairing: false))
-    let afterView = collapsingVersions(metadataKeySpace(of: afterImage, url: after, repairing: false))
-    let worse = inconsistentKeys(before: reference, after: afterView)
-        .subtracting(inconsistentKeys(before: reference, after: beforeView))
-    guard let key = worse.sorted().first else { return nil }
-    let more = worse.count > 1 ? "（共 \(worse.count) 处）" : ""
-    if reference[key] == nil { return "照搬后会多出源里没有的 \(key)\(more)" }
-    return afterView[key] == nil ? "照搬后 \(key) 会读不出\(more)" : "照搬后 \(key) 会与源不一致\(more)"
+    guard let jpeg = jpegWrapping(exif: intended),
+          let jpegImage = CGImageSourceCreateWithData(Data(jpeg) as CFData, nil) else {
+        return "拼出来的块放不进 JPEG 的 APP1，核对不了 ImageIO 的读法"
+    }
+    func derived(_ image: CGImageSource, _ url: URL) -> [String: String] {
+        metadataKeySpace(of: image, url: url, repairing: false).filter { isExifDerivedKey($0.key) }
+    }
+    return exifReadingMismatch(reference: derived(jpegImage, after), heic: derived(afterImage, after),
+                               before: derived(beforeImage, before))
 }
 
 /// 把 `product`（ImageIO 刚写好的 HEIC）里 Exif 项的内容换成源 JPEG 的 EXIF 原始字节。

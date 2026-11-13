@@ -19,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=673
-EXPECTED_UNIT=1156
+EXPECTED_ASSERTIONS=671
+EXPECTED_UNIT=1199
 EXPECTED_GUI=233
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1691,33 +1691,35 @@ grep -qxF "跳过 同名.dng: 输出已存在: 同名.heic（用 -f 覆盖）" <
 check "同名的产物仍是 JPEG 转的那份（8 位）" "$(./Tests/probe --image "$M/同名.heic" | cut -d' ' -f2)" "8"
 check "甲.dng 转成 10 位" "$(./Tests/probe --image "$M/甲.heic" | cut -d' ' -f2)" "10"
 
-round "7t. raw2heif --verify：结构字段不报，GPS 取整压成一行"
-# 精确断言差异列表本身（不是「包含」）：夹具的源里有几十个只描述原始数据的键（{DNG}、{raw}、
-# CFAPattern、tiff:Compression、tiff:PhotometricInterpretation），白名单之外多放行一个、或少放行一个，
-# 这里都会变。GPS 合成一行，算差异：照搬后产物里的分数逐字节是源的（7r 核对过），但 ImageIO 读 HEIC
-# 时把坐标取整到分的 4 位小数（读 DNG 时不取整），视图里照样差 4 厘米；--no-raw-exif 时写入器取整，
-# 差得一样多。两条路各跑一遍。
+round "7t. raw2heif --verify：照搬时按原始字节核对，没照搬时结构字段不报、GPS 取整压成一行"
+# 精确断言（不是「包含」）。照搬了的产物：EXIF、GPS 按原始字节逐条比，由 EXIF 派生的视图键不再拿源的
+# 视图比（ImageIO 读 DNG 不取整坐标，读 HEIC 取整），夹具零差异。--no-raw-exif 的产物走第 1 段的规则：
+# 夹具的源里有几十个只描述原始数据的键（{DNG}、{raw}、CFAPattern、tiff:Compression、
+# tiff:PhotometricInterpretation），白名单之外多放行一个、或少放行一个，这里都会变；GPS 被写入器取整，
+# 合成一行，算差异。
 V="$WORK/RAW校验"
 mkdir -p "$V"
 ./Tests/fixture --dng "$V/横.dng" >/dev/null
 ./Tests/fixture --dng --orientation 6 "$V/竖.dng" >/dev/null
+./Tests/fixture --dng --gps-version-only "$V/版本.dng" >/dev/null
 ./Tests/fixture --dng --no-gps "$V/无GPS.dng" >/dev/null
 cp "$V/横.dng" "$V/横-重写.dng"
-for name in 横 竖 横-重写; do
-    flags=""
-    [ "$name" = 横-重写 ] && flags=--no-raw-exif
-    # shellcheck disable=SC2086
-    out=$("$RAW_BIN" --verify $flags "$V/$name.dng" 2>&1); st=$?
-    check "$name.dng：退出码 0" "$st" "0"
-    check "$name.dng：差异恰好是 GPS 那一行" "$(grep -E '^ {7}- ' <<< "$out")" \
-        "       - GPS 精度降低：最大偏差 4 厘米（ImageIO 写入时取整）"
-    grep -qxF "    ⚠︎ 元数据校验发现 1 处差异:" <<< "$out" \
-        && pass "$name.dng：算一处差异" || { fail "$name.dng：差异条数不对"; sed 's/^/     /' <<< "$out"; }
+cp "$V/无GPS.dng" "$V/无GPS-重写.dng"
+for name in 横 竖 版本 无GPS; do
+    out=$("$RAW_BIN" -v --verify "$V/$name.dng" 2>&1); st=$?
+    grep -qE "^    EXIF 整块照搬（[0-9]+ 字节）$" <<< "$out" && grep -qxF "    ✓ 元数据校验通过" <<< "$out" && [ "$st" -eq 0 ] \
+        && pass "$name.dng（照搬）：校验通过，零差异" || { fail "$name.dng（照搬）：没照搬或报了差异"; sed 's/^/     /' <<< "$out"; }
 done
-out=$("$RAW_BIN" --verify "$V/无GPS.dng" 2>&1); st=$?
+out=$("$RAW_BIN" --verify --no-raw-exif "$V/横-重写.dng" 2>&1); st=$?
+check "横.dng（--no-raw-exif）：退出码 0" "$st" "0"
+check "横.dng（--no-raw-exif）：差异恰好是 GPS 那一行" "$(grep -E '^ {7}- ' <<< "$out")" \
+    "       - GPS 精度降低：最大偏差 4 厘米（ImageIO 写入时取整）"
+grep -qxF "    ⚠︎ 元数据校验发现 1 处差异:" <<< "$out" \
+    && pass "横.dng（--no-raw-exif）：算一处差异" || { fail "横.dng（--no-raw-exif）：差异条数不对"; sed 's/^/     /' <<< "$out"; }
+out=$("$RAW_BIN" --verify --no-raw-exif "$V/无GPS-重写.dng" 2>&1); st=$?
 grep -qxF "    ✓ 元数据校验通过" <<< "$out" && [ "$st" -eq 0 ] \
-    && pass "不带 GPS 的 RAW：校验通过（结构字段之外没有差异）" || { fail "不带 GPS 的 RAW：校验报了差异"; sed 's/^/     /' <<< "$out"; }
-check "不带 GPS 的 RAW：没有差异行" "$(grep -cE '^ {7}- ' <<< "$out")" "0"
+    && pass "不带 GPS 的 RAW（--no-raw-exif）：校验通过（结构字段之外没有差异）" || { fail "不带 GPS 的 RAW（--no-raw-exif）：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+check "不带 GPS 的 RAW（--no-raw-exif）：没有差异行" "$(grep -cE '^ {7}- ' <<< "$out")" "0"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

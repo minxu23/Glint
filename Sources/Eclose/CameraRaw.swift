@@ -126,13 +126,46 @@ func rawProductDepthProblem(_ url: URL) -> String? {
 ///   只有三处不同于 JPEG：版本号字段按规范写法比（collapsingVersions）；源里描述传感器原始数据与
 ///   RAW 容器的结构字段不比（isRawStructuralKey）；GPS 只差在写入器的取整范围内时合成一行（gpsRounding）；
 /// - 扩展属性，与 JPEG 同一套。
+///
+/// EXIF 照搬过的产物（carriedRawExif 认得出）键空间那一项换一种比法：EXIF 与 GPS 按原始字节比
+/// （carriedEntryIssues），由 EXIF 派生的视图键不再拿源的视图比（rawCarriedKeySpaceDiff）——ImageIO 按
+/// RAW 读与按 HEIC 读给同一组字节不同的视图（ISO 换名、OffsetTime 显示不显示、GPS 取整、空串）。
 func rawMetadataDiff(source: URL, dest: URL, sourceImage: CGImageSource, destImage: CGImageSource) -> [String] {
     let sourceProps = CGImageSourceCopyPropertiesAtIndex(sourceImage, 0, nil) as? [CFString: Any] ?? [:]
     let productProps = CGImageSourceCopyPropertiesAtIndex(destImage, 0, nil) as? [CFString: Any] ?? [:]
-    return rawProductIssues(source: sourceProps, product: productProps)
-        + rawKeySpaceDiff(before: metadataKeySpace(of: sourceImage, url: source, repairing: false),
-                          after: metadataKeySpace(of: destImage, url: dest, repairing: false))
+    let before = metadataKeySpace(of: sourceImage, url: source, repairing: false)
+    let after = metadataKeySpace(of: destImage, url: dest, repairing: false)
+    let keySpace: [String]
+    if let carried = carriedRawExif(source: source, dest: dest, type: CGImageSourceGetType(sourceImage) as String?) {
+        keySpace = rawCarriedKeySpaceDiff(before: before, after: after, packets: carried.packets) + carried.issues
+    } else {
+        keySpace = rawKeySpaceDiff(before: before, after: after)
+    }
+    return rawProductIssues(source: sourceProps, product: productProps) + keySpace
         + extendedAttributeIssues(source: source.path, dest: dest.path)
+}
+
+/// 产物的 EXIF 是不是照搬过的：Exif 项结束在文件末尾（只有 carryingExif 会这样放，ImageIO 写的在
+/// mdat 靠前），而且读得出、源的 EXIF 也取得出（cameraRawExifParts）。是的话给出按原始字节比出的差异
+/// （carriedEntryIssues）与源里的 XMP 包原文（区分 XMP 包自己写的键用）；不是或读不通是 nil，照第 1 段
+/// 的规则比。
+func carriedRawExif(source: URL, dest: URL, type: String?) -> (issues: [String], packets: [String])? {
+    guard let destData = try? Data(contentsOf: dest, options: .mappedIfSafe),
+          let sourceData = try? Data(contentsOf: source, options: .mappedIfSafe) else { return nil }
+    let destBytes = [UInt8](destData), sourceBytes = [UInt8](sourceData)
+    guard heifExifEndsAtFileEnd(destBytes), case .tiff(let product) = heifExif(destBytes),
+          case .success(let parts) = cameraRawExifParts(sourceBytes, type: type) else { return nil }
+    return (carriedEntryIssues(source: parts, product: product), xmpPacketTexts(sourceBytes))
+}
+
+/// 照搬过的产物的键空间比对，纯函数：与 rawKeySpaceDiff 同样规范化版本号、去掉结构字段、不报顶层
+/// Orientation，不同的是由 EXIF 派生的键（carriedCoveredKeys：{Exif}、{GPS}、{TIFF} 与 ImageIO 合成的
+/// XMP exif:/exifEX:/tiff: 键，源的 XMP 包里自己写了的除外）不比——它们由原始字节核对，GPS 取整那一行
+/// 也就不出现。别的照比：MakerNote 那一行、XMP 包里的别的键、IPTC……
+func rawCarriedKeySpaceDiff(before: [String: String], after: [String: String], packets: [String]) -> [String] {
+    let before = collapsingVersions(before).filter { !isRawStructuralKey($0.key) }
+    let covered = carriedCoveredKeys(before, packets: packets).union([kCGImagePropertyOrientation as String])
+    return keySpaceDiff(before: before, after: collapsingVersions(after), covered: covered)
 }
 
 /// RAW 源的键空间比对，纯函数，单测直接喂字典：两边先规范化版本号（collapsingVersions），源侧去掉
@@ -145,16 +178,6 @@ func rawKeySpaceDiff(before: [String: String], after: [String: String]) -> [Stri
     let gps = gpsRounding(before: before, after: after)
     let covered = gps.covered.union([kCGImagePropertyOrientation as String]).union(derivedXMPVersionKeys(before))
     return keySpaceDiff(before: before, after: after, covered: covered) + gps.issues
-}
-
-/// RAW 照搬 EXIF 的自检（cameraRawExifRegression）拿来当 V源 的视图：与 rawKeySpaceDiff 同一套整理——
-/// 版本号规范化、去掉结构字段，再去掉 rawKeySpaceDiff 交给别处核对的键（顶层 Orientation 由
-/// rawProductIssues 核对，XMP 的版本号键交给属性视图那一侧）。GPS 取整那一行不用管：自检比的是
-/// 照搬前后谁更差，取整的键照搬前就不一致。
-func rawReferenceView(_ source: [String: String]) -> [String: String] {
-    let view = collapsingVersions(source).filter { !isRawStructuralKey($0.key) }
-    let elsewhere = derivedXMPVersionKeys(view).union([kCGImagePropertyOrientation as String])
-    return view.filter { !elsewhere.contains($0.key) }
 }
 
 /// XMP 的版本号键与它在属性视图里的来源：ImageIO 合成 XMP 视图时从属性视图派生这三个键。
