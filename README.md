@@ -23,7 +23,8 @@ sudo make install
 ```
 
 也可以分开装：`make install-app` 只装应用，`make install-cli PREFIX=~/.local`
-只装命令行工具。想先试试不安装，直接 `make run` 打开应用。
+只装命令行工具，`make install-dev` 在仓库的上一级目录（如 `~/Developer`）放一份应用。
+想先试试不安装，直接 `make run` 打开应用。
 
 ## 图形界面
 

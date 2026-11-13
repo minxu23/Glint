@@ -1546,7 +1546,7 @@ for n in 1 2; do
 done
 cp "$N/源/j1.jpg" "$N/源/j2.jpg"
 make_sample ./Tests/mangle-tool --replace "$N/源/j2.jpg" \
-    'xmlns:jt="http://example.com/jpeg2heif/test/1.0/"' 'xmlns:jt="http://example.com/jpeg2heif/test/2.0/"'
+    'xmlns:jt="http://example.com/glint/test/1.0/"' 'xmlns:jt="http://example.com/glint/test/2.0/"'
 ps_key() { printf 'XMP/photoshop{http%%3A%%2F%%2Fns.adobe.com%%2Fphotoshop%%2F1.%s%%2F}:City' "$1"; }
 # 1. 确定性的见证：非标准 URI 借用标准前缀的那张单独转。键里带 URI，产物上同一个键同值；
 #    URI 换成另一个的那张，产物上没有这个键。

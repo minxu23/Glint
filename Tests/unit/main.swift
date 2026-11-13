@@ -484,7 +484,7 @@ print("XMP 的键：前缀按命名空间 URI 定，不按 ImageIO 临时给的�
 // ImageIO 给的前缀（要不要加 `_N_`、N 是几）同一个文件读两次可能不同；键由 URI 定才对得上。
 let psURI = "http://ns.adobe.com/photoshop/1.0/"
 let ps11 = "http://ns.adobe.com/photoshop/1.1/", ps12 = "http://ns.adobe.com/photoshop/1.2/"
-let jt1 = "http://example.com/jpeg2heif/test/1.0/", jt2 = "http://example.com/jpeg2heif/test/2.0/"
+let jt1 = "http://example.com/glint/test/1.0/", jt2 = "http://example.com/glint/test/2.0/"
 let dcURI = "http://purl.org/dc/elements/1.1/"
 func xmpKeySpace(_ tags: [(String, String)], _ ns: [(String, String)]) -> [String: String] {
     xmpKeys(tags.map { (path: $0.0, value: $0.1) }, namespaces: ns.map { (prefix: $0.0, uri: $0.1) })
@@ -517,8 +517,8 @@ check(![borrowed11, borrowed12].contains("XMP/photoshop:City"), "借用标准前
 // 同一文件里两个不在表里的 URI 同基名：都带 URI，互不相同
 let twoJT = xmpKeySpace([("jt:Custom", "甲"), ("jt_1_:Custom", "乙")], [("jt", jt1), ("jt_1_", jt2)])
 check("同基名的两个 URI 都带上 URI", twoJT,
-      ["XMP/jt{http%3A%2F%2Fexample.com%2Fjpeg2heif%2Ftest%2F1.0%2F}:Custom": "甲",
-       "XMP/jt{http%3A%2F%2Fexample.com%2Fjpeg2heif%2Ftest%2F2.0%2F}:Custom": "乙"])
+      ["XMP/jt{http%3A%2F%2Fexample.com%2Fglint%2Ftest%2F1.0%2F}:Custom": "甲",
+       "XMP/jt{http%3A%2F%2Fexample.com%2Fglint%2Ftest%2F2.0%2F}:Custom": "乙"])
 // 嵌套路径、数组下标、语言下标
 let mwgURI = "http://www.metadataworkinggroup.com/schemas/regions/", areaURI = "http://ns.adobe.com/xmp/sType/Area#"
 check("嵌套路径的每一段都换（其中两层的前缀被改名）",

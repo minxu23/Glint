@@ -18,7 +18,7 @@ GUI_VIEWS := $(filter-out Sources/GUI/main.swift $(GUI_MODEL),$(wildcard Sources
 GUI_LIB   := $(GUI_VIEWS) $(GUI_MODEL)
 GUI       := Sources/GUI/main.swift $(GUI_LIB)
 
-.PHONY: all cli app icon install install-cli install-app uninstall test run snapshot clean \
+.PHONY: all cli app icon install install-cli install-app install-dev uninstall test run snapshot clean \
         print-artifacts
 
 all: cli app
@@ -31,7 +31,7 @@ $(BIN): $(CORE) $(CLI)
 
 $(APP): $(CORE) $(GUI) Sources/GUI/Info.plist Resources/AppIcon.icns
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
-	$(SWIFTC) $(SWIFTFLAGS) -o $(APP)/Contents/MacOS/JPEG2HEIF $(CORE) $(GUI)
+	$(SWIFTC) $(SWIFTFLAGS) -o $(APP)/Contents/MacOS/Glint $(CORE) $(GUI)
 	@cp Sources/GUI/Info.plist $(APP)/Contents/Info.plist
 	@cp Resources/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	@plutil -insert CFBundleName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
@@ -58,6 +58,13 @@ install-app: $(APP)
 	rm -rf /Applications/$(APP)
 	cp -R $(APP) /Applications/
 	@echo "应用已装到 /Applications/$(APP)"
+
+# 在仓库的上一级目录（~/Developer）放一份应用，和那里的 Spark.app 一样随手能点开。
+# 是独立的一份拷贝，make clean 不会碰它；改了界面代码后重跑一次才会更新。
+install-dev: $(APP)
+	rm -rf ../$(APP)
+	cp -R $(APP) ../
+	@echo "应用已放到 $(abspath ..)/$(APP)"
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(BIN)

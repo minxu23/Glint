@@ -242,7 +242,7 @@ let xmpNamespaces = """
     xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
     xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
     xmlns:stDim="http://ns.adobe.com/xap/1.0/sType/Dimensions#"
-    xmlns:jt="http://example.com/jpeg2heif/test/1.0/"
+    xmlns:jt="http://example.com/glint/test/1.0/"
     xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/"
 """
 let richBody = """
@@ -354,7 +354,7 @@ for (prefix, uri) in [("lr", "http://ns.adobe.com/lightroom/1.0/"), ("xmpMM", "h
                       ("mwg-rs", "http://www.metadataworkinggroup.com/schemas/regions/"),
                       ("stArea", "http://ns.adobe.com/xmp/sType/Area#"),
                       ("stDim", "http://ns.adobe.com/xap/1.0/sType/Dimensions#"),
-                      ("jt", "http://example.com/jpeg2heif/test/1.0/")]
+                      ("jt", "http://example.com/glint/test/1.0/")]
     + (msRating ? [("MicrosoftPhoto", "http://ns.microsoft.com/photo/1.0/")] : []) {
     CGImageMetadataRegisterNamespaceForPrefix(merged, uri as CFString, prefix as CFString, nil)
 }
@@ -376,7 +376,7 @@ var extensionSegment: [UInt8] = []
 if extendedXMP {
     let body = Array("""
     <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
-    <rdf:Description rdf:about="" xmlns:jt="http://example.com/jpeg2heif/test/1.0/" \
+    <rdf:Description rdf:about="" xmlns:jt="http://example.com/glint/test/1.0/" \
     jt:Extended="只在扩展包里的值"/></rdf:RDF></x:xmpmeta>
     """.utf8)
     let guid = Insecure.MD5.hash(data: body).map { String(format: "%02X", $0) }.joined()
