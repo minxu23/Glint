@@ -147,6 +147,16 @@ func rawKeySpaceDiff(before: [String: String], after: [String: String]) -> [Stri
     return keySpaceDiff(before: before, after: after, covered: covered) + gps.issues
 }
 
+/// RAW 照搬 EXIF 的自检（cameraRawExifRegression）拿来当 V源 的视图：与 rawKeySpaceDiff 同一套整理——
+/// 版本号规范化、去掉结构字段，再去掉 rawKeySpaceDiff 交给别处核对的键（顶层 Orientation 由
+/// rawProductIssues 核对，XMP 的版本号键交给属性视图那一侧）。GPS 取整那一行不用管：自检比的是
+/// 照搬前后谁更差，取整的键照搬前就不一致。
+func rawReferenceView(_ source: [String: String]) -> [String: String] {
+    let view = collapsingVersions(source).filter { !isRawStructuralKey($0.key) }
+    let elsewhere = derivedXMPVersionKeys(view).union([kCGImagePropertyOrientation as String])
+    return view.filter { !elsewhere.contains($0.key) }
+}
+
 /// XMP 的版本号键与它在属性视图里的来源：ImageIO 合成 XMP 视图时从属性视图派生这三个键。
 let xmpVersionSources: [(xmp: String, view: String)] = [
     (xmpKey("exif:ExifVersion"), exifKey(kCGImagePropertyExifVersion)),
@@ -208,6 +218,11 @@ func isRawStructuralKey(_ key: String) -> Bool {
          metadataKey(kCGImagePropertyTIFFDictionary, "Height" as CFString): return true
     // 原始数据的压缩方式（属性视图里的 {TIFF}/Compression 已在 volatileKeys 里）。
     case xmpKey("tiff:Compression"): return true
+    // 原始数据的像素怎么解读：DNG 给的是原始数据那一层的 32803（CFA，拜耳阵列），不是显影后的 RGB。
+    // ImageIO 从属性字典重写 EXIF 时把它原样抄进产物，照搬的块不带它（IFD0 白名单不收，见
+    // rawExifIFD0Tags）。实测于 Tests/DNG.swift 的 DNG（第 2 段 a，照搬 EXIF 时）。
+    case metadataKey(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFPhotometricInterpretation),
+         xmpKey("tiff:PhotometricInterpretation"): return true
     default: return false
     }
 }

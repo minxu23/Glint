@@ -27,6 +27,8 @@ let usage = """
           probe --aux-items <文件.heic>              HEIF 里辅助图项的个数（iref 的 auxl 条数）
           probe --raw-exif <文件> <标签十六进制>     原始 EXIF 里 IFD0/Exif 子 IFD 的这个标签，
                                                      每个条目一行：IFD 类型 个数 值的十六进制
+                                                     （文件是 JPEG、HEIF，或 DNG 这种本身是 TIFF 的）
+          probe --raw-gps <文件> <标签十六进制>      同上，读 GPS IFD 里的标签
           probe --exif-same <源.jpg> <产物.heic>     产物 Exif 项里的 TIFF 与源 EXIF 段的是否逐字节相同：
                                                      「相同」、「只差备注改写」（isUserCommentRewrite）或
                                                      「不同（N 字节 → M 字节，第 K 个字节起不同）」
@@ -56,9 +58,10 @@ if args.first == "--aux-items", args.count == 2 {
     exit(0)
 }
 
-// 原始 EXIF 条目：JPEG 读 APP1 的 TIFF，HEIF 读 Exif 项，和 --verify 的原始清点同一套解析。
-// 用来断言 ImageIO 视图读不出的值（如非 33 字节的 ImageUniqueID）逐字节带过去了。
-if args.first == "--raw-exif", args.count == 3 {
+// 原始 EXIF 条目：JPEG 读 APP1 的 TIFF，HEIF 读 Exif 项，DNG 这种本身就是 TIFF 的文件直接读，
+// 和 --verify 的原始清点同一套解析。用来断言 ImageIO 视图读不出的值（如非 33 字节的 ImageUniqueID、
+// 空串的 CameraOwnerName）逐字节带过去了。--raw-gps 读 GPS IFD 里的标签（GPS 的分数原样不原样）。
+if args.first == "--raw-exif" || args.first == "--raw-gps", args.count == 3 {
     guard let tag = Int(args[2], radix: 16) else { die(usage) }
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])) else { print("<无法读取>"); exit(1) }
     let bytes = [UInt8](data)
@@ -68,10 +71,11 @@ if args.first == "--raw-exif", args.count == 3 {
     } else if case .tiff(let heif) = heifExif(bytes) {
         tiff = heif
     } else {
-        tiff = nil
+        tiff = TIFFStructure(bytes, base: 0, length: bytes.count)
     }
     guard let tiff else { print("<无法读取>"); exit(1) }
-    let found = rawExifEntries(tiff).filter { $0.space == .main && $0.tag == tag }
+    let space: ExifSpace = args[0] == "--raw-gps" ? .gps : .main
+    let found = rawExifEntries(tiff).filter { $0.space == space && $0.tag == tag }
     guard !found.isEmpty else { print("<无>"); exit(0) }
     for e in found {
         let hex = e.value.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "值读不出"

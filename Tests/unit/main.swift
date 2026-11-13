@@ -2552,7 +2552,7 @@ check("RAW 永远不删：源还在", FileManager.default.fileExists(atPath: ver
 if case .converted(let r) = keptResult {
     check("RAW 永远不删：说明为什么没删", r.note, "RAW 原片永远保留，没有删除")
     check("RAW 的产物是 10 位", imageDepth(keptDest), 10)
-    check("RAW 的 EXIF 照搬那一步：本段还没有", r.rawExif, .kept("RAW 的 EXIF 还不能整块照搬"))
+    check("RAW 的 EXIF 整块照搬了", { if case .carried = r.rawExif { return true }; return false }(), true)
 } else {
     fail("RAW 没转成（\(keptResult)）"); fail("RAW 的产物是 10 位"); fail("RAW 的 EXIF 照搬那一步")
 }
@@ -2574,15 +2574,501 @@ if case .skipped(let why) = tinyResult {
 }
 try? FileManager.default.removeItem(at: versionRoot)
 
+print("RAW 的 EXIF 拼块：TIFF 系，IFD0 只留白名单，Exif 去掉 MakerNote，Interop、GPS 原样，偏移重算")
+/// 手搭 RAW 的一个条目：值是原始字节，按 TIFF 的字节序写好。
+struct RT: Equatable {
+    let tag: Int, type: Int, count: Int, value: [UInt8]
+    init(_ tag: Int, _ type: Int, _ count: Int, _ value: [UInt8]) { (self.tag, self.type, self.count, self.value) = (tag, type, count, value) }
+}
+/// 按字节序写整数。
+func ordered(_ v: Int, _ width: Int, _ bigEndian: Bool) -> [UInt8] { bigEndian ? be(v, width) : Array(be(v, width).reversed()) }
+/// 一块手搭的 RAW 用的 TIFF 和各个 IFD 的位置（"IFD0"、"Exif"、"Interop"、"GPS"）。
+struct BuiltRaw { var bytes: [UInt8]; var at: [String: Int] }
+/// 手搭 TIFF 系 RAW：头之后先是 100 字节的「图像数据」，IFD 的先后是 GPS、Interop、Exif、IFD0（与拼块的
+/// 顺序相反，值的偏移不重算就对不上）；每个 IFD 的条目照给的顺序写，指针接在各自的表尾。Exif 是 nil、
+/// Interop 不是 nil 时，Interop 指针放在 IFD0 里（CR3 的 CMT2 就是这样：第一个 IFD 本身就是 Exif IFD）。
+func rawTIFF(bigEndian: Bool = false, magic: Int = 42, ifd0: [RT], exif: [RT]? = nil, interop: [RT]? = nil,
+             gps: [RT]? = nil) -> BuiltRaw {
+    func o(_ v: Int, _ w: Int) -> [UInt8] { ordered(v, w, bigEndian) }
+    func size(_ e: [RT]) -> Int { 2 + 12 * e.count + 4 + e.reduce(0) { $0 + ($1.value.count > 4 ? ($1.value.count + 1) & ~1 : 0) } }
+    let junk = [UInt8](repeating: 0xAB, count: 100)
+    let interopPointer = interop == nil ? [] : [RT(0xA005, 4, 1, o(0, 4))]
+    var exifFull = exif.map { $0 + interopPointer }
+    var ifd0Full = ifd0 + (exif == nil ? interopPointer : []) + (exif == nil ? [] : [RT(0x8769, 4, 1, o(0, 4))])
+        + (gps == nil ? [] : [RT(0x8825, 4, 1, o(0, 4))])
+    var at: [String: Int] = [:]
+    var pos = 8 + junk.count
+    if let gps { at["GPS"] = pos; pos += size(gps) }
+    if let interop { at["Interop"] = pos; pos += size(interop) }
+    if let e = exifFull { at["Exif"] = pos; pos += size(e) }
+    at["IFD0"] = pos
+    func pointed(_ e: RT) -> RT {
+        switch e.tag {
+        case 0xA005 where e.value == o(0, 4): return RT(0xA005, 4, 1, o(at["Interop"]!, 4))
+        case 0x8769 where e.value == o(0, 4): return RT(0x8769, 4, 1, o(at["Exif"]!, 4))
+        case 0x8825 where e.value == o(0, 4): return RT(0x8825, 4, 1, o(at["GPS"]!, 4))
+        default: return e
+        }
+    }
+    exifFull = exifFull?.map(pointed)
+    ifd0Full = ifd0Full.map(pointed)
+    func block(_ e: [RT], _ start: Int) -> [UInt8] {
+        var table = o(e.count, 2), values: [UInt8] = []
+        var v = start + 2 + 12 * e.count + 4
+        for t in e {
+            table += o(t.tag, 2) + o(t.type, 2) + o(t.count, 4)
+            if t.value.count <= 4 {
+                table += t.value + [UInt8](repeating: 0, count: 4 - t.value.count)
+            } else {
+                table += o(v, 4)
+                values += t.value + (t.value.count % 2 == 1 ? [0] : [])
+                v += (t.value.count + 1) & ~1
+            }
+        }
+        return table + o(0, 4) + values
+    }
+    var out: [UInt8] = (bigEndian ? [0x4D, 0x4D] : [0x49, 0x49]) + o(magic, 2) + o(at["IFD0"]!, 4) + junk
+    if let gps { out += block(gps, at["GPS"]!) }
+    if let interop { out += block(interop, at["Interop"]!) }
+    if let e = exifFull { out += block(e, at["Exif"]!) }
+    out += block(ifd0Full, at["IFD0"]!)
+    return BuiltRaw(bytes: out, at: at)
+}
+func asciiRT(_ tag: Int, _ s: String) -> RT { let b = Array(s.utf8) + [0]; return RT(tag, 2, b.count, b) }
+/// 一组照真 RAW 的样子手搭的条目（`bigEndian` 定值的字节序）。IFD0 里白名单内外的都有。
+struct RawSample {
+    var keptIFD0: [RT], droppedIFD0: [RT], exif: [RT], makerNote: RT, interop: [RT], gps: [RT]
+    init(bigEndian be: Bool, orientation: Int? = 6) {
+        func o(_ v: Int, _ w: Int) -> [UInt8] { ordered(v, w, be) }
+        func rational(_ tag: Int, _ parts: [(Int, Int)]) -> RT { RT(tag, 5, parts.count, parts.flatMap { o($0.0, 4) + o($0.1, 4) }) }
+        keptIFD0 = [asciiRT(0x010F, "Canon"), asciiRT(0x0110, "Canon EOS R5"), asciiRT(0x0132, "2024:05:06 07:08:09"),
+                    asciiRT(0x013B, "Glint Tester"), asciiRT(0x8298, "(c) Glint"), asciiRT(0x0131, "Firmware 1.8.1"),
+                    rational(0x011A, [(240, 1)]), rational(0x011B, [(240, 1)]), RT(0x0128, 3, 1, o(2, 2)),
+                    RT(0x4746, 3, 1, o(4, 2)), RT(0x9C9C, 1, 6, [0x07, 0x59, 0xE8, 0x6C, 0, 0])]
+        if let orientation { keptIFD0.insert(RT(0x0112, 3, 1, o(orientation, 2)), at: 2) }
+        droppedIFD0 = [RT(0x00FE, 4, 1, o(1, 4)), RT(0x0100, 4, 1, o(6000, 4)), RT(0x0101, 4, 1, o(4000, 4)),
+                       RT(0x0102, 3, 3, o(8, 2) + o(8, 2) + o(8, 2)), RT(0x0103, 3, 1, o(6, 2)), RT(0x0106, 3, 1, o(32803, 2)),
+                       RT(0x0111, 4, 1, o(12345, 4)), RT(0x0117, 4, 1, o(999, 4)), RT(0x014A, 4, 2, o(8, 4) + o(8, 4)),
+                       RT(0x02BC, 7, 12, Array("<x:xmpmeta/>".utf8)), RT(0x0002, 7, 4, Array("0100".utf8)),
+                       RT(0xC612, 1, 4, [1, 4, 0, 0]), RT(0xC4A5, 7, 8, Array("PrintIM\0".utf8))]
+        exif = [rational(0x829A, [(1, 250)]), rational(0x829D, [(28, 10)]), RT(0x9000, 7, 4, Array("0231".utf8)),
+                asciiRT(0x9003, "2024:05:06 07:08:09"), RT(0xA430, 2, 32, [UInt8](repeating: 0, count: 32)),
+                asciiRT(0xA434, "RF24-105mm F4 L IS USM"), RT(0xA001, 3, 1, o(1, 2))]
+        makerNote = RT(0x927C, 7, 40, Array("CANON MAKERNOTE".utf8) + [UInt8](repeating: 0x5A, count: 25))
+        interop = [RT(0x0001, 2, 4, Array("R98\0".utf8)), RT(0x0002, 7, 4, Array("0100".utf8))]
+        gps = [RT(0x0000, 1, 4, [2, 3, 0, 0]), RT(0x0001, 2, 2, Array("N\0".utf8)),
+               rational(0x0002, [(69, 1), (11, 1), (387060, 10000)]), RT(0x0003, 2, 2, Array("E\0".utf8)),
+               rational(0x0004, [(18, 1), (57, 1), (123456789, 1000000)]), rational(0x0006, [(1250001, 100000)]),
+               RT(0x0008, 2, 1, [0]), rational(0x0007, [(10, 1), (42, 1), (75, 10)]), asciiRT(0x001D, "2024:05:06")]
+    }
+    /// 源里 IFD0 的全部条目：白名单内外交错。
+    var ifd0: [RT] { zip(keptIFD0, droppedIFD0).flatMap { [$0, $1] } + keptIFD0.dropFirst(droppedIFD0.count) + droppedIFD0.dropFirst(keptIFD0.count) }
+    /// MakerNote 夹在 Exif IFD 的中间。
+    var exifWithMakerNote: [RT] { Array(exif.prefix(3)) + [makerNote] + Array(exif.dropFirst(3)) }
+    func tiff(magic: Int = 42, bigEndian: Bool) -> BuiltRaw {
+        rawTIFF(bigEndian: bigEndian, magic: magic, ifd0: ifd0, exif: exifWithMakerNote, interop: interop, gps: gps)
+    }
+}
+let sampleLE = RawSample(bigEndian: false), sampleBE = RawSample(bigEndian: true)
+/// 拼出来的块读回的条目：(IFD, 标签, 类型, 个数, 值)，子 IFD 指针的值不比（位置由拼块定）。
+func blockEntries(_ block: [UInt8]) -> [String] {
+    guard let tiff = TIFFStructure(block, base: 0, length: block.count) else { return ["读不出"] }
+    return rawExifEntries(tiff).map { e in
+        let value = [0x8769, 0x8825, 0xA005].contains(e.tag) && e.ifd != "GPS" && e.ifd != "Interop"
+            ? "指针" : e.value.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "值读不出"
+        return "\(e.ifd) \(String(format: "%04X", e.tag)) \(e.type) \(e.count) \(value)"
+    }
+}
+/// 期望的块内容：IFD0 白名单内的加两个指针，Exif 去掉 MakerNote 加 Interop 指针，各自按标签号升序。
+func expectedEntries(_ s: RawSample) -> [String] {
+    func line(_ ifd: String, _ e: RT) -> String {
+        "\(ifd) \(String(format: "%04X", e.tag)) \(e.type) \(e.count) \(e.value.map { String(format: "%02x", $0) }.joined())"
+    }
+    func lines(_ ifd: String, _ entries: [RT], pointers: [Int]) -> [String] {
+        (entries + pointers.map { RT($0, 4, 1, []) }).sorted { $0.tag < $1.tag }.map { e in
+            pointers.contains(e.tag) ? "\(ifd) \(String(format: "%04X", e.tag)) 4 1 指针" : line(ifd, e)
+        }
+    }
+    // rawExifEntries 的顺序：IFD0，Exif IFD，它的 Interop IFD，GPS IFD。
+    return lines("IFD0", s.keptIFD0, pointers: [0x8769, 0x8825]) + lines("ExifIFD", s.exif, pointers: [0xA005])
+        + lines("Interop", s.interop, pointers: []) + lines("GPS", s.gps, pointers: [])
+}
+let dngType = "com.adobe.raw-image"
+func rawBlock(_ bytes: [UInt8], _ type: String = dngType) -> [UInt8]? { try? cameraRawExifTIFF(bytes, type: type).get() }
+func rawSkip(_ bytes: [UInt8], _ type: String = dngType) -> String? {
+    if case .failure(let s) = cameraRawExifTIFF(bytes, type: type) { return s.reason }
+    return nil
+}
+for (name, sample, bigEndian) in [("小端", sampleLE, false), ("大端", sampleBE, true)] {
+    let source = sample.tiff(bigEndian: bigEndian)
+    guard let block = rawBlock(source.bytes) else {
+        fail("\(name)：没拼出来（\(rawSkip(source.bytes) ?? "?")）"); for _ in 0..<7 { fail("（同上）") }; continue
+    }
+    check("\(name)：块里的条目恰好是 IFD0 白名单内的、Exif 除 MakerNote 外的、Interop 与 GPS 的全部，值逐字节原样",
+          blockEntries(block), expectedEntries(sample))
+    check("\(name)：字节序与源相同", Array(block.prefix(4)), bigEndian ? [0x4D, 0x4D, 0, 42] : [0x49, 0x49, 42, 0])
+    let entries = TIFFStructure(block, base: 0, length: block.count).map(rawExifEntries) ?? []
+    check("\(name)：MakerNote 不在块里", entries.contains { $0.tag == 0x927C }, false)
+    check("\(name)：描述图像数据与 RAW 容器的标签都不在块里（StripOffsets、Photometric、SubIFDs、DNG、XMP、私有标签……）",
+          entries.filter { $0.ifd == "IFD0" && sample.droppedIFD0.map(\.tag).contains($0.tag) }.map(\.tag), [])
+    check("\(name)：每个条目的值都在块内（没有指向原文件的偏移）", entries.filter { $0.value == nil }.map(\.tag), [])
+    if let t = TIFFStructure(block, base: 0, length: block.count), let ifd0 = t.ifd0, let exifAt = t.exifIFD {
+        let tags = [ifd0, exifAt].map { t.entries($0).map(\.tag) }
+        check("\(name)：每个 IFD 的条目按标签号升序", tags.map { $0 == $0.sorted() }, [true, true])
+        check("\(name)：IFD0 与 Exif IFD 后面的「下一个 IFD」是 0",
+              [t.u32(ifd0 + 2 + 12 * tags[0].count), t.u32(exifAt + 2 + 12 * tags[1].count)], [0, 0])
+    } else { fail("\(name)：块读不出 IFD0 或 Exif IFD"); fail("（同上）") }
+    check("\(name)：块比源小（只有元数据，没有图像数据）", block.count < source.bytes.count, true)
+}
+let leBlock = rawBlock(sampleLE.tiff(bigEndian: false).bytes) ?? []
+
+print("RAW 的 EXIF 拼块：每种格式按它的结构手搭一个样本，拼出来的块都与 TIFF 系的相同")
+/// 手搭 CR3：ftyp（crx）、moov（一个占位的 mvhd 与佳能的 uuid：CNCV、CMT1…CMT4、THMB）、mdat。
+/// `cmts` 是 uuid 里的盒子（名字与内容），默认是样本的 CMT1/CMT2/CMT3/CMT4。
+func cr3Sample(_ s: RawSample = sampleLE, bigEndian: Bool = false, brand: String = "crx ",
+               cmts: [(String, [UInt8])]? = nil, uuids: Int = 1, moovs: Int = 1) -> [UInt8] {
+    let cmt1 = rawTIFF(bigEndian: bigEndian, ifd0: s.ifd0 + [RT(0x8769, 4, 1, ordered(9999, 4, bigEndian))]).bytes
+    let cmt2 = rawTIFF(bigEndian: bigEndian, ifd0: s.exifWithMakerNote, interop: s.interop).bytes
+    let cmt4 = rawTIFF(bigEndian: bigEndian, ifd0: s.gps).bytes
+    let inner = cmts ?? [("CMT1", cmt1), ("CMT2", cmt2), ("CMT3", Array("CANON MAKERNOTE".utf8)), ("CMT4", cmt4)]
+    let canon = box("uuid", canonCR3MetadataUUID + box("CNCV", Array("CanonCR3_001/00.10.00/00.00.00".utf8))
+                    + inner.flatMap { box($0.0, $0.1) } + box("THMB", [UInt8](repeating: 1, count: 32)))
+    let moov = box("moov", box("mvhd", [UInt8](repeating: 0, count: 100)) + [[UInt8]](repeating: canon, count: uuids).flatMap { $0 })
+    return box("ftyp", Array(brand.utf8) + be(1, 4) + Array("crx isom".utf8)) + [[UInt8]](repeating: moov, count: moovs).flatMap { $0 }
+        + box("mdat", [UInt8](repeating: 0xCD, count: 256))
+}
+/// 手搭 RAF：16 字节的魔数加版本，第 84、88 字节起是内嵌 JPEG 的偏移与长度（大端），JPEG 后面是原始数据。
+func rafSample(jpeg: [UInt8], offset: Int? = nil) -> [UInt8] {
+    var head = rafMagic + Array("0201FF129502".utf8)
+    head += [UInt8](repeating: 0, count: 84 - head.count)
+    let at = 100
+    head += be(offset ?? at, 4) + be(jpeg.count, 4)
+    head += [UInt8](repeating: 0, count: at - head.count)
+    return head + jpeg + [UInt8](repeating: 0xEE, count: 300)
+}
+let leTIFF = sampleLE.tiff(bigEndian: false).bytes
+func sampleFor(_ layout: CameraRawExifLayout) -> [UInt8] {
+    switch layout {
+    case .tiff(let magic): return sampleLE.tiff(magic: magic.contains(42) ? 42 : magic.sorted()[0], bigEndian: false).bytes
+    case .cr3: return cr3Sample()
+    case .raf: return rafSample(jpeg: jpegWithExif(leTIFF))
+    }
+}
+for (type, layout) in cameraRawExifLayouts.sorted(by: { $0.key < $1.key }) {
+    check("\(type)：拼出来的块与 TIFF 系的相同", rawBlock(sampleFor(layout), type) ?? [], leBlock)
+}
+let rawTypes = Set((CGImageSourceCopyTypeIdentifiers() as? [String]) ?? [])
+check("表里每个类型都是本机 ImageIO 能读的 RAW",
+      cameraRawExifLayouts.keys.filter { !rawTypes.contains($0) || !(UTType($0)?.conforms(to: .rawImage) ?? false) }.sorted(), [])
+check("大端的 TIFF 系也拼得出（DNG 可以是大端）", rawBlock(sampleBE.tiff(bigEndian: true).bytes).map(blockEntries), expectedEntries(sampleBE))
+check("ORF 的三种头：IIRO、IIRS、MMOR",
+      [(0x4F52, false), (0x5352, false), (0x4F52, true)].map { magic, bigEndian in
+          rawBlock((bigEndian ? sampleBE : sampleLE).tiff(magic: magic, bigEndian: bigEndian).bytes, "com.olympus.or-raw-image") != nil
+      }, [true, true, true])
+check("CR3 的 CMT 是大端时，块也是大端", rawBlock(cr3Sample(sampleBE, bigEndian: true), "com.canon.cr3-raw-image").map(blockEntries),
+      expectedEntries(sampleBE))
+check("CR3 没有 CMT3（MakerNote）也照搬：CMT3 本来就不搬",
+      rawBlock(cr3Sample(cmts: [("CMT1", rawTIFF(ifd0: sampleLE.ifd0).bytes),
+                                ("CMT2", rawTIFF(ifd0: sampleLE.exifWithMakerNote, interop: sampleLE.interop).bytes),
+                                ("CMT4", rawTIFF(ifd0: sampleLE.gps).bytes)]), "com.canon.cr3-raw-image") ?? [], leBlock)
+// 文件头与类型对不上：不照搬。
+check("DNG 的类型配 RW2 的头", rawSkip(sampleLE.tiff(magic: 0x55, bigEndian: false).bytes), "文件头不是 com.adobe.raw-image 应有的 TIFF 头")
+check("RW2 的类型配普通 TIFF 头", rawSkip(leTIFF, "com.panasonic.rw2-raw-image"), "文件头不是 com.panasonic.rw2-raw-image 应有的 TIFF 头")
+check("CR3 的类型配 TIFF", rawSkip(leTIFF, "com.canon.cr3-raw-image"), "CR3 的顶层盒子读不通")
+check("RAF 的类型配 TIFF", rawSkip(leTIFF, "com.fuji.raw-image"), "不是 RAF 的文件头")
+check("表里没有的类型（CRW）不照搬", rawSkip(leTIFF, "com.canon.crw-raw-image"), "这种 RAW（com.canon.crw-raw-image）的 EXIF 还不能整块照搬")
+check("类型不明不照搬", { () -> String? in if case .failure(let s) = cameraRawExifTIFF(leTIFF, type: nil) { return s.reason }; return nil }(),
+      "这种 RAW（类型不明）的 EXIF 还不能整块照搬")
+
+print("RAW 的 EXIF 拼块：闸门，源的长度、偏移、个数都不信")
+let leBuilt = sampleLE.tiff(bigEndian: false)
+/// 把 `bytes` 里 `at` 起的 `width` 字节换成小端的 `value`。
+func patched(_ bytes: [UInt8], at: Int, _ value: Int, width: Int) -> [UInt8] {
+    var b = bytes
+    b.replaceSubrange(at..<(at + width), with: ordered(value, width, false))
+    return b
+}
+/// 小端 TIFF 里 IFD `ifd` 中标签 `tag` 的条目头位置。
+func entryAt(_ bytes: [UInt8], ifd: Int, tag: Int) -> Int? {
+    let n = Int(bytes[ifd]) | Int(bytes[ifd + 1]) << 8
+    return (0..<n).map { ifd + 2 + 12 * $0 }.first { Int(bytes[$0]) | Int(bytes[$0 + 1]) << 8 == tag }
+}
+let ifd0At = leBuilt.at["IFD0"]!, exifAt = leBuilt.at["Exif"]!, gpsAt = leBuilt.at["GPS"]!
+check("IFD0 的条目数巨大", rawSkip(patched(leBuilt.bytes, at: ifd0At, 0xFFFF, width: 2)), "IFD0 的条目数 65535 不像真的")
+check("IFD0 的条目数刚过上限", rawSkip(patched(leBuilt.bytes, at: ifd0At, maxCarriedIFDEntries + 1, width: 2)),
+      "IFD0 的条目数 \(maxCarriedIFDEntries + 1) 不像真的")
+check("IFD0 的条目数比实际多（表越出文件）", rawSkip(patched(leBuilt.bytes, at: ifd0At, 200, width: 2)), "IFD0 的条目表越界")
+check("IFD0 的位置越出文件", rawSkip(patched(leBuilt.bytes, at: 4, leBuilt.bytes.count - 1, width: 4)), "IFD0 的位置越界")
+check("IFD0 指进文件头", rawSkip(patched(leBuilt.bytes, at: 4, 2, width: 4)), "IFD0 的位置越界")
+if let make = entryAt(leBuilt.bytes, ifd: ifd0At, tag: 0x010F), let gpsLat = entryAt(leBuilt.bytes, ifd: gpsAt, tag: 0x0002),
+   let exifPtr = entryAt(leBuilt.bytes, ifd: ifd0At, tag: 0x8769), let gpsPtr = entryAt(leBuilt.bytes, ifd: ifd0At, tag: 0x8825),
+   let maker = entryAt(leBuilt.bytes, ifd: exifAt, tag: 0x927C), let exposure = entryAt(leBuilt.bytes, ifd: exifAt, tag: 0x829A),
+   let interopPtr = entryAt(leBuilt.bytes, ifd: exifAt, tag: 0xA005), let strip = entryAt(leBuilt.bytes, ifd: ifd0At, tag: 0x0111),
+   let orientation = entryAt(leBuilt.bytes, ifd: ifd0At, tag: 0x0112) {
+    let b = leBuilt.bytes
+    check("值的偏移越出文件", rawSkip(patched(b, at: make + 8, 0x7FFF_FFF0, width: 4)), "IFD0 里 0x010F 的值越界")
+    check("值的偏移差一个字节越出文件", rawSkip(patched(b, at: gpsLat + 8, b.count - 23, width: 4)), "GPS IFD 里 0x0002 的值越界")
+    check("值的个数巨大（个数 × 单位越出文件）", rawSkip(patched(b, at: make + 4, 0x7FFF_FFFF, width: 4)), "IFD0 里 0x010F 的值越界")
+    check("不搬的条目值越界也不照搬（整张表都不可信）", rawSkip(patched(b, at: maker + 8, 0x7FFF_FFF0, width: 4)), "Exif IFD 里 0x927C 的值越界")
+    check("Exif 指针越出文件", rawSkip(patched(b, at: exifPtr + 8, b.count + 100, width: 4)), "Exif IFD 的位置越界")
+    check("Exif 指针指回 IFD0（自指循环）", rawSkip(patched(b, at: exifPtr + 8, ifd0At, width: 4)), "Exif IFD 指回了 IFD0")
+    check("GPS 指针与 Exif 指针相同", rawSkip(patched(b, at: gpsPtr + 8, exifAt, width: 4)), "GPS IFD 与 Exif IFD 是同一个")
+    check("GPS 指针指回 IFD0", rawSkip(patched(b, at: gpsPtr + 8, ifd0At, width: 4)), "GPS IFD 指回了别的 IFD")
+    check("Interop 指针指回 Exif IFD 自己", rawSkip(patched(b, at: interopPtr + 8, exifAt, width: 4)), "Interop IFD 指回了别的 IFD")
+    check("Interop 指针指向 GPS IFD", rawSkip(patched(b, at: interopPtr + 8, gpsAt, width: 4)), "Interop IFD 指回了别的 IFD")
+    check("Exif 指针不是 LONG", rawSkip(patched(b, at: exifPtr + 2, 3, width: 2)), "IFD0 里的子 IFD 指针 0x8769 不是一个 LONG")
+    check("类型不认识", rawSkip(patched(b, at: exposure + 2, 14, width: 2)), "Exif IFD 里 0x829A 的类型 14 不认识")
+    check("类型是 0", rawSkip(patched(b, at: strip + 2, 0, width: 2)), "IFD0 里 0x0111 的类型 0 不认识")
+    check("同一个标签出现两次", rawSkip(patched(b, at: gpsLat, 0x0001, width: 2)), "GPS IFD 里 0x0001 不止一个")
+    check("Exif IFD 里有类型是 IFD 的条目", rawSkip(patched(b, at: exposure + 2, 13, width: 2)),
+          "Exif IFD 里有不该在那里的子 IFD 指针 0x829A")
+    check("方向是 LONG", rawSkip(patched(patched(b, at: orientation + 2, 4, width: 2), at: orientation + 8, 6, width: 4)),
+          "IFD0 里的 Orientation 不是 1–8 之间的一个 SHORT")
+    check("方向是 9", rawSkip(patched(b, at: orientation + 8, 9, width: 2)), "IFD0 里的 Orientation 不是 1–8 之间的一个 SHORT")
+} else {
+    for _ in 0..<17 { fail("手搭的 TIFF 里找不到要改的条目") }
+}
+check("GPS IFD 里有 Exif 指针", rawSkip(rawTIFF(ifd0: sampleLE.ifd0, gps: sampleLE.gps + [RT(0x8769, 4, 1, le32(8))]).bytes),
+      "GPS IFD 里有不该在那里的子 IFD 指针 0x8769")
+check("Interop IFD 里有 GPS 指针",
+      rawSkip(rawTIFF(ifd0: sampleLE.ifd0, exif: sampleLE.exif, interop: sampleLE.interop + [RT(0x8825, 4, 1, le32(8))]).bytes),
+      "Interop IFD 里有不该在那里的子 IFD 指针 0x8825")
+check("Exif IFD 里有 SubIFDs", rawSkip(rawTIFF(ifd0: sampleLE.ifd0, exif: sampleLE.exif + [RT(0x014A, 4, 1, le32(8))]).bytes),
+      "Exif IFD 里有不该在那里的子 IFD 指针 0x014A")
+check("只有图像数据的标签：没有可照搬的", rawSkip(rawTIFF(ifd0: sampleLE.droppedIFD0).bytes), "RAW 里没有可照搬的 EXIF")
+check("没有 Exif、GPS 指针也照搬 IFD0", rawBlock(rawTIFF(ifd0: sampleLE.ifd0).bytes).map(blockEntries),
+      sampleLE.keptIFD0.sorted { $0.tag < $1.tag }.map { "IFD0 \(String(format: "%04X", $0.tag)) \($0.type) \($0.count) \($0.value.map { String(format: "%02x", $0) }.joined())" })
+check("Exif IFD 只有 MakerNote：不留空的 Exif IFD 与指针",
+      rawBlock(rawTIFF(ifd0: sampleLE.keptIFD0, exif: [sampleLE.makerNote]).bytes).map { blockEntries($0).filter { $0.hasPrefix("ExifIFD") || $0.contains(" 8769 ") } },
+      [])
+// 截断在每一个位置：要么不照搬，要么（截掉的只是表后不用的字节）拼出来的与完整的相同。
+check("截断在每一个位置：不崩，拼得出的都与完整的相同",
+      (0..<leTIFF.count).filter { rawBlock(Array(leTIFF.prefix($0))).map { $0 != leBlock } ?? false }, [])
+var rawSeed: UInt64 = 2611
+func rawRandom(_ n: Int) -> Int {
+    rawSeed = rawSeed &* 6364136223846793005 &+ 1442695040888963407
+    return Int(rawSeed >> 33) % n
+}
+/// 拼得出的块必须是合法的 TIFF，每个条目的值都在块内。
+func wellFormed(_ block: [UInt8]) -> Bool {
+    guard let t = TIFFStructure(block, base: 0, length: block.count) else { return false }
+    return rawExifEntries(t).allSatisfy { $0.value != nil }
+}
+var rawBad = 0
+for _ in 0..<3000 {
+    var bad = leTIFF
+    for _ in 0...rawRandom(4) { bad[rawRandom(bad.count)] = UInt8(rawRandom(256)) }
+    if let block = rawBlock(bad), !wellFormed(block) { rawBad += 1 }
+}
+check("TIFF 系随机改坏 3000 次：不崩，拼得出的都是合法的块", rawBad, 0)
+
+// CR3 的闸门。
+let cr3Type = "com.canon.cr3-raw-image"
+let cr3 = cr3Sample()
+check("前提：手搭的 CR3 拼得出", rawBlock(cr3, cr3Type) != nil, true)
+let cr3Block = rawBlock(cr3, cr3Type) ?? []
+// 截在 moov 末尾（mdat 整个截掉）时 ftyp、moov 还是完整的，拼得出，也与完整的相同。
+check("CR3 截断在每一个位置：不崩，拼得出的都与完整的相同",
+      (0..<cr3.count).filter { rawBlock(Array(cr3.prefix($0)), cr3Type).map { $0 != cr3Block } ?? false }, [])
+check("CR3 截断在 moov 里面的每一个位置都不照搬", { () -> [Int] in
+    let moovEnd = cr3.count - (8 + 256)
+    return (0..<moovEnd).filter { rawBlock(Array(cr3.prefix($0)), cr3Type) != nil }
+}(), [])
+var longMoov = cr3
+if let moovAt = (0..<(cr3.count - 8)).first(where: { Array(cr3[($0 + 4)..<($0 + 8)]) == Array("moov".utf8) }) {
+    longMoov.replaceSubrange(moovAt..<(moovAt + 4), with: be(cr3.count, 4))
+}
+check("CR3 的盒子长度越出文件", rawSkip(longMoov, cr3Type), "CR3 的顶层盒子读不通")
+let goodCMTs: [(String, [UInt8])] = [("CMT1", rawTIFF(ifd0: sampleLE.ifd0).bytes),
+                                     ("CMT2", rawTIFF(ifd0: sampleLE.exifWithMakerNote, interop: sampleLE.interop).bytes),
+                                     ("CMT3", Array("MN".utf8)), ("CMT4", rawTIFF(ifd0: sampleLE.gps).bytes)]
+for missing in ["CMT1", "CMT2", "CMT4"] {
+    check("CR3 缺 \(missing)", rawSkip(cr3Sample(cmts: goodCMTs.filter { $0.0 != missing }), cr3Type), "CR3 里没有 \(missing)")
+}
+for twice in ["CMT1", "CMT2", "CMT4"] {
+    check("CR3 的 \(twice) 有两个", rawSkip(cr3Sample(cmts: goodCMTs + goodCMTs.filter { $0.0 == twice }), cr3Type), "CR3 里的 \(twice) 不止一个")
+}
+check("CR3 的 CMT2 不是 TIFF", rawSkip(cr3Sample(cmts: goodCMTs.map { $0.0 == "CMT2" ? ("CMT2", Array("not a tiff at all".utf8)) : $0 }), cr3Type),
+      "CR3 的 CMT2 不是合法的 TIFF")
+check("CR3 的 CMT4 字节序与别的不同",
+      rawSkip(cr3Sample(cmts: goodCMTs.map { $0.0 == "CMT4" ? ("CMT4", rawTIFF(bigEndian: true, ifd0: sampleBE.gps).bytes) : $0 }), cr3Type),
+      "CR3 的 CMT1、CMT2、CMT4 字节序不一致")
+check("CR3 的佳能元数据盒子有两个", rawSkip(cr3Sample(uuids: 2), cr3Type), "CR3 的佳能元数据盒子不是恰好一个")
+check("CR3 没有 moov", rawSkip(cr3Sample(moovs: 0), cr3Type), "CR3 的 moov 盒子不是恰好一个")
+check("CR3 的 ftyp 主品牌不是 crx", rawSkip(cr3Sample(brand: "heic"), cr3Type), "不是 CR3 的文件头（ftyp 的主品牌不是 crx）")
+let cmt2Loop = rawTIFF(ifd0: sampleLE.exif, interop: sampleLE.interop)
+var loopBytes = cmt2Loop.bytes
+if let p = entryAt(loopBytes, ifd: cmt2Loop.at["IFD0"]!, tag: 0xA005) {
+    loopBytes = patched(loopBytes, at: p + 8, cmt2Loop.at["IFD0"]!, width: 4)
+}
+check("CR3 的 CMT2 里 Interop 指回自己", rawSkip(cr3Sample(cmts: goodCMTs.map { $0.0 == "CMT2" ? ("CMT2", loopBytes) : $0 }), cr3Type),
+      "Interop IFD 指回了别的 IFD")
+var cr3Bad = 0
+for _ in 0..<3000 {
+    var bad = cr3
+    for _ in 0...rawRandom(4) { bad[rawRandom(bad.count)] = UInt8(rawRandom(256)) }
+    if let block = rawBlock(bad, cr3Type), !wellFormed(block) { cr3Bad += 1 }
+}
+check("CR3 随机改坏 3000 次：不崩，拼得出的都是合法的块", cr3Bad, 0)
+// RAF 的闸门。
+let rafType = "com.fuji.raw-image"
+check("RAF 里内嵌 JPEG 的偏移越出文件", rawSkip(rafSample(jpeg: jpegWithExif(leTIFF), offset: 1 << 30), rafType), "RAF 里内嵌 JPEG 的位置越界")
+check("RAF 内嵌的 JPEG 没有 EXIF", rawSkip(rafSample(jpeg: [0xFF, 0xD8, 0xFF, 0xD9]), rafType), "RAF 内嵌的 JPEG：源里没有 EXIF 段")
+check("RAF 截断在每一个位置都不照搬", { () -> [Int] in
+    let raf = rafSample(jpeg: jpegWithExif(leTIFF))
+    // 截掉的只是 JPEG 后面的原始数据时照样拼得出；从 JPEG 末尾往前截都不照搬。
+    let jpegEnd = 100 + jpegWithExif(leTIFF).count
+    return (0..<jpegEnd).filter { rawBlock(Array(raf.prefix($0)), rafType) != nil }
+}(), [])
+
+print("RAW 的 EXIF 拼块：块里的方向必须与产物的相同")
+func planSkip(_ bytes: [UInt8], _ orientation: Int) -> String? {
+    if case .failure(let s) = cameraRawCarryPlan(source: bytes, type: dngType, productOrientation: orientation) { return s.reason }
+    return nil
+}
+check("方向相同（6）：照搬", planSkip(leTIFF, 6), nil)
+check("块里是 6、产物是 1：不照搬", planSkip(leTIFF, 1), "RAW 里 EXIF 的方向（6）与产物的方向（1）不同")
+let noOrientationTIFF = RawSample(bigEndian: false, orientation: nil).tiff(bigEndian: false).bytes
+check("块里没有方向、产物是 1：照搬", planSkip(noOrientationTIFF, 1), nil)
+check("块里没有方向、产物是 6：不照搬", planSkip(noOrientationTIFF, 6), "RAW 里 EXIF 的方向（1）与产物的方向（6）不同")
+check("拼块的闸门不过时报的是闸门的原因", planSkip(patched(leTIFF, at: 4, 2, width: 4), 6), "IFD0 的位置越界")
+
+print("RAW 的 EXIF 照搬：拼好的块放进 HEIC，GPS 的分数原样、空串标签还在")
+let carryRoot = FileManager.default.temporaryDirectory.appendingPathComponent("glint-rawcarry-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: carryRoot, withIntermediateDirectories: true)
+let carryDNG = carryRoot.appendingPathComponent("源.dng")
+try? makeDNG(DNGSpec()).write(to: carryDNG)
+var systemOpts = rawOpts
+systemOpts.rawExif = false
+let systemHEIC = carryRoot.appendingPathComponent("系统重写.heic")
+_ = convert(carryDNG, opts: systemOpts, dest: systemHEIC)
+/// 一份 HEIC 里 Exif 项的条目：(IFD, 标签) → 值的十六进制。
+func heicEntries(_ bytes: [UInt8]) -> [String: String] {
+    guard case .tiff(let t) = heifExif(bytes) else { return [:] }
+    var out: [String: String] = [:]
+    for e in rawExifEntries(t) { out["\(e.ifd) \(String(format: "%04X", e.tag))"] = e.value.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "值读不出" }
+    return out
+}
+func hex(_ b: [UInt8]) -> String { b.map { String(format: "%02x", $0) }.joined() }
+let dngBytes = (try? [UInt8](Data(contentsOf: carryDNG))) ?? []
+let dngEntries = TIFFStructure(dngBytes, base: 0, length: dngBytes.count).map(rawExifEntries) ?? []
+let dngLatitude = dngEntries.first { $0.space == .gps && $0.tag == 0x0002 }?.value.map(hex)
+if let heic = try? [UInt8](Data(contentsOf: systemHEIC)), !cr3Block.isEmpty {
+    check("前提：系统重写的产物里 GPS 的秒被重新编过、没有空串的 CameraOwnerName",
+          [dngLatitude != nil && heicEntries(heic)["GPS 0002"] == dngLatitude, heicEntries(heic)["ExifIFD A430"] == nil], [false, true])
+    if case .success(let carried) = carryingExif(cr3Block, into: heic) {
+        let entries = heicEntries(carried)
+        if case .tiff(let t) = heifExif(carried) {
+            check("读回的 EXIF 与 CR3 拼出来的块逐字节相同", Array(t.bytes[t.base..<(t.base + t.length)]), cr3Block)
+        } else { fail("照搬后读不出 Exif 项") }
+        check("GPS 的纬度、经度、海拔、时间戳：分数逐字节原样",
+              ["0002", "0004", "0006", "0007"].map { entries["GPS \($0)"] },
+              [2, 4, 5, 7].map { hex(sampleLE.gps[$0].value) })
+        check("空串的 CameraOwnerName（32 个 NUL）与 Satellites（1 个 NUL）还在",
+              [entries["ExifIFD A430"], entries["GPS 0008"]], [hex([UInt8](repeating: 0, count: 32)), "00"])
+        check("MakerNote 不在", entries["ExifIFD 927C"], nil)
+        let url = carryRoot.appendingPathComponent("照搬.heic")
+        try? Data(carried).write(to: url)
+        let view = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { metadataKeySpace(of: $0, url: url, repairing: false) } ?? [:]
+        check("ImageIO 读得出照搬后的相机与镜头", [view["{TIFF}/Model"], view["{Exif}/LensModel"]], ["Canon EOS R5", "RF24-105mm F4 L IS USM"])
+    } else { fail("CR3 拼出来的块放不进 HEIC"); for _ in 0..<4 { fail("（同上）") } }
+    // 佳能 CR3 关着定位时 GPS 字典里只有 GPSVersion：ImageIO 重写时整个丢掉；照搬后 GPS IFD 原样在产物里。
+    // ImageIO 读 HEIC 时显示不显示它，实测取决于 GPS IFD 里还有没有别的条目（哪怕是个空串）：只有
+    // GPSVersion 一条时不显示，多一条空串的 Satellites 就显示。两种都钉住，ImageIO 变了要重看校验的预期。
+    // （手写的 DNG 复现不了：ImageIO 读 DNG 时连源里的这种 GPS 字典都不显示。）
+    for (what, gps, shown) in [("只有 GPSVersion", [sampleLE.gps[0]], false),
+                               ("GPSVersion 加空串的 Satellites", [sampleLE.gps[0], sampleLE.gps[6]], true)] {
+        var versionOnly = sampleLE
+        versionOnly.gps = gps
+        let versionBlock = rawBlock(cr3Sample(versionOnly), cr3Type) ?? []
+        if case .success(let carried) = carryingExif(versionBlock, into: heic) {
+            let url = carryRoot.appendingPathComponent("\(what).heic")
+            try? Data(carried).write(to: url)
+            let view = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { metadataKeySpace(of: $0, url: url, repairing: false) } ?? [:]
+            check("\(what)：照搬后 GPS IFD 原样在产物里", heicEntries(carried)["GPS 0000"], "02030000")
+            check("\(what)：ImageIO 读 HEIC 时\(shown ? "" : "不")显示 GPSVersion",
+                  collapsingVersions(view)["{GPS}/GPSVersion"], shown ? "2.3.0.0" : nil)
+        } else { fail("\(what) 的块放不进 HEIC"); fail("（同上）") }
+    }
+} else {
+    fail("系统重写的 HEIC 或 CR3 的块没造出来"); for _ in 0..<9 { fail("（同上）") }
+}
+
+print("RAW 的转换：EXIF 整块照搬，--no-raw-exif 不照搬，闸门不过时照常转完")
+let dngBlock = rawBlock(dngBytes)
+check("前提：DNG 夹具拼得出块", dngBlock != nil, true)
+let carriedHEIC = carryRoot.appendingPathComponent("转换照搬.heic")
+if case .converted(let r) = convert(carryDNG, opts: rawOpts, dest: carriedHEIC), let dngBlock {
+    check("DNG：照搬了，字节数是拼出来的块的", r.rawExif, .carried(bytes: dngBlock.count, commentRewritten: false))
+    let bytes = (try? [UInt8](Data(contentsOf: carriedHEIC))) ?? []
+    if case .tiff(let t) = heifExif(bytes) {
+        check("DNG：产物的 EXIF 与拼出来的块逐字节相同", Array(t.bytes[t.base..<(t.base + t.length)]), dngBlock)
+    } else { fail("DNG：产物里读不出 Exif 项") }
+    check("DNG：产物仍是 10 位", imageDepth(carriedHEIC), 10)
+    check("DNG：产物的 GPS 纬度与源的分数逐字节相同", heicEntries(bytes)["GPS 0002"], dngLatitude)
+    check("DNG：MakerNote 没搬、空串的 CameraOwnerName 搬了",
+          [heicEntries(bytes)["ExifIFD 927C"], heicEntries(bytes)["ExifIFD A430"]], [nil, hex([UInt8](repeating: 0, count: 32))])
+} else { fail("DNG 没转成"); for _ in 0..<4 { fail("（同上）") } }
+let systemBytes = (try? [UInt8](Data(contentsOf: systemHEIC))) ?? []
+if case .converted(let r) = convert(carryDNG, opts: systemOpts, dest: carryRoot.appendingPathComponent("系统重写2.heic")) {
+    check("--no-raw-exif：RAW 也不照搬（报告里没有照搬那一项）", r.rawExif == nil, true)
+} else { fail("--no-raw-exif 的 DNG 没转成") }
+check("--no-raw-exif：产物的 EXIF 是 ImageIO 写的，与拼出来的块不同",
+      { if case .tiff(let t) = heifExif(systemBytes) { return Array(t.bytes[t.base..<(t.base + t.length)]) != dngBlock }; return false }(), true)
+// 闸门不过：GPS 指针改到文件外。ImageIO 照样认作 RAW、转得出 10 位的产物，EXIF 保持它写的那份。
+var brokenDNG = dngBytes
+if let tiff = TIFFStructure(dngBytes, base: 0, length: dngBytes.count), let ifd0 = tiff.ifd0,
+   let p = entryAt(dngBytes, ifd: ifd0, tag: 0x8825) {
+    brokenDNG = patched(dngBytes, at: p + 8, 0x7FFF_FFF0, width: 4)
+}
+let brokenURL = carryRoot.appendingPathComponent("坏GPS.dng")
+try? Data(brokenDNG).write(to: brokenURL)
+let brokenDest = carryRoot.appendingPathComponent("坏GPS.heic")
+if case .converted(let r) = convert(brokenURL, opts: rawOpts, dest: brokenDest) {
+    check("闸门不过：照常转完，报告里写着原因", r.rawExif, .kept("GPS IFD 的位置越界"))
+    check("闸门不过：产物仍是 10 位", imageDepth(brokenDest), 10)
+} else { fail("GPS 指针坏了的 DNG 没转成"); fail("（同上）") }
+// 方向 6 的 DNG：块里是 6，产物也是 6，照搬。
+var sixSpec = DNGSpec()
+sixSpec.orientation = 6
+let sixURL = carryRoot.appendingPathComponent("竖.dng")
+try? makeDNG(sixSpec).write(to: sixURL)
+if case .converted(let r) = convert(sixURL, opts: rawOpts, dest: carryRoot.appendingPathComponent("竖.heic")),
+   case .carried? = r.rawExif {
+    check("方向 6 的 DNG：照搬后方向仍是 6",
+          CGImageSourceCreateWithURL(carryRoot.appendingPathComponent("竖.heic") as CFURL, nil)
+              .flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] }?[kCGImagePropertyOrientation] as? Int, 6)
+} else { fail("方向 6 的 DNG 没有照搬") }
+
+print("RAW 照搬的自检：照搬会让视图退步时不换")
+if let parts = try? tiffRawExifParts(TIFFStructure(dngBytes, base: 0, length: dngBytes.count)!) {
+    var noMake = parts
+    noMake.ifd0.removeAll { $0.tag == 0x010F }
+    let noMakeBlock = assembledExifTIFF(noMake)!
+    let full = assembledExifTIFF(parts)!
+    check("前提：完整的块就是 cameraRawExifTIFF 拼出来的那块", full, dngBlock ?? [])
+    func regression(_ block: [UInt8]) -> String? {
+        guard let carried = try? carryingExif(block, into: systemBytes).get() else { return "放不进" }
+        let after = carryRoot.appendingPathComponent("自检-\(UUID().uuidString).heic")
+        try? Data(carried).write(to: after)
+        return cameraRawExifRegression(source: carryDNG, intended: block, before: systemHEIC, after: after)
+    }
+    check("完整的块：没有退步", regression(full), nil)
+    check("去掉 Make 的块：退步，说出是哪个键", regression(noMakeBlock), "照搬后 XMP/tiff:Make 会读不出（共 2 处）")
+} else { fail("读不出 DNG 的 EXIF 材料"); fail("（同上）"); fail("（同上）") }
+try? FileManager.default.removeItem(at: carryRoot)
+
 print("RAW 的校验：结构字段白名单，只放实测过的")
 for key in ["{raw}/CropSize/Width", "{raw}/SensorSize/Height", "{raw}/Thumbnails[0]/Width", "{DNG}/ColorMatrix1[3]",
             "{DNG}/DNGVersion[0]", "{DNG}/UniqueCameraModel", "{Exif}/CFAPattern[2]", "{TIFF}/BitsPerPixel[0]",
-            "{TIFF}/Width", "{TIFF}/Height", "XMP/tiff:Compression"] {
+            "{TIFF}/Width", "{TIFF}/Height", "XMP/tiff:Compression", "{TIFF}/PhotometricInterpretation",
+            "XMP/tiff:PhotometricInterpretation"] {
     checkRule(key, isRawStructuralKey(key), true, "结构字段不比")
 }
 for key in ["{Raw}/CropSize/Width", "{DNGPrivate}/X", "{GPS}/Latitude", "{GPS}/GPSVersion", "{Exif}/ExifVersion",
             "{Exif}/CameraOwnerName", "{Exif}/CFAPatternX", "{TIFF}/Model", "{TIFF}/WidthX", "{TIFF}/Orientation",
-            "{MakerCanon}/AFInfo[0]", "XMP/tiff:Compressions", "XMP/exif:GPSLatitude", "XMP/tiff:ImageWidth"] {
+            "{MakerCanon}/AFInfo[0]", "XMP/tiff:Compressions", "XMP/exif:GPSLatitude", "XMP/tiff:ImageWidth",
+            "{TIFF}/PhotometricInterpretationX", "XMP/tiff:PhotometricInterpretations"] {
     checkRule(key, isRawStructuralKey(key), false, "白名单外的字段照比")
 }
 

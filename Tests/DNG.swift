@@ -29,6 +29,15 @@ struct DNGSpec {
     /// 纬度、经度：度、分、秒（秒带小数，好暴露写入器的取整）与方向。nil 是不带 GPS。
     var gps: (lat: (Int, Int, Double, String), lon: (Int, Int, Double, String))? =
         ((31, 13, 45.6789, "N"), (121, 28, 19.1234, "E"))
+    /// GPS IFD 里只有 GPSVersion、没有坐标（佳能 CR3 关着定位时就是这样）。gps 是 nil 时不起作用。
+    var gpsVersionOnly = false
+    /// 值是空串的两个标签（佳能 CR3 里有）：Exif IFD 的 CameraOwnerName（0xA430，照佳能写成 32 个 NUL）
+    /// 与 GPS IFD 的 Satellites（0x0008，1 个 NUL）。ImageIO 从属性字典重写 EXIF 时丢掉空串，照搬才
+    /// 保得住。ImageIO 读 DNG、HEIC 时都不显示空串，只能按原始字节核对。nil 是不带。
+    var cameraOwnerName: String? = ""
+    var satellites: String? = ""
+    /// Exif IFD 里的 MakerNote（0x927C）。照搬时去掉，产物里不该有。nil 是不带。
+    var makerNote: [UInt8]? = Array("GLINT MAKERNOTE \u{1}\u{2}\u{3}".utf8)
 }
 
 private struct TIFFEntry {
@@ -46,6 +55,11 @@ private func ascii(_ s: String) -> [UInt8] { Array(s.utf8) + [0] }
 
 private func byte(_ tag: Int, _ v: [Int]) -> TIFFEntry { TIFFEntry(tag: UInt16(tag), type: 1, count: UInt32(v.count), payload: v.map { UInt8($0) }) }
 private func text(_ tag: Int, _ s: String) -> TIFFEntry { let b = ascii(s); return TIFFEntry(tag: UInt16(tag), type: 2, count: UInt32(b.count), payload: b) }
+/// 定长的 ASCII：文本后面补 NUL 到 `width` 字节（佳能把 CameraOwnerName 写成 32 字节，空的就是 32 个 NUL）。
+private func paddedText(_ tag: Int, _ s: String, _ width: Int) -> TIFFEntry {
+    let b = Array(s.utf8) + [UInt8](repeating: 0, count: max(width - s.utf8.count, 1))
+    return TIFFEntry(tag: UInt16(tag), type: 2, count: UInt32(b.count), payload: b)
+}
 private func short(_ tag: Int, _ v: [Int]) -> TIFFEntry { TIFFEntry(tag: UInt16(tag), type: 3, count: UInt32(v.count), payload: le16(v)) }
 private func long(_ tag: Int, _ v: [Int]) -> TIFFEntry { TIFFEntry(tag: UInt16(tag), type: 4, count: UInt32(v.count), payload: le32(v)) }
 /// RATIONAL：成对的分子、分母。
@@ -147,13 +161,18 @@ func makeDNG(_ spec: DNGSpec) -> Data {
         rational(0x829A, [1, 250]),
     ]
     if let t = spec.dateTimeOriginal { exifEntries.append(text(0x9003, t)) }
+    if let o = spec.cameraOwnerName { exifEntries.append(paddedText(0xA430, o, 32)) }
+    if let m = spec.makerNote { exifEntries.append(undefined(0x927C, m)) }
     var gpsEntries: [TIFFEntry] = []
     if let g = spec.gps {
-        gpsEntries = [
-            byte(0, [2, 3, 0, 0]),
-            text(1, g.lat.3), rational(2, dms(g.lat.0, g.lat.1, g.lat.2)),
-            text(3, g.lon.3), rational(4, dms(g.lon.0, g.lon.1, g.lon.2)),
-        ]
+        gpsEntries = [byte(0, [2, 3, 0, 0])]
+        if !spec.gpsVersionOnly {
+            gpsEntries += [
+                text(1, g.lat.3), rational(2, dms(g.lat.0, g.lat.1, g.lat.2)),
+                text(3, g.lon.3), rational(4, dms(g.lon.0, g.lon.1, g.lon.2)),
+            ]
+            if let s = spec.satellites { gpsEntries.append(text(8, s)) }
+        }
     }
 
     // 先按占位的指针算出各块的大小与位置，再用真实的指针写一遍。

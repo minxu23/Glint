@@ -53,8 +53,10 @@
 //            ImageDescription，iptc 是 IPTC Caption/Abstract（这两种写进属性字典），xmp 是 XMP 包里的
 //            dc:description（并 XMP 包时加，属性字典里没有）。
 //   --dng    生成 DNG 而不是 JPEG：默认 256×192、方向 1，带拍摄时间、作者、版权、说明和 GPS
-//            （秒带小数，好暴露写入器的取整）。--orientation <n> 改方向；--size <宽>x<高> 改尺寸
+//            （秒带小数，好暴露写入器的取整），还有佳能 CR3 那样的空串 CameraOwnerName 与 GPS
+//            Satellites、一段 MakerNote。--orientation <n> 改方向；--size <宽>x<高> 改尺寸
 //            （64x48 这种小于门槛的，ImageIO 认作 public.tiff）；--no-gps 不带 GPS；
+//            --gps-version-only 的 GPS IFD 只有 GPSVersion、没有坐标；
 //            --no-description 不带说明（TIFF ImageDescription），好测 --embed-caption 写进去。
 //   --unique-id <值>
 //            EXIF ImageUniqueID（ExifIFD 0xA420）写成 <值>。ImageIO 的写入器什么长度都照写
@@ -71,7 +73,7 @@ var args = Array(CommandLine.arguments.dropFirst())
 
 if args.first == "--dng" {
     args.removeFirst()
-    let dngUsage = "用法: fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--no-description] <输出.dng>"
+    let dngUsage = "用法: fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--gps-version-only] [--no-description] <输出.dng>"
     func dngFail() -> Never {
         FileHandle.standardError.write(Data("\(dngUsage)\n".utf8))
         exit(2)
@@ -93,6 +95,8 @@ if args.first == "--dng" {
             spec.gps = nil
         case "--no-description":
             spec.imageDescription = nil
+        case "--gps-version-only":
+            spec.gpsVersionOnly = true
         default:
             dngFail()
         }
@@ -125,7 +129,7 @@ args.removeAll {
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
     + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap]"
     + " [--unique-id <值>] [--caption-only tiff|iptc|xmp] <输出.jpg>"
-    + "\n      fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--no-description] <输出.dng>"
+    + "\n      fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--gps-version-only] [--no-description] <输出.dng>"
 var uniqueID: String?
 if let at = args.firstIndex(of: "--unique-id") {
     guard at + 1 < args.count else {

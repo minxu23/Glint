@@ -33,7 +33,8 @@ public struct ConversionOptions: Equatable {
     public var dryRun = false
     public var verbose = false
     public var verify = false
-    /// ImageIO 写完 HEIC 后，把产物里的 EXIF 换成源文件 EXIF 段的原始字节（见 carryRawExif）。
+    /// ImageIO 写完 HEIC 后，把产物里的 EXIF 换成源文件的 EXIF：JPEG 是 EXIF 段的原始字节
+    /// （见 carryRawExif），RAW 是从 RAW 里取出来拼成的一块（见 carryCameraRawExif）。
     /// 命令行 --no-raw-exif 关掉它；关掉时 EXIF 全由 ImageIO 从属性字典重写。
     public var rawExif = true
     /// 把源文件扩展属性里「照片」App 的说明写进产物 XMP 的 dc:description（见 captionPlan）。
@@ -348,7 +349,8 @@ public enum ConvertResult {
 /// （encodeHEIF）、文件层属性、说明、校验与删除的流程，不同之处按源类型显式分派：
 /// - 写进产物的属性：JPEG 修补 UserComment、补回 ImageUniqueID（都要解析 JPEG 的段结构）；
 ///   RAW 只整理版本号（versionFieldsForHEIFWriter）。
-/// - 编码之后、校验之前对产物 EXIF 的那一步（carryExif）：JPEG 整块照搬源 EXIF；RAW 本段还没有。
+/// - 编码之后、校验之前对产物 EXIF 的那一步（carryExif）：JPEG 整块照搬源 EXIF；RAW 照搬从 RAW 里
+///   拼出来的一块 EXIF。`opts.rawExif` 关掉时两种都不做，EXIF 全由 ImageIO 从属性字典重写。
 /// - RAW 的产物必须是 10 位，读回确认，不是就算失败。系统默认显影：AddImageFromSource 从 RAW
 ///   直接编码就是，方向标签照抄、像素不转。
 /// - 产物比源大时重编一次：只对 JPEG。RAW 显影后的 HEIF 总比 RAW 小得多，不做。
@@ -615,13 +617,99 @@ public enum RawExifOutcome: Equatable {
 
 /// 编码之后、校验之前对产物 EXIF 做的那一步，按源类型分派。
 /// - JPEG：整块照搬源 EXIF（carryRawExif）。
-/// - RAW：要照搬的是 RAW 自己的 EXIF（CR3 的 CMT1/CMT2/CMT4，TIFF 系 RAW 的 IFD0/ExifIFD/GPS IFD，
-///   整理成一块干净的 TIFF 再交给 carryingExif），还没做，产物保持 ImageIO 写出来的样子。
+/// - RAW：照搬 RAW 自己的 EXIF（CR3 的 CMT1/CMT2/CMT4，TIFF 系 RAW 的 IFD0/ExifIFD/GPS IFD，RAF 内嵌
+///   JPEG 的 EXIF），先拼成一块干净的 TIFF（CameraRawExif.swift），再同样交给 carryingExif
+///   （carryCameraRawExif）。
 func carryExif(_ kind: SourceKind, source: URL, product: URL) -> RawExifOutcome {
     switch kind {
     case .jpeg: return carryRawExif(source: source, product: product)
-    case .raw: return .kept("RAW 的 EXIF 还不能整块照搬")
+    case .raw: return carryCameraRawExif(source: source, product: product)
     }
+}
+
+/// 照搬后的字节 `carried` 先写进 `product` 同目录的另一个临时文件，`check` 对它说没有问题（nil）
+/// 才原子地替换 `product`；否则是原因，`product` 一个字节都不动。中断时最多留下那个另起的
+/// 临时文件，不会留下半个产物。
+private func replacingProduct(_ product: URL, with carried: [UInt8], check: (URL) -> String?) -> String? {
+    let candidate = product.deletingLastPathComponent()
+        .appendingPathComponent(".glint-\(UUID().uuidString).heic")
+    defer { try? FileManager.default.removeItem(at: candidate) }
+    guard (try? Data(carried).write(to: candidate)) != nil else { return "写不出照搬后的产物" }
+    if let problem = check(candidate) { return problem }
+    guard rename(candidate.path, product.path) == 0 else { return "换不上照搬后的产物" }
+    return nil
+}
+
+/// 把 `product`（ImageIO 刚从 RAW 写好的 HEIC）里 Exif 项的内容换成从 RAW 里拼出来的 TIFF。
+///
+/// 拼块与它的闸门见 CameraRawExif.swift；块里 IFD0 的方向必须与产物现在的方向相同（cameraRawCarryPlan）。
+/// 换的那一步与 JPEG 同一个 carryingExif，落盘前过 cameraRawExifRegression 的自检，闸门或自检不过，
+/// `product` 一个字节都不动，原因写进报告（-v 那一行）。照搬了 MakerNote 也不会回来：拼块时就去掉了，
+/// 校验照旧报 MakerNote 那一行。
+func carryCameraRawExif(source: URL, product: URL) -> RawExifOutcome {
+    guard let sourceData = try? Data(contentsOf: source, options: .mappedIfSafe),
+          let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil) else { return .kept("读不出源文件") }
+    guard let productImage = CGImageSourceCreateWithURL(product as CFURL, nil),
+          let productProps = CGImageSourceCopyPropertiesAtIndex(productImage, 0, nil) as? [CFString: Any] else {
+        return .kept("读不出产物")
+    }
+    let orientation = (productProps[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+    let tiff: [UInt8]
+    switch cameraRawCarryPlan(source: [UInt8](sourceData), type: CGImageSourceGetType(sourceImage) as String?,
+                              productOrientation: orientation) {
+    case .success(let t): tiff = t
+    case .failure(let skip): return .kept(skip.reason)
+    }
+    guard let productData = try? Data(contentsOf: product) else { return .kept("读不出产物") }
+    let carried: [UInt8]
+    switch carryingExif(tiff, into: [UInt8](productData)) {
+    case .success(let bytes): carried = bytes
+    case .failure(let skip): return .kept(skip.reason)
+    }
+    if let problem = replacingProduct(product, with: carried, check: { candidate in
+        cameraRawExifRegression(source: source, intended: tiff, before: product, after: candidate)
+    }) { return .kept(problem) }
+    return .carried(bytes: tiff.count, commentRewritten: false)
+}
+
+/// RAW 照搬后的产物 `after` 与照搬前的 `before` 比，有没有退步：有就是原因，没有是 nil。
+/// 与 JPEG 的 rawExifRegression 同一个思路，尺子换成 RAW 校验的那一把（rawMetadataDiff）：
+///
+/// 1. 从 `after` 里重新取出 Exif 项，TIFF 字节与拼好的那块（`intended`）逐字节相同。
+/// 2. ImageIO 打得开，状态完整，图像数、顶层 PixelWidth/PixelHeight/Orientation/Depth 与 `before` 相同
+///    （RAW 的产物必须是 10 位，照搬不能动它）。
+/// 3. 视图不退步：V源 是源的键空间（不修补 UserComment）按 RAW 的规矩整理过的——版本号按规范写法、
+///    去掉结构字段（isRawStructuralKey）、去掉交给别处核对的键（顶层 Orientation 在第 2 条，XMP 的
+///    版本号键交给属性视图那一侧，见 derivedXMPVersionKeys）；两边产物的视图也规范化版本号。
+///    `after` 里与 V源 不一致的键（inconsistentKeys）必须都已经在 `before` 里不一致。没有放行。
+func cameraRawExifRegression(source: URL, intended: [UInt8], before: URL, after: URL) -> String? {
+    guard let afterData = try? Data(contentsOf: after),
+          case .tiff(let readBack) = heifExif([UInt8](afterData)),
+          Array(readBack.bytes[readBack.base..<(readBack.base + readBack.length)]) == intended else {
+        return "照搬后读回的 EXIF 与打算照搬的不一致"
+    }
+    guard let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil),
+          let beforeImage = CGImageSourceCreateWithURL(before as CFURL, nil),
+          let afterImage = CGImageSourceCreateWithURL(after as CFURL, nil),
+          CGImageSourceGetStatus(afterImage) == .statusComplete else {
+        return "照搬后 ImageIO 打不开产物"
+    }
+    guard CGImageSourceGetCount(afterImage) == CGImageSourceGetCount(beforeImage) else { return "照搬后图像数变了" }
+    let a = CGImageSourceCopyPropertiesAtIndex(afterImage, 0, nil) as? [CFString: Any] ?? [:]
+    let b = CGImageSourceCopyPropertiesAtIndex(beforeImage, 0, nil) as? [CFString: Any] ?? [:]
+    for key in [kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight, kCGImagePropertyOrientation,
+                kCGImagePropertyDepth] {
+        guard (a[key] as? NSNumber) == (b[key] as? NSNumber) else { return "照搬后 \(key as String) 变了" }
+    }
+    let reference = rawReferenceView(metadataKeySpace(of: sourceImage, url: source, repairing: false))
+    let beforeView = collapsingVersions(metadataKeySpace(of: beforeImage, url: before, repairing: false))
+    let afterView = collapsingVersions(metadataKeySpace(of: afterImage, url: after, repairing: false))
+    let worse = inconsistentKeys(before: reference, after: afterView)
+        .subtracting(inconsistentKeys(before: reference, after: beforeView))
+    guard let key = worse.sorted().first else { return nil }
+    let more = worse.count > 1 ? "（共 \(worse.count) 处）" : ""
+    if reference[key] == nil { return "照搬后会多出源里没有的 \(key)\(more)" }
+    return afterView[key] == nil ? "照搬后 \(key) 会读不出\(more)" : "照搬后 \(key) 会与源不一致\(more)"
 }
 
 /// 把 `product`（ImageIO 刚写好的 HEIC）里 Exif 项的内容换成源 JPEG 的 EXIF 原始字节。
@@ -654,15 +742,14 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
     case .success(let bytes): carried = bytes
     case .failure(let skip): return .kept(skip.reason)
     }
-    let candidate = product.deletingLastPathComponent()
-        .appendingPathComponent(".glint-\(UUID().uuidString).heic")
-    defer { try? FileManager.default.removeItem(at: candidate) }
-    guard (try? Data(carried).write(to: candidate)) != nil else { return .kept("写不出照搬后的产物") }
-    let check = rawExifRegression(source: source, sourceBytes: sourceBytes, intended: intended,
-                                  before: product, after: candidate)
-    if let regression = check.regression { return .kept(regression) }
-    guard rename(candidate.path, product.path) == 0 else { return .kept("换不上照搬后的产物") }
-    return .carried(bytes: tiff.count, commentRewritten: rewritten != nil, keptOriginals: check.keptOriginals)
+    var keptOriginals: [ReconciledGroup] = []
+    if let problem = replacingProduct(product, with: carried, check: { candidate in
+        let check = rawExifRegression(source: source, sourceBytes: sourceBytes, intended: intended,
+                                      before: product, after: candidate)
+        keptOriginals = check.keptOriginals
+        return check.regression
+    }) { return .kept(problem) }
+    return .carried(bytes: tiff.count, commentRewritten: rewritten != nil, keptOriginals: keptOriginals)
 }
 
 /// 照搬后的产物 `after` 与照搬前的 `before` 比，有没有退步：`regression` 有就是原因，没有是 nil；

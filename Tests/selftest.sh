@@ -19,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=659
-EXPECTED_UNIT=1034
+EXPECTED_ASSERTIONS=673
+EXPECTED_UNIT=1156
 EXPECTED_GUI=233
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -1599,13 +1599,39 @@ out=$("$RAW_BIN" -v "$R/横.dng" "$R/竖.dng" 2>&1); st=$?
 check "两张都转成，退出码 0" "$st" "0"
 check "产物：10 位、宽高不变、方向 1" "$(./Tests/probe --image "$R/横.heic")" "public.heic 10 位 256x192 方向 1"
 check "产物：方向 6 照抄、像素不转" "$(./Tests/probe --image "$R/竖.heic")" "public.heic 10 位 256x192 方向 6"
-check "-v 说明 RAW 的 EXIF 还不能整块照搬" "$(grep -c '^    EXIF 没有照搬：RAW 的 EXIF 还不能整块照搬$' <<< "$out")" "2"
+# EXIF 整块照搬：从 DNG 的 IFD0、Exif IFD、GPS IFD 拼出一块干净的 TIFF（夹具是确定的，块长固定）。
+check "-v 说明两张都整块照搬了 EXIF，写出字节数" "$(grep -c '^    EXIF 整块照搬（416 字节）$' <<< "$out")" "2"
 refute "RAW 不重编（-v 里没有重编那一行）" "$st" grep -qF "重编了一次" <<< "$out"
 check_same "修改时间照抄" "$(stat -f %m "$R/横.heic")" "$(stat -f %m "$R/横.dng")"
 check_same "扩展属性照抄" "$(xattr -p com.apple.metadata:kMDItemFinderComment "$R/横.heic" 2>/dev/null)" \
     "$(xattr -p com.apple.metadata:kMDItemFinderComment "$R/横.dng" 2>/dev/null)"
 check_same "拍摄时间带过去" "$(./Tests/probe "$R/横.heic" '{Exif}/DateTimeOriginal')" "$(./Tests/probe "$R/横.dng" '{Exif}/DateTimeOriginal')"
 check_same "作者带过去" "$(./Tests/probe "$R/横.heic" '{TIFF}/Artist')" "$(./Tests/probe "$R/横.dng" '{TIFF}/Artist')"
+# 照搬的块里 GPS 的分数、空串的标签逐字节是源的（ImageIO 的视图看不出：它读 HEIC 时把坐标取整到
+# 分的 4 位小数、不显示空串），MakerNote 没有搬（夹具的 Exif IFD 里有一段）。
+for tag in 2 4 8; do
+    check_same "照搬：GPS IFD 的 0x$tag 与源逐字节相同" "$(./Tests/probe --raw-gps "$R/横.heic" "$tag")" \
+        "$(./Tests/probe --raw-gps "$R/横.dng" "$tag")"
+done
+check_same "照搬：空串的 CameraOwnerName（32 个 NUL）搬过去了" "$(./Tests/probe --raw-exif "$R/横.heic" A430)" \
+    "$(./Tests/probe --raw-exif "$R/横.dng" A430)"
+[ "$(./Tests/probe --raw-exif "$R/横.dng" 927C)" != "<无>" ] \
+    && pass "前提：夹具的 Exif IFD 里有 MakerNote" || fail "前提：夹具里没有 MakerNote"
+check "照搬：MakerNote 没有搬" "$(./Tests/probe --raw-exif "$R/横.heic" 927C)" "<无>"
+# GPS IFD 里只有 GPSVersion（佳能 CR3 关着定位时那样）：照搬后还在，系统重写时整个丢掉。
+./Tests/fixture --dng --gps-version-only "$R/版本.dng" >/dev/null || fail "造不出只有 GPSVersion 的 DNG"
+cp "$R/版本.dng" "$R/版本-重写.dng"
+"$RAW_BIN" "$R/版本.dng" >/dev/null 2>&1
+"$RAW_BIN" --no-raw-exif "$R/版本-重写.dng" >/dev/null 2>&1
+check "只有 GPSVersion：照搬后 GPS IFD 还在" "$(./Tests/probe --raw-gps "$R/版本.heic" 0)" "GPS BYTE 4 02030000"
+check "只有 GPSVersion（--no-raw-exif）：系统重写把它丢了" "$(./Tests/probe --raw-gps "$R/版本-重写.heic" 0)" "<无>"
+# --no-raw-exif 对 RAW 生效：不照搬，-v 里没有照搬那一行，EXIF 是系统重写的（秒的分母改成 100、空串丢了）。
+./Tests/fixture --dng "$R/重写.dng" >/dev/null || fail "造不出 DNG"
+out=$("$RAW_BIN" -v --no-raw-exif "$R/重写.dng" 2>&1); st=$?
+refute "--no-raw-exif：-v 里没有照搬那一行" "$st" grep -qF "EXIF 整块照搬" <<< "$out"
+check "--no-raw-exif：GPS 的秒被系统重写成分母 100" "$(./Tests/probe --raw-gps "$R/重写.heic" 2)" \
+    "GPS RATIONAL 3 0000001f000000010000000d00000001000011d800000064"
+check "--no-raw-exif：空串的 CameraOwnerName 丢了" "$(./Tests/probe --raw-exif "$R/重写.heic" A430)" "<无>"
 # 门槛下的 DNG 被 ImageIO 认作 TIFF，读到的是预览图：按「不是 RAW」跳过，不交出一张 8 位的图。
 ./Tests/fixture --dng --size 64x48 "$R/小.dng" >/dev/null || fail "造不出门槛下的 DNG"
 check "前提：门槛下的 DNG 被认作 TIFF" "$(./Tests/probe --image "$R/小.dng")" "public.tiff 8 位 4x3 方向 1"
@@ -1667,15 +1693,21 @@ check "甲.dng 转成 10 位" "$(./Tests/probe --image "$M/甲.heic" | cut -d' '
 
 round "7t. raw2heif --verify：结构字段不报，GPS 取整压成一行"
 # 精确断言差异列表本身（不是「包含」）：夹具的源里有几十个只描述原始数据的键（{DNG}、{raw}、
-# CFAPattern、tiff:Compression），白名单之外多放行一个、或少放行一个，这里都会变。GPS 被写入器
-# 取整（XMP 的分只留 4 位、方向键并进坐标里），合成一行，算差异。
+# CFAPattern、tiff:Compression、tiff:PhotometricInterpretation），白名单之外多放行一个、或少放行一个，
+# 这里都会变。GPS 合成一行，算差异：照搬后产物里的分数逐字节是源的（7r 核对过），但 ImageIO 读 HEIC
+# 时把坐标取整到分的 4 位小数（读 DNG 时不取整），视图里照样差 4 厘米；--no-raw-exif 时写入器取整，
+# 差得一样多。两条路各跑一遍。
 V="$WORK/RAW校验"
 mkdir -p "$V"
 ./Tests/fixture --dng "$V/横.dng" >/dev/null
 ./Tests/fixture --dng --orientation 6 "$V/竖.dng" >/dev/null
 ./Tests/fixture --dng --no-gps "$V/无GPS.dng" >/dev/null
-for name in 横 竖; do
-    out=$("$RAW_BIN" --verify "$V/$name.dng" 2>&1); st=$?
+cp "$V/横.dng" "$V/横-重写.dng"
+for name in 横 竖 横-重写; do
+    flags=""
+    [ "$name" = 横-重写 ] && flags=--no-raw-exif
+    # shellcheck disable=SC2086
+    out=$("$RAW_BIN" --verify $flags "$V/$name.dng" 2>&1); st=$?
     check "$name.dng：退出码 0" "$st" "0"
     check "$name.dng：差异恰好是 GPS 那一行" "$(grep -E '^ {7}- ' <<< "$out")" \
         "       - GPS 精度降低：最大偏差 4 厘米（ImageIO 写入时取整）"

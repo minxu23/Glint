@@ -32,7 +32,11 @@ struct TIFFStructure {
     }
 
     /// `bytes[base..<base+length]` 是一段以 TIFF 头开头的数据；头不合法或范围越界就是 nil。
-    init?(_ bytes: [UInt8], base: Int, length: Int) {
+    ///
+    /// `magic` 是字节序标记后面那个 16 位数（按头里的字节序读）允许的值。EXIF 里总是 42；
+    /// 几种相机 RAW 换了这个数、其余照 TIFF 的规矩排（松下 RW2 是 0x55，奥林巴斯 ORF 是
+    /// `IIRO`/`IIRS`/`MMOR` 的 `RO`/`RS`/`OR`，见 CameraRawExif.swift）。
+    init?(_ bytes: [UInt8], base: Int, length: Int, magic: Set<Int> = [42]) {
         guard base >= 0, length > 8, base <= bytes.count - length else { return nil }
         switch (bytes[base], bytes[base + 1]) {
         case (0x4D, 0x4D): bigEndian = true
@@ -42,7 +46,7 @@ struct TIFFStructure {
         self.bytes = bytes
         self.base = base
         self.length = length
-        guard u16(2) == 42 else { return nil }
+        guard let found = u16(2), magic.contains(found) else { return nil }
     }
 
     func u16(_ off: Int) -> Int? {

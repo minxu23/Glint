@@ -59,8 +59,7 @@ func usage(for command: Command) -> String {
           -f, --overwrite          覆盖已存在的输出文件。RAW 与同名 JPEG 放在一起时，
                                    两个命令都输出同一个 .heic，后转的那个因「输出已存在」跳过
               --verify             转换后逐条比对元数据，报告任何丢失或变化的条目
-              --no-raw-exif        EXIF 交给系统重写。RAW 的 EXIF 整块照搬还没做，目前 RAW 的
-                                   EXIF 总是由系统重写，这一项只去掉 -v 里说照搬的那一行
+              --no-raw-exif        EXIF 交给系统重写，不整块照搬从 RAW 里取出的 EXIF
               --embed-caption      把「照片」App 的说明（文件扩展属性里的那段）写进 HEIF 的
                                    XMP 说明字段 dc:description，让它离开 Mac 也跟着文件走。
                                    文件里已有说明时不写（不覆盖、不追加）
