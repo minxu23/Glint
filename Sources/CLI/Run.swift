@@ -28,6 +28,8 @@ func usage(for command: Command) -> String {
               --embed-caption      把「照片」App 的说明（文件扩展属性里的那段）写进 HEIF 的
                                    XMP 说明字段 dc:description，让它离开 Mac 也跟着文件走。
                                    文件里已有说明时不写（不覆盖、不追加）
+              --allow-cmyk         CMYK 的 JPEG 也转。默认跳过：HEIF 只能存 RGB，转了颜色会变
+                                   （校验照样报出色彩模型和色彩描述文件的变化，不删源）
           -n, --dry-run            只打印将要做什么，不实际写文件
           -j, --jobs <n>           并发任务数，默认 \(ConversionOptions.default.jobs)
           -v, --verbose            输出每张图保留的元数据条目数，以及 EXIF 整块照搬了没有；
@@ -156,7 +158,8 @@ func runCommandLine(_ command: Command) -> Never {
             // 状态说明单独一行，不混进上面的差异列表。
             if let note = r.note { print("    \(note)") }
         case .skipped(let why):
-            print("跳过 \(input.lastPathComponent): \(why)")
+            let hint = why == cmykSkipReason ? "（用 --allow-cmyk 强制转换）" : ""
+            print("跳过 \(input.lastPathComponent): \(why)\(hint)")
         case .failed(let why):
             FileHandle.standardError.write(Data("失败 \(input.lastPathComponent): \(why)\n".utf8))
         }

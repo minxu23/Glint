@@ -19,9 +19,9 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=657
-EXPECTED_UNIT=1030
-EXPECTED_GUI=226
+EXPECTED_ASSERTIONS=659
+EXPECTED_UNIT=1034
+EXPECTED_GUI=233
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -552,9 +552,13 @@ make_sample ./Tests/mangle-tool --append "$f" 'tyf-\0\0\0\x01'
 expect_reported "差一点的 FlashPix、Ducky、tyf- 标记" "$f" \
     "丢失 APP2 段（FPXQ，8 字节）" "丢失 APP12 段（Ducky，24 字节）" "丢失 EOI 之后的 8 字节"
 
-# CMYK 的 ICC 描述文件和色彩模型被换成 sRGB/RGB，必须报。
+# CMYK 的 JPEG 默认跳过：HEIF 只能存 RGB，转了颜色会变。跳过时说明怎么强制转换，不写产物。
 ./Tests/fixture --cmyk "$WORK/CMYK.jpg" >/dev/null
-expect_reported "CMYK 被转成 RGB" "$WORK/CMYK.jpg" \
+check "CMYK 的 JPEG 默认跳过并说明怎么强制" "$("$BIN" "$WORK/CMYK.jpg" 2>&1)" \
+    "跳过 CMYK.jpg: CMYK 的 JPEG：HEIF 只能存 RGB，转了颜色会变（用 --allow-cmyk 强制转换）"
+refute "CMYK 的 JPEG 跳过时不写产物" 0 test -e "$WORK/CMYK.heic"
+# --allow-cmyk 强制转换时，ICC 描述文件和色彩模型被换成 sRGB/RGB，必须报。
+XFLAGS=--allow-cmyk expect_reported "CMYK 被强制转成 RGB" "$WORK/CMYK.jpg" \
     "变化 ColorModel: CMYK → RGB" "变化 ProfileName: Generic CMYK Profile → sRGB"
 
 round "7d. ImageIO 不读的 Windows 标签与 Photoshop 资源"

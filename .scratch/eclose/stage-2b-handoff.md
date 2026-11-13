@@ -10,6 +10,8 @@ Status: ready-for-agent
 
 用户拍板：本轮界面里 RAW 也能转；RAW 不给删除。
 
+交接稿写完之后又加了一条：CMYK 的 JPEG 默认跳过（`ConversionOptions.convertCMYK`，命令行 `jpeg2heif --allow-cmyk`）。界面上是转换面板「高级」里的「也转 CMYK 的 JPEG」，不记住；`ConversionTargets.cmykCount` / `cmykHint` 按 `PhotoInfo.isCMYK` 数这批里有几张，有就展开「高级」。改范围和标题时别把这一项丢了；它只对 JPEG 有意义，RAW 没有 CMYK 一说。
+
 ## 要做的
 
 1. **图库认 RAW**：按 Eclose 的 `SourceKind`（与命令行同一份判定、同一份扩展名清单）分出 RAW；「可以转换」筛选、工具栏副标题（`248 张，其中 JPEG 196 张、RAW 30 张，共 612 MB` 这样）、按格式的统计行都认 RAW；格式名显示成相机 RAW 的具体类型（CR3、NEF、ARW、DNG……）或统一「RAW」，二选一，与界面规格的写法一致并说明。

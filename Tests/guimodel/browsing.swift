@@ -66,8 +66,10 @@ func spin(until done: () -> Bool, timeout: TimeInterval = 20) -> Bool {
 }
 
 func item(_ path: String, size: Int = 100, modified: TimeInterval = 0, root: String? = "/库",
-          captured: CaptureTime? = nil, notes: [String] = [], outsideCaption: Bool = false) -> PhotoItem {
+          captured: CaptureTime? = nil, notes: [String] = [], outsideCaption: Bool = false,
+          cmyk: Bool = false) -> PhotoItem {
     var info = PhotoInfo()
+    info.isCMYK = cmyk
     info.captured = captured
     info.notes = notes.map { Note(text: $0, origins: [.fileDescription]) }
     info.captionOutsideOnly = outsideCaption
@@ -420,6 +422,13 @@ func testTargets() {
     check("没有时的说明", onlyJPEG.captionHint.isEmpty ? "" : ConversionTargets(selected: [j2], visible: [], entry: .all, entryName: "", search: "").captionHint,
           "这批里没有存在文件之外的备注")
 
+    let printJob = item("/库/印刷/f.jpg", size: mb, cmyk: true)
+    let withCMYK = ConversionTargets(selected: [printJob, j1, h], visible: [], entry: .all, entryName: "全部图片", search: "")
+    check("CMYK 的 JPEG 照样在这批里（转不转由面板上的勾决定）", names(withCMYK.items), ["f.jpg", "a.jpg"])
+    check("这批里 CMYK 的张数", withCMYK.cmykCount, 1)
+    check("「也转 CMYK 的 JPEG」的说明", withCMYK.cmykHint, "这批里有 1 张 CMYK 的 JPEG。HEIF 只能存 RGB，转了颜色会变；不勾就跳过")
+    check("没有 CMYK 时的说明", onlyJPEG.cmykHint, "CMYK 的 JPEG 多是印刷用的稿子。HEIF 只能存 RGB，转了颜色会变；不勾就跳过")
+
     let none = ConversionTargets(selected: [h, p], visible: [], entry: .all, entryName: "全部图片", search: "")
     check(none.isEmpty, "一张 JPEG 都没有时对象为空（按钮禁用）")
 }
@@ -533,6 +542,7 @@ func testSettings() {
     s.systemExif = true
     s.deleteOriginal = true
     s.overwrite = true
+    s.convertCMYK = true
     s.save(to: store)
     let back = PanelSettings.load(from: store)
     check("画质、保存到、校验、写进文件、EXIF 都记住了",
@@ -540,7 +550,9 @@ func testSettings() {
           [true, true, true, true, true])
     check("「删除源文件」不记", back.deleteOriginal, false)
     check("「覆盖同名的 HEIF」不记", back.overwrite, false)
-    check("存储里根本没有这两项", store.values.keys.filter { $0.contains("delete") || $0.contains("overwrite") }, [])
+    check("「也转 CMYK 的 JPEG」不记", back.convertCMYK, false)
+    check("存储里根本没有这三项",
+          store.values.keys.filter { $0.contains("delete") || $0.contains("overwrite") || $0.lowercased().contains("cmyk") }, [])
     var del = back
     del.deleteOriginal = true
     check("勾了删除：校验被锁上并生效", [del.effectiveVerify, del.verifyLocked], [true, true])
@@ -549,6 +561,10 @@ func testSettings() {
     var opts = ConversionOptions.default
     del.apply(to: &opts)
     check("落到 ConversionOptions 上", [opts.verify, opts.deleteOriginal, opts.embedCaption, opts.rawExif], [true, true, true, false])
+    check("不勾就不转 CMYK", opts.convertCMYK, false)
+    del.convertCMYK = true
+    del.apply(to: &opts)
+    check("勾了「也转 CMYK 的 JPEG」落到 ConversionOptions 上", opts.convertCMYK, true)
     s.outputFolder = nil
     s.save(to: store)
     check("改回源文件旁边也记住", PanelSettings.load(from: store).outputFolder, nil)

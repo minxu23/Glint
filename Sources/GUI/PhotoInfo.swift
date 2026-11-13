@@ -198,6 +198,8 @@ struct PhotoInfo: Equatable {
     /// 「照片」的说明在、而文件里没有说明字段——勾「把备注写进文件」能写进去的那种
     /// （判定用 Eclose 的 captionCanBeEmbedded，与转换时同一把尺子）。只对 JPEG 有意义。
     var captionOutsideOnly = false
+    /// 色彩模型是 CMYK（判定用 Eclose 的 isCMYK，与转换时同一把尺子）。这种 JPEG 转换时默认跳过。
+    var isCMYK = false
 
     var hasNotes: Bool { !notes.isEmpty }
 
@@ -275,6 +277,7 @@ extension PhotoInfo {
             let orientation = (index[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
             (info.pixelWidth, info.pixelHeight) = orientation >= 5 ? (h, w) : (w, h)
         }
+        info.isCMYK = Eclose.isCMYK(index)
         let taken = (exif[kCGImagePropertyExifDateTimeOriginal] as? String)
             ?? (exif[kCGImagePropertyExifDateTimeDigitized] as? String)
             ?? (tiff[kCGImagePropertyTIFFDateTime] as? String)

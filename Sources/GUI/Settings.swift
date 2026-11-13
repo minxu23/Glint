@@ -31,7 +31,7 @@ final class MemoryStore: SettingsStore {
 // MARK: - 转换面板
 
 /// 转换面板上的设置。打开面板时从存储读，开始转换时写回。
-/// 「删除源文件」「覆盖同名的 HEIF」不读也不写：每次打开面板都是关的。
+/// 「删除源文件」「覆盖同名的 HEIF」「也转 CMYK 的 JPEG」不读也不写：每次打开面板都是关的。
 struct PanelSettings: Equatable {
     var quality: Double
     /// 保存到指定文件夹；nil 是源文件旁边。
@@ -42,6 +42,8 @@ struct PanelSettings: Equatable {
     var systemExif: Bool
     var deleteOriginal = false
     var overwrite = false
+    /// 「也转 CMYK 的 JPEG」，即 ConversionOptions.convertCMYK。强制转换颜色会变，不记住。
+    var convertCMYK = false
 
     private enum Key {
         static let quality = "panel.quality"
@@ -97,6 +99,7 @@ struct PanelSettings: Equatable {
         options.rawExif = !systemExif
         options.deleteOriginal = deleteOriginal
         options.overwrite = overwrite
+        options.convertCMYK = convertCMYK
     }
 }
 

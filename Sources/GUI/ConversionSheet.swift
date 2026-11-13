@@ -1,5 +1,6 @@
 // 转换面板：点「转换…」从工具栏下滑出的 sheet（宽 460，规格第 8.1 节）。
-// 打开时从存储读设置，「删除源文件」「覆盖同名的 HEIF」每次都是关的；点「转换」时写回存储。
+// 打开时从存储读设置，「删除源文件」「覆盖同名的 HEIF」「也转 CMYK 的 JPEG」每次都是关的；
+// 点「转换」时写回存储。
 
 import AppKit
 
@@ -25,6 +26,7 @@ final class ConversionSheetController: NSViewController {
     private let advancedBox = NSStackView()
     private let exifCheck = NSButton(checkboxWithTitle: "EXIF 交给系统重写", target: nil, action: nil)
     private let overwriteCheck = NSButton(checkboxWithTitle: "覆盖同名的 HEIF", target: nil, action: nil)
+    private let cmykCheck = NSButton(checkboxWithTitle: "也转 CMYK 的 JPEG", target: nil, action: nil)
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
     private let startButton = NSButton(title: "转换", target: nil, action: nil)
     private var grid = NSGridView()
@@ -70,7 +72,7 @@ final class ConversionSheetController: NSViewController {
         outputPath.lineBreakMode = .byTruncatingMiddle
         outputPath.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        for c in [verifyCheck, captionCheck, deleteCheck, exifCheck, overwriteCheck] {
+        for c in [verifyCheck, captionCheck, deleteCheck, exifCheck, overwriteCheck, cmykCheck] {
             c.target = self
             c.action = #selector(toggled(_:))
         }
@@ -82,7 +84,6 @@ final class ConversionSheetController: NSViewController {
         advancedToggle.bezelStyle = .disclosure
         advancedToggle.setButtonType(.pushOnPushOff)
         advancedToggle.title = ""
-        advancedToggle.state = .off
         advancedToggle.target = self
         advancedToggle.action = #selector(toggleAdvanced)
         advancedToggle.setAccessibilityLabel("高级")
@@ -94,7 +95,10 @@ final class ConversionSheetController: NSViewController {
         advancedBox.spacing = 6
         advancedBox.addArrangedSubview(check(exifCheck, "默认把源文件的 EXIF 原样搬过去。个别软件读不了这样的文件时再勾"))
         advancedBox.addArrangedSubview(check(overwriteCheck, nil))
-        advancedBox.isHidden = true
+        advancedBox.addArrangedSubview(check(cmykCheck, targets.cmykHint))
+        // 这批里有 CMYK 的就展开「高级」，免得用户不知道有几张会被跳过。
+        advancedToggle.state = targets.cmykCount > 0 ? .on : .off
+        advancedBox.isHidden = targets.cmykCount == 0
 
         let rule = NSBox()
         rule.boxType = .separator
@@ -205,6 +209,7 @@ final class ConversionSheetController: NSViewController {
         deleteNote.superview?.isHidden = !settings.deleteOriginal
         exifCheck.state = settings.systemExif ? .on : .off
         overwriteCheck.state = settings.overwrite ? .on : .off
+        cmykCheck.state = settings.convertCMYK ? .on : .off
         startButton.title = settings.primaryTitle
         startButton.bezelColor = settings.deleteOriginal ? .systemRed : nil
         startButton.hasDestructiveAction = settings.deleteOriginal
@@ -223,6 +228,7 @@ final class ConversionSheetController: NSViewController {
         case deleteCheck: settings.deleteOriginal = on
         case exifCheck: settings.systemExif = on
         case overwriteCheck: settings.overwrite = on
+        case cmykCheck: settings.convertCMYK = on
         default: break
         }
         refresh()
@@ -255,7 +261,7 @@ final class ConversionSheetController: NSViewController {
     @objc private func cancel() { onCancel?() }
 
     @objc private func start() {
-        // 存的是用户自己的选择；删除与覆盖不存（PanelSettings.save 不写这两项）。
+        // 存的是用户自己的选择；删除、覆盖、也转 CMYK 不存（PanelSettings.save 不写这三项）。
         var toSave = settings
         if !captionCheck.isEnabled { toSave.embedCaption = settings.embedCaption }
         toSave.save(to: store)

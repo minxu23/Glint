@@ -39,6 +39,10 @@ public struct ConversionOptions: Equatable {
     /// 把源文件扩展属性里「照片」App 的说明写进产物 XMP 的 dc:description（见 captionPlan）。
     /// 命令行 --embed-caption 打开；界面没有这个开关。
     public var embedCaption = false
+    /// CMYK 的 JPEG 也转。默认跳过（见 cmykSkipReason）：HEIF 只能存 RGB，转了颜色会变。
+    /// 命令行 jpeg2heif --allow-cmyk、界面转换面板「高级」里的「也转 CMYK 的 JPEG」打开。
+    /// 强制转换时校验照样报出 ColorModel、ProfileName 两条变化，--delete-original 不删源。
+    public var convertCMYK = false
     public var jobs = ProcessInfo.processInfo.activeProcessorCount
     public var inputs: [String] = []
     /// 收哪几种源：jpeg2heif 是 [.jpeg]，raw2heif 是 [.raw]。界面目前只转 JPEG。
@@ -322,6 +326,15 @@ public struct Reencode: Equatable {
 /// 签名与 encodeHEIF 相同。
 typealias HEIFEncoder = (CGImageSource, [CFString: Any], CGImageMetadata?, URL) -> Bool
 
+/// CMYK 的 JPEG 默认跳过时的原因。命令行、界面认这个值另加怎么强制转换的提示，所以是公开的常量。
+public let cmykSkipReason = "CMYK 的 JPEG：HEIF 只能存 RGB，转了颜色会变"
+
+/// 图像的色彩模型是不是 CMYK。`props` 是 CGImageSourceCopyPropertiesAtIndex 给的属性。
+/// Adobe 写的 YCCK 的 JPEG，ImageIO 也报成 CMYK。界面判断「这批里有几张 CMYK」用同一个函数。
+public func isCMYK(_ props: [CFString: Any]) -> Bool {
+    (props[kCGImagePropertyColorModel] as? String) == (kCGImagePropertyColorModelCMYK as String)
+}
+
 public enum ConvertResult {
     case converted(ConversionReport)
     case skipped(String)
@@ -362,6 +375,10 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
         return .skipped(skipReason(type: type, accepted: opts.sources))
     }
     guard CGImageSourceGetCount(src) > 0 else { return .failed("文件中没有图像") }
+    if kind == .jpeg, !opts.convertCMYK,
+       isCMYK((CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]) {
+        return .skipped(cmykSkipReason)
+    }
 
     let fm = FileManager.default
 

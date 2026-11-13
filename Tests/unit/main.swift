@@ -2758,6 +2758,8 @@ check("默认整块照搬 EXIF", parsed(["a.jpg"])?.rawExif, true)
 check("--no-raw-exif 关掉整块照搬", parsed(["--no-raw-exif", "a.jpg"])?.rawExif, false)
 check("默认不写「照片」的说明", parsed(["a.jpg"])?.embedCaption, false)
 check("--embed-caption 打开写说明", parsed(["--embed-caption", "a.jpg"])?.embedCaption, true)
+check("默认跳过 CMYK 的 JPEG", parsed(["a.jpg"])?.convertCMYK, false)
+check("--allow-cmyk 强制转换 CMYK 的 JPEG", parsed(["--allow-cmyk", "a.jpg"])?.convertCMYK, true)
 check("-- 之后的横杠开头当文件名",
       parsed(["--", "-奇怪的文件名.jpg"])?.inputs, ["-奇怪的文件名.jpg"])
 check("-o 展开 ~", parsed(["-o", "~/out", "a.jpg"])?.output?.path.hasPrefix("/"), true)
@@ -2797,6 +2799,12 @@ do {
 } catch {
     pass("raw2heif 拒绝放在后面的 --delete-original")
 }
+do {
+    _ = try parseArguments(["--allow-cmyk", "a.CR3"], command: .raw2heif)
+    fail("raw2heif 接受了 --allow-cmyk")
+} catch {
+    check("raw2heif 不认 --allow-cmyk", error.localizedDescription, "未知选项: --allow-cmyk（用 --help 查看用法）")
+}
 check("raw2heif --help 退出码 0", try? parseArguments(["--help"], command: .raw2heif), .showUsage(exitCode: 0))
 
 print("命令行与界面的默认值")
@@ -2815,6 +2823,7 @@ expectSame(gui.options.quality, cli.quality, "质量")
 expectSame(gui.options.overwrite, cli.overwrite, "覆盖同名文件")
 expectSame(gui.options.deleteOriginal, cli.deleteOriginal, "删除源文件")
 expectSame(gui.options.rawExif, cli.rawExif, "整块照搬 EXIF")
+expectSame(gui.options.convertCMYK, cli.convertCMYK, "转 CMYK 的 JPEG")
 expectSame(gui.options.sources, cli.sources, "收的源（界面目前只转 JPEG）")
 expectSame(gui.options.jobs, cli.jobs, "并发数")
 

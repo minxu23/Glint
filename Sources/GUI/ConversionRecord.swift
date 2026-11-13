@@ -65,6 +65,17 @@ struct ConversionTargets {
     /// 元数据还没读到的不算。
     var captionOutsideCount: Int { items.filter { $0.info?.captionOutsideOnly == true }.count }
 
+    /// 这批里 CMYK 的张数（不勾「也转 CMYK 的 JPEG」时转换会跳过的）。元数据还没读到的不算，
+    /// 转换时照样按内容判定、跳过。
+    var cmykCount: Int { items.filter { $0.info?.isCMYK == true }.count }
+
+    /// 「也转 CMYK 的 JPEG」下面那行说明。
+    var cmykHint: String {
+        let n = cmykCount
+        let why = "HEIF 只能存 RGB，转了颜色会变；不勾就跳过"
+        return n > 0 ? "这批里有 \(n) 张 CMYK 的 JPEG。" + why : "CMYK 的 JPEG 多是印刷用的稿子。" + why
+    }
+
     /// 「把备注写进文件」下面那行说明。
     var captionHint: String {
         let n = captionOutsideCount

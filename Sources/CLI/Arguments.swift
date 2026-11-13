@@ -6,8 +6,9 @@
 import Eclose
 import Foundation
 
-/// 两个命令：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。选项完全相同，只差三处：收的源、
-/// 默认并发数（RAW 用 ConversionOptions.defaultRAWJobs），以及 raw2heif 不接受 --delete-original。
+/// 两个命令：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。选项完全相同，只差四处：收的源、
+/// 默认并发数（RAW 用 ConversionOptions.defaultRAWJobs），以及 raw2heif 不接受 --delete-original
+/// 和 --allow-cmyk（RAW 没有 CMYK 一说，当未知选项报错）。
 enum Command {
     case jpeg2heif, raw2heif
 
@@ -83,6 +84,7 @@ func parseArguments(_ arguments: [String], command: Command) throws -> ParsedArg
         case "--verify": o.verify = true
         case "--no-raw-exif": o.rawExif = false
         case "--embed-caption": o.embedCaption = true
+        case "--allow-cmyk" where command == .jpeg2heif: o.convertCMYK = true
         case "-n", "--dry-run": o.dryRun = true
         case "-v", "--verbose": o.verbose = true
         case "-j", "--jobs":
