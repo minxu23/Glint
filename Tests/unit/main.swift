@@ -2661,6 +2661,13 @@ check("方向变了：逐字段报", rawKeySpaceDiff(before: gpsSource, after: f
       ["变化 XMP/exif:GPSLatitude: 31,13.761315N → 31,13.7613S", "丢失 XMP/exif:GPSLatitudeRef = N",
        "变化 XMP/exif:GPSLongitude: 121,28.318723E → 121,28.3187E", "丢失 XMP/exif:GPSLongitudeRef = E",
        "变化 {GPS}/LatitudeRef: N → S"])
+// 没有 XMP 那几个键时，方向只能靠 {GPS}/LatitudeRef 看出来（高纬度那组，{GPS}/Latitude 超出容差）。
+let viewOnly = { (view: [String: String]) in view.filter { !$0.key.hasPrefix("XMP/") } }
+var viewFlipped = viewOnly(highLatProduct)
+viewFlipped["{GPS}/LatitudeRef"] = "S"
+check("只有视图键、方向变了：不合成", gpsRounding(before: viewOnly(highLatSource), after: viewFlipped), GPSRounding())
+check("只有视图键、方向没变：合成一行", gpsRounding(before: viewOnly(highLatSource), after: viewOnly(highLatProduct)).issues,
+      ["GPS 精度降低：最大偏差 19 厘米（ImageIO 写入时取整）"])
 var xmpOnlyFlip = gpsProduct
 xmpOnlyFlip["XMP/exif:GPSLatitude"] = "31,13.7613S"
 check("只有 XMP 坐标的方向变了：不合成", gpsRounding(before: gpsSource, after: xmpOnlyFlip), GPSRounding())
