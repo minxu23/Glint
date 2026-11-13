@@ -190,8 +190,8 @@ make install-dev   # 把 Glint.app 放到 ~/Developer
 2026-11-13 用 `git filter-branch` 从 `bc8bcf7` 起的 10 个提交里去掉了误提交的 `Tests/guiraw-test`（1.5 MB）：
 只删了它的那个提交（原 `16a0dcd`）整个消失，其余 9 个换了哈希（原 `bc8bcf7` → `3db17b5`，`4e3fd5a` → `9d878de`，
 `6278474` → `38a0065` 等），代码树与改写前逐字节相同。文档里引用的哈希已改成新的；改写之前写的提交说明里
-可能还引用旧哈希（例如 `c1d6b37` 说明里的 `bc8bcf7`），对照上面这几对看。改写前的历史留在分支
-`backup/before-rewrite`，确认不需要后删掉它再 `git gc`，二进制才真正从仓库里消失。
+可能还引用旧哈希（例如 `c1d6b37` 说明里的 `bc8bcf7`），对照上面这几对看。备份分支和 filter-branch
+留下的 `refs/original` 已删除并 `git gc --prune=now`，二进制已从仓库里彻底消失（`.git` 14 MB → 10 MB）。
 
 ## 注意事项
 
