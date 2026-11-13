@@ -18,32 +18,32 @@ import UniformTypeIdentifiers
 
 // MARK: - 转换选项
 
-struct ConversionOptions: Equatable {
+public struct ConversionOptions: Equatable {
     /// 命令行与界面共用的默认值。一律从这里取，想分叉就必须显式写出来并说明理由
     /// （单测「命令行与界面的默认值」一组守着）。
-    static let `default` = ConversionOptions()
+    public static let `default` = ConversionOptions()
 
-    var quality: Double = 0.8
+    public var quality: Double = 0.8
     /// 输出位置。用 URL 而不是路径字符串：界面本来就持有 URL，命令行解析时
     /// 展开一次 ~ 即可，省得在边界上来回转换。
-    var output: URL?
-    var recursive = false
-    var overwrite = false
-    var deleteOriginal = false
-    var dryRun = false
-    var verbose = false
-    var verify = false
+    public var output: URL?
+    public var recursive = false
+    public var overwrite = false
+    public var deleteOriginal = false
+    public var dryRun = false
+    public var verbose = false
+    public var verify = false
     /// ImageIO 写完 HEIC 后，把产物里的 EXIF 换成源文件 EXIF 段的原始字节（见 carryRawExif）。
     /// 命令行 --no-raw-exif 关掉它；关掉时 EXIF 全由 ImageIO 从属性字典重写。
-    var rawExif = true
+    public var rawExif = true
     /// 把源文件扩展属性里「照片」App 的说明写进产物 XMP 的 dc:description（见 captionPlan）。
     /// 命令行 --embed-caption 打开；界面没有这个开关。
-    var embedCaption = false
-    var jobs = ProcessInfo.processInfo.activeProcessorCount
-    var inputs: [String] = []
+    public var embedCaption = false
+    public var jobs = ProcessInfo.processInfo.activeProcessorCount
+    public var inputs: [String] = []
 
     /// 要删除源文件就必须先校验——否则一旦有元数据丢失，原始信息将无法找回。
-    var verifyEnabled: Bool { verify || deleteOriginal }
+    public var verifyEnabled: Bool { verify || deleteOriginal }
 }
 
 // MARK: - 元数据搬运
@@ -51,7 +51,7 @@ struct ConversionOptions: Equatable {
 /// 把 CGImageSource 的所有属性字典读出来，作为写入 HEIC 时的属性。
 /// 这些字典里就是拍摄时间（Exif/DateTimeOriginal）、位置（GPS）、备注
 /// （Exif/UserComment、TIFF/ImageDescription、IPTC/Caption）等信息。
-func imageProperties(_ src: CGImageSource) -> [CFString: Any] {
+public func imageProperties(_ src: CGImageSource) -> [CFString: Any] {
     var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
     // 容器级属性（文件大小等）里偶尔也带有索引级没有的字典，做一次补齐而不是覆盖。
     if let container = CGImageSourceCopyProperties(src, nil) as? [CFString: Any] {
@@ -248,33 +248,33 @@ func copyFileAttributes(from src: URL, to dst: URL) {
 // MARK: - 转换
 
 /// 一张图转换成功后的全部结果。
-struct ConversionReport {
-    let dest: URL
-    let inBytes: Int
-    let outBytes: Int
+public struct ConversionReport {
+    public let dest: URL
+    public let inBytes: Int
+    public let outBytes: Int
     /// 搬运过去的元数据条目数。
-    let tagCount: Int
+    public let tagCount: Int
     /// 搬运过去的扩展属性条数。
-    let xattrCount: Int
+    public let xattrCount: Int
     /// 元数据校验的结果：没校验、通过、有差异，三者在类型上分开。
-    let verification: Verification
+    public let verification: Verification
     /// EXIF 整块照搬的结果；没开照搬（--no-raw-exif）或预演时是 nil。只在 -v 时显示。
-    let rawExif: RawExifOutcome?
+    public let rawExif: RawExifOutcome?
     /// 产物比原图大而重编过一次时，两遍的大小；没重编是 nil。只在 -v 时显示。
-    let reencode: Reencode?
+    public let reencode: Reencode?
     /// 「照片」的说明写进文件了没有；没开 --embed-caption 或预演时是 nil。只在 -v 时显示。
-    let caption: CaptionOutcome?
+    public let caption: CaptionOutcome?
 
     /// 与元数据差异无关的状态说明：产物比原图大，以及请求了删除源文件却没删的原因
     /// （校验未通过、产物比原图大）。几句用「；」连成一行。没有要说的就是 nil。
-    let note: String?
+    public let note: String?
 
-    var savingPercent: Int? { percentSaved(inBytes: inBytes, outBytes: outBytes) }
+    public var savingPercent: Int? { percentSaved(inBytes: inBytes, outBytes: outBytes) }
 }
 
 /// 一次元数据校验的结果。"没校验"和"校验通过"是两个值，下游只能靠匹配
 /// `.passed` 得出"通过"——没有一个空数组能同时表示这两件事。
-enum Verification: Equatable {
+public enum Verification: Equatable {
     case notVerified
     case passed
     /// 非空。只装元数据差异，别的什么都不要塞：下游（命令行的"发现 N 处差异"、
@@ -286,21 +286,21 @@ enum Verification: Equatable {
         self = differences.isEmpty ? .passed : .differences(differences)
     }
 
-    var hasDifferences: Bool {
+    public var hasDifferences: Bool {
         if case .differences = self { return true }
         return false
     }
 }
 
 /// 产物比原图大时重编一次的经过（见 convert）。
-struct Reencode: Equatable {
+public struct Reencode: Equatable {
     /// 第一遍「编码 + 照搬」得到的产物字节数。
-    let first: Int
+    public let first: Int
     /// 第二遍的字节数；第二遍编码失败是 nil。
-    let second: Int?
+    public let second: Int?
 
     /// -v 时显示的那一行（不含缩进）。
-    var description: String {
+    public var description: String {
         let head = "产物比原图大，重编了一次：\(humanSize(first)) → "
         guard let second else { return head + "重编失败（用了第一份）" }
         let tail = second == first ? "（两次一样大）" : "（用了较小的一份）"
@@ -312,7 +312,7 @@ struct Reencode: Equatable {
 /// 签名与 encodeHEIF 相同。
 typealias HEIFEncoder = (CGImageSource, [CFString: Any], CGImageMetadata?, URL) -> Bool
 
-enum ConvertResult {
+public enum ConvertResult {
     case converted(ConversionReport)
     case skipped(String)
     case failed(String)
@@ -326,9 +326,14 @@ enum ConvertResult {
 /// 用第一份，没用上的那份删掉。只重编这一次。硬件编码器偶尔会把一张图按高得多的质量
 /// 编出来，这一遍能把它换回正常大小的产物。
 ///
-/// `encode` 只供单测注入假的编码步骤；命令行和界面都用默认值 encodeHEIF。
+/// 公开的入口，编码一律用 encodeHEIF。批量转换请用 runConversions：它先统一分配目标路径。
+public func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult {
+    convert(input, opts: opts, dest: dest, encode: encodeHEIF)
+}
+
+/// `encode` 只供单测注入假的编码步骤；命令行和界面都走上面那个公开的入口（encodeHEIF）。
 func convert(_ input: URL, opts: ConversionOptions, dest: URL,
-             encode: HEIFEncoder = encodeHEIF) -> ConvertResult {
+             encode: HEIFEncoder) -> ConvertResult {
     guard let src = CGImageSourceCreateWithURL(input as CFURL, nil) else {
         return .failed("无法读取图像")
     }
@@ -461,7 +466,7 @@ enum CaptionPlan: Equatable {
 }
 
 /// 说明写进文件了没有（-v 那一行）。
-enum CaptionOutcome: Equatable {
+public enum CaptionOutcome: Equatable {
     case written(characters: Int)
     /// 不写，附带原因。
     case skipped(String)
@@ -472,7 +477,7 @@ enum CaptionOutcome: Equatable {
     static let failureIssue = "没能把「照片」的说明写进文件"
 
     /// -v 时显示的那一行（不含缩进）。
-    var description: String {
+    public var description: String {
         switch self {
         case .written(let n): return "「照片」的说明：写进了 XMP 的 dc:description（\(n) 个字符）"
         case .skipped(let why): return "「照片」的说明：没写（\(why)）"
@@ -508,7 +513,7 @@ func captionPlan(source: URL, properties: [CFString: Any], xmp: CGImageMetadata?
 }
 
 /// XMP 里 dc:description 的全部文本（各语言连起来）；没有这个标签是 nil，有标签而没有文本是空串。
-func xmpDescription(_ xmp: CGImageMetadata?) -> String? {
+public func xmpDescription(_ xmp: CGImageMetadata?) -> String? {
     guard let xmp, CGImageMetadataCopyTagWithPath(xmp, nil, "dc:description" as CFString) != nil else { return nil }
     return xmpTags(xmp).filter { $0.key.hasPrefix(xmpKey("dc:description")) }.values.sorted().joined()
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -536,7 +541,7 @@ func embeddedCaption(at url: URL) -> String? {
 // MARK: - EXIF 整块照搬
 
 /// 一张图的 EXIF 照搬了没有。
-enum RawExifOutcome: Equatable {
+public enum RawExifOutcome: Equatable {
     /// 照搬了源文件 EXIF 段里这么多字节的 TIFF；`commentRewritten` 是照搬的块上改写过备注
     /// （见 rewritingUserComment），字节数仍是源 TIFF 的。`keptOriginals` 是与 IPTC 打架、
     /// 照搬后视图显示 EXIF 原值的那几组（自检放行的，见 splitRegressions），按组的固定顺序。
@@ -545,7 +550,7 @@ enum RawExifOutcome: Equatable {
     case kept(String)
 
     /// -v 时显示的那一行（不含缩进）。
-    var description: String {
+    public var description: String {
         switch self {
         case .carried(let bytes, let rewritten, let kept):
             var detail = "\(bytes) 字节"
@@ -649,7 +654,7 @@ func rawExifRegression(source: URL, sourceBytes: [UInt8], intended: [UInt8], bef
 
 /// 产物比源大多少，写成「33%」；不比源大（或缺体积数据）是 nil。不到 1% 的写「不到 1%」，
 /// 免得出现「大 0%」。命令行、界面和批量汇总的「变大」都以这里为准。
-func growthPercent(inBytes: Int, outBytes: Int) -> String? {
+public func growthPercent(inBytes: Int, outBytes: Int) -> String? {
     guard inBytes > 0, outBytes > inBytes else { return nil }
     let pct = Int((Double(outBytes - inBytes) / Double(inBytes) * 100).rounded())
     return pct >= 1 ? "\(pct)%" : "不到 1%"
@@ -754,7 +759,7 @@ func fileSize(_ url: URL) -> Int {
     ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int) ?? 0
 }
 
-func humanSize(_ bytes: Int) -> String {
+public func humanSize(_ bytes: Int) -> String {
     let units = ["B", "KB", "MB", "GB"]
     var v = Double(bytes), i = 0
     while v >= 1024 && i < units.count - 1 { v /= 1024; i += 1 }

@@ -1,6 +1,7 @@
-// glint 命令行入口。转换逻辑全部在 Sources/Core/Converter.swift，
+// glint 命令行入口。转换逻辑全部在 Sources/Eclose/Converter.swift，
 // 这里只负责解析参数和把结果打印出来。
 
+import Eclose
 import Foundation
 
 let usage = """

@@ -1,8 +1,9 @@
-// 界面状态与转换调度。真正的转换逻辑在 Sources/Core/Converter.swift，
+// 界面状态与转换调度。真正的转换逻辑在 Sources/Eclose/Converter.swift，
 // 这里只负责把它接到界面上：展开拖入的路径、跑批、把结果回填到列表。
 //
 // 刻意不依赖任何 UI 框架，状态变化统一通过 onChange 回调通知视图刷新。
 
+import Eclose
 import Foundation
 
 enum OutputMode {
@@ -176,7 +177,7 @@ final class ConversionModel {
     }
 
     /// 换上新的一批：清掉旧的行，按给定的 Job 建行。界面每次从转换面板开始都走这里——
-    /// Job 由调用方算好，带着来源根目录，输出到指定文件夹时 Core 据此镜像子目录。
+    /// Job 由调用方算好，带着来源根目录，输出到指定文件夹时 Eclose 据此镜像子目录。
     /// 转换进行中不换。
     func replaceJobs(_ jobs: [Job]) {
         guard !isRunning else { return }

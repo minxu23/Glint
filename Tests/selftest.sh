@@ -126,7 +126,7 @@ done
 #   清单——只有 Makefile 的 ARTIFACTS 一份。`make -q` 对「文件存在但不属于任何
 #     规则」也退出 0，所以这里抄一份名字、一旦对不上，守卫会静默退化成空跑。
 #   依赖——每个产物依赖哪些源文件只有 Makefile 知道（Tests/fixture 只依赖
-#     自己那一个文件，Tests/probe 还依赖整个 Sources/Core），自己比 mtime 等于
+#     自己那一个文件，Tests/probe 还依赖 Eclose 库，库又依赖整个 Sources/Eclose），自己比 mtime 等于
 #     重写一份依赖表。`make -q` 是只读的问询模式，不执行任何规则，所以从
 #     make test 里反过来调它不会递归。
 # 不吞 stderr：Makefile 真出语法错时，错误本身比「问不到清单」有用得多。

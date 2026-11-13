@@ -10,7 +10,7 @@ import Foundation
 import ImageIO
 
 /// 一组调和字段：一个 IFD0 文字标签和它在视图里的几个键。
-enum ReconciledGroup: CaseIterable, Equatable {
+public enum ReconciledGroup: CaseIterable, Equatable {
     case description, artist, copyright
 
     /// 差异行与 -v 里的中文名。

@@ -53,7 +53,7 @@ func valuesMatch(_ a: String, _ b: String) -> Bool {
 
 /// EXIF 的定长字符串字段用 NUL 补齐，补齐长度在 JPEG 与 HEIC 里天然不同，
 /// 序列化进 XMP 时 NUL 还会变成空格。比较时只看有效内容，不看尾部填充。
-func trimPadding(_ s: String) -> String {
+public func trimPadding(_ s: String) -> String {
     var end = s.endIndex
     while end > s.startIndex {
         let i = s.index(before: end)

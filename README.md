@@ -4,7 +4,7 @@
 相机参数、版权、访达备注与标签、文件时间戳，一样不丢。
 
 提供**图形界面**和**命令行**两种用法，两者共用同一套转换核心
-（[Sources/Core/Converter.swift](Sources/Core/Converter.swift)）。
+（[Sources/Eclose/Converter.swift](Sources/Eclose/Converter.swift)）。
 
 macOS 原生实现（Swift + ImageIO + AppKit），**零依赖**：不需要 ImageMagick、
 libheif、exiftool 或 Python 包，也不需要安装完整的 Xcode——命令行工具即可构建。
@@ -400,7 +400,7 @@ XMP：批量并发转换时，两个文件用同一个前缀指不同的命名�
     （结构本身）；Interop 里的 `InteroperabilityIndex`、`InteroperabilityVersion`（说明
     EXIF 按哪套互通规则存放，HEIF 产物里 ImageIO 不写 Interop IFD）；Windows 写的
     `Padding`（`0xEA1C`）和 `OffsetSchema`（`0xEA1D`，为日后原地改写 EXIF 留的填充块与
-    偏移修正值）。清单写在 [`structuralExifTags`](Sources/Core/RawExifTags.swift)。
+    偏移修正值）。清单写在 [`structuralExifTags`](Sources/Eclose/RawExifTags.swift)。
   - **没有数据的条目**：长度 0；ASCII/UNDEFINED 的值只含 NUL 和空格；`UserComment` 带着
     合规的 8 字节字符集头、去掉头之后只含 NUL 和空格。数值型的 0 算数据（`LightSource`
     0 是「未知光源」，照报）。
@@ -551,7 +551,7 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   文件）、`com.apple.ResourceFork`（资源分支）、`com.apple.provenance`（来源标记，由系统管：
   每个新建文件都会被自动加上，值由创建它的进程决定，`setxattr` 返回成功但写不进去；源由别的
   App 创建时产物上的值必然不同，核对它只会误报）。拷贝和核对用的是同一份清单
-  （[`skippedXattrs`](Sources/Core/Converter.swift)）。除此之外，实测没有哪个扩展属性会在
+  （[`skippedXattrs`](Sources/Eclose/Converter.swift)）。除此之外，实测没有哪个扩展属性会在
   转换后被系统改写：`FinderInfo`、`lastuseddate#PS`、`macl`、`kMDItemWhereFroms` 等都原样
   拷过去。
 - 产物上多出来的属性不报。
@@ -742,7 +742,7 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
 - **（系统重写时）非 ASCII 的 EXIF `UserComment` 在产物里多占一倍空间**。ImageIO 的 HEIC 写入器
   对含非 ASCII 的备注只写进前一半（按 UTF-16 单元算），ASCII 打头的还会被整条当成
   ASCII 写、非 ASCII 字符全变成 `?`。本工具写之前把这类备注改写一次（见
-  [`userCommentForHEIFWriter`](Sources/Core/Converter.swift)）：在前面加一个 BOM（已经有
+  [`userCommentForHEIFWriter`](Sources/Eclose/Converter.swift)）：在前面加一个 BOM（已经有
   就不加），再补上与（BOM 加文本）等长的 NUL。BOM 一律要加：首字符是 ASCII 时它让写入器
   选 `UNICODE` 头；写入器写的是大端 UTF-16，没有 BOM 时 exiftool 等别的读取器得自己猜字节序，
   纯中文的备注会被猜成小端、读成乱码（ImageIO 自己读得对）。产物里的备注与源逐字相同，
@@ -753,7 +753,7 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   标识开头（`ASCII\0\0\0` / `UNICODE\0` / `JIS…` / 全零），但不少安卓机型直接写
   裸 UTF-8，ImageIO 认不出这种写法，当作字段不存在；`ASCII` 头里装着 UTF-8 中文的，
   ImageIO 按 Latin-1 读成一串乱码（`è¥¿æ¹…`）。本工具因此自己解析 EXIF 段里 `0x9286`
-  的原始字节（见 [`readUserComment`](Sources/Core/ExifReader.swift)），读出来的分两种：
+  的原始字节（见 [`readUserComment`](Sources/Eclose/ExifReader.swift)），读出来的分两种：
   - **可靠的文本**：`UNICODE` 头（有 BOM 认 BOM，没有就大端、小端各解一遍取更像文本的）；
     `JIS` 头且 Shift-JIS 解得出；`ASCII` 头、全零头、没有头，且字节全是 ASCII 或是合法的 UTF-8。
   - **猜的**：`ASCII` 头、全零头、没有头而字节含高位又不是合法 UTF-8 的（GBK、Latin-1 写的
@@ -822,19 +822,25 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 
 ## 目录结构
 
+`Sources/Eclose/` 是格式转换模块 **eclose**（羽化），编成真正的 Swift 模块 `Eclose`（静态库加
+`.swiftmodule`，构建产物在 `build/` 下）。命令行和应用都 `import Eclose`，只用得到它公开的那一小块：
+转换选项、转换入口与批处理、转换结果与校验结果、界面读备注的几个函数和 `humanSize` 这类小工具；
+其余规则保持模块内部，测试工具用 `@testable import Eclose` 直接断言它们。
+
 | 路径 | 说明 |
 | --- | --- |
-| `Sources/Core/Converter.swift` | 单张图的转换：读元数据、编码 HEIF、搬运文件层属性、把「照片」的说明写进 XMP |
-| `Sources/Core/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
-| `Sources/Core/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
-| `Sources/Core/ExifReader.swift` | 手写 EXIF 解析：按原始字节读 `UserComment`（分可靠的文本与猜的），按标签读原始值 |
-| `Sources/Core/ExifText.swift` | 说明、作者、版权三组调和字段：EXIF 原文的读法、照搬自检的放行、打架合成一行、原文核对 |
-| `Sources/Core/HEIFExif.swift` | 从 HEIF 的 `meta` 盒子里取出 Exif 项的原始 TIFF，供原始 EXIF 清点读产物一侧；`iloc` 的逐项读取 |
-| `Sources/Core/RawExifCarry.swift` | EXIF 整块照搬的闸门与改写（纯函数：进产物字节与源 EXIF，出新字节或不换的原因），以及照搬块上的备注改写与校验认改写的规则 |
-| `Sources/Core/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）、GPS 原始分数比对、`ImageUniqueID` 的补写规则与按原始字节比值，含不报清单 |
-| `Sources/Core/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）、MPF 索引与尾部记账、APP13 里的 Photoshop 资源 |
-| `Sources/Core/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
-| `Sources/Core/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
+| `Sources/Eclose/Converter.swift` | 单张图的转换：读元数据、编码 HEIF、搬运文件层属性、把「照片」的说明写进 XMP |
+| `Sources/Eclose/Batch.swift` | 批量编排：扫描输入、分配目标路径（含重名避让）、并发调度 |
+| `Sources/Eclose/MetadataDiff.swift` | `--verify` 的比对规则：什么算真丢失、什么只是重编码噪声 |
+| `Sources/Eclose/ExifReader.swift` | 手写 EXIF 解析：按原始字节读 `UserComment`（分可靠的文本与猜的），按标签读原始值 |
+| `Sources/Eclose/ExifText.swift` | 说明、作者、版权三组调和字段：EXIF 原文的读法、照搬自检的放行、打架合成一行、原文核对 |
+| `Sources/Eclose/HEIFExif.swift` | 从 HEIF 的 `meta` 盒子里取出 Exif 项的原始 TIFF，供原始 EXIF 清点读产物一侧；`iloc` 的逐项读取 |
+| `Sources/Eclose/RawExifCarry.swift` | EXIF 整块照搬的闸门与改写（纯函数：进产物字节与源 EXIF，出新字节或不换的原因），以及照搬块上的备注改写与校验认改写的规则 |
+| `Sources/Eclose/RawExifTags.swift` | 原始 EXIF 标签清点（源里有、产物里没有的标签）、GPS 原始分数比对、`ImageUniqueID` 的补写规则与按原始字节比值，含不报清单 |
+| `Sources/Eclose/JPEGLayout.swift` | JPEG 段结构，以及 ImageIO 搬不走的段（COM、未知 APPn、EOI 之后）、MPF 索引与尾部记账、APP13 里的 Photoshop 资源 |
+| `Sources/Eclose/RawTimes.swift` | 源文件里 EXIF、IIM、XMP 时间字段的原始值，供 `--verify` 当源侧真相 |
+| `Sources/Eclose/WindowsTags.swift` | IFD0 里 ImageIO 不读的 Windows XP 标签和评级，及其在目标里的等价字段 |
+| `Sources/Eclose/PhotoNotes.swift` | 界面信息栏读备注用的几条规则（「照片」的说明、访达备注、EXIF 备注该显示什么、说明能不能写进文件），只公开结果 |
 | `Sources/CLI/Arguments.swift` | 命令行参数解析（纯函数，可被测试直接调用） |
 | `Sources/CLI/main.swift` | 命令行入口：串起解析、转换与输出 |
 | `Sources/GUI/AppName.swift` | 应用的名字（与 `Makefile` 的 `APP_NAME` 一起，改名只动这两处） |

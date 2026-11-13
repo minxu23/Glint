@@ -2,6 +2,7 @@
 //
 // 都是纯计算，不依赖 AppKit，由 Tests/guimodel 直接测。记录只在本次运行里有，不存盘。
 
+import Eclose
 import Foundation
 
 // MARK: - 转换的对象
@@ -197,7 +198,7 @@ struct ConversionRecord {
         rows.contains { $0.dest.map(ConversionRecord.key) == path }
     }
 
-    /// 源文件按 Core 的规则被删掉了：勾了删除、校验无差异、产物不比源大。
+    /// 源文件按 Eclose 的规则被删掉了：勾了删除、校验无差异、产物不比源大。
     func sourceDeleted(_ row: FileRow) -> Bool {
         guard deleteRequested, row.status == .done, row.verification == .passed else { return false }
         return growthPercent(inBytes: row.inBytes, outBytes: row.outBytes) == nil

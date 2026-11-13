@@ -6,11 +6,11 @@ import Foundation
 
 // MARK: - 收集输入文件
 
-let jpegExtensions: Set<String> = ["jpg", "jpeg", "jpe", "jfif", "jif"]
+public let jpegExtensions: Set<String> = ["jpg", "jpeg", "jpe", "jfif", "jif"]
 
 /// `url` 相对于 `base` 的路径；不在 `base` 之下就返回 nil。
 /// 扫描输入和显示进度行都要做这件事，别各写一遍补斜杠的逻辑。
-func relativePath(of url: URL, under base: URL) -> String? {
+public func relativePath(of url: URL, under base: URL) -> String? {
     let basePath = base.standardizedFileURL.path
     let prefix = basePath.hasSuffix("/") ? basePath : basePath + "/"
     let path = url.standardizedFileURL.path
@@ -20,17 +20,23 @@ func relativePath(of url: URL, under base: URL) -> String? {
 
 /// 一个待转换的文件。`relative` 是它相对于命令行给出的那个目录的路径，
 /// 用 -o 输出到别处时据此镜像原有的子目录结构，避免同名文件互相覆盖。
-struct Job {
-    let input: URL
-    let relative: String
+public struct Job {
+    public let input: URL
+    public let relative: String
     /// 命令行/拖拽给出的那个目录；直接点名的单个文件没有根，为 nil。
     /// 多个根撞名时用它的名字做区分（见 assignDestinations）。
-    let root: URL?
+    public let root: URL?
+
+    public init(input: URL, relative: String, root: URL?) {
+        self.input = input
+        self.relative = relative
+        self.root = root
+    }
 }
 
 /// 扫描命令行/拖拽进来的路径，展开成待转换文件列表。
 /// 警告随返回值一起交出去，由调用方决定怎么呈现（终端 stderr 或界面提示）。
-func collectInputs(_ opts: ConversionOptions) -> (jobs: [Job], warnings: [String]) {
+public func collectInputs(_ opts: ConversionOptions) -> (jobs: [Job], warnings: [String]) {
     let fm = FileManager.default
     var out: [Job] = []
     var warnings: [String] = []
@@ -80,7 +86,7 @@ func collectInputs(_ opts: ConversionOptions) -> (jobs: [Job], warnings: [String
 /// 用 enum 而不是两个 Optional 字段：三种去向互斥，`directory` 和 `singleFile`
 /// 同时为 nil 才代表"源文件旁边"，这种编码要靠一个 static 别名才读得懂，
 /// 而且允许出现两个都有值的无意义状态。
-enum OutputPlan {
+public enum OutputPlan {
     /// 产物放在每个源文件旁边。
     case sameFolder
     /// 全部产物放进这个目录，并在其中镜像源的子目录层级。
@@ -89,7 +95,7 @@ enum OutputPlan {
     case singleFile(URL)
 
     /// 输出根目录；只在 `.directory` 时有值。命令行用它把进度行显示成相对路径。
-    var directory: URL? {
+    public var directory: URL? {
         if case .directory(let url) = self { return url }
         return nil
     }
@@ -107,7 +113,7 @@ enum OutputPlan {
     ///   - createDirectories: 是否现在就把输出目录建出来。提前建是为了让「路径不可写」
     ///     一次性报出来，而不是让一批 800 张的任务逐张失败。预演要传 false——
     ///     `--dry-run` 什么都不该往磁盘上写，哪怕只是一个空目录。
-    static func resolve(output: URL?, fileCount: Int,
+    public static func resolve(output: URL?, fileCount: Int,
                         createDirectories: Bool = true) throws -> OutputPlan {
         guard let url = output else { return .sameFolder }
         var isDir: ObjCBool = false
@@ -262,18 +268,19 @@ func assignDestinations(_ jobs: [Job], plan: OutputPlan,
 // MARK: - 批量执行
 
 /// 供界面上的"取消"使用。已经开始的那一张会转完，之后的不再启动。
-final class CancellationToken {
+public final class CancellationToken {
     private let lock = NSLock()
     private var cancelled = false
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    public init() {}
+    public var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    public func cancel() { lock.lock(); cancelled = true; lock.unlock() }
 }
 
 /// 并发转换整批文件，每转完一个就回调一次（回调已串行化，可直接累加统计）。
 /// 本函数会阻塞到全部结束，界面端请在后台队列调用。
 /// 返回重名避让的说明，调用方负责呈现。
 @discardableResult
-func runConversions(_ jobs: [Job], opts: ConversionOptions, plan: OutputPlan,
+public func runConversions(_ jobs: [Job], opts: ConversionOptions, plan: OutputPlan,
                     cancellation: CancellationToken? = nil,
                     onStart: ((Job) -> Void)? = nil,
                     onResult: @escaping (Job, ConvertResult) -> Void) -> [String] {
@@ -309,23 +316,25 @@ func runConversions(_ jobs: [Job], opts: ConversionOptions, plan: OutputPlan,
 
 /// 节省比例。命令行和界面共用这一个定义。
 /// 返回 nil 表示无从计算（缺少体积数据）；负数表示产物反而更大。
-func percentSaved(inBytes: Int, outBytes: Int) -> Int? {
+public func percentSaved(inBytes: Int, outBytes: Int) -> Int? {
     guard inBytes > 0, outBytes > 0 else { return nil }
     return Int(round((1 - Double(outBytes) / Double(inBytes)) * 100))
 }
 
 /// 一批转换的计数与体积。命令行和界面从不同来源填它（一个随回调累加，
 /// 一个从列表行汇总），但"汇总句子里哪些从句该出现"这条规则只写一遍。
-struct BatchTally {
-    var converted = 0
-    var skipped = 0
-    var failed = 0
-    var flagged = 0          // 转换成功但元数据有差异
-    var grew = 0             // 转换成功但产物比原图大（判据见 growthPercent）
-    var inBytes = 0
-    var outBytes = 0
+public struct BatchTally {
+    public var converted = 0
+    public var skipped = 0
+    public var failed = 0
+    public var flagged = 0          // 转换成功但元数据有差异
+    public var grew = 0             // 转换成功但产物比原图大（判据见 growthPercent）
+    public var inBytes = 0
+    public var outBytes = 0
 
-    mutating func record(_ result: ConvertResult) {
+    public init() {}
+
+    public mutating func record(_ result: ConvertResult) {
         switch result {
         case .converted(let r):
             recordConverted(inBytes: r.inBytes, outBytes: r.outBytes,
@@ -338,7 +347,7 @@ struct BatchTally {
     }
 
     /// 界面的计数来自列表行而不是回调，拿不到 ConvertResult，但记账规则是同一套。
-    mutating func recordConverted(inBytes bytes: Int, outBytes out: Int, hasIssues: Bool) {
+    public mutating func recordConverted(inBytes bytes: Int, outBytes out: Int, hasIssues: Bool) {
         converted += 1
         inBytes += bytes
         outBytes += out
@@ -347,7 +356,7 @@ struct BatchTally {
     }
 
     /// - Parameter unit: 量词。命令行说"个"，界面说"张"。
-    func summary(unit: String) -> String {
+    public func summary(unit: String) -> String {
         var parts = ["完成 \(converted) \(unit)"]
         if skipped > 0 { parts.append("跳过 \(skipped) \(unit)") }
         if failed > 0 { parts.append("失败 \(failed) \(unit)") }

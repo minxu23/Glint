@@ -2,6 +2,7 @@
 // 这块规则很容易在两个方向上出错——太严就刷出一堆假差异，太松就把真的丢失藏起来，
 // 所以正反两类用例都要有。
 
+@testable import Eclose
 import Foundation
 import ImageIO
 

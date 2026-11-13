@@ -3,6 +3,7 @@
 // 单独成文件、不碰 CommandLine 也不 exit()，是为了能链进测试里直接调用：
 // "命令行与界面默认值是否一致"这类断言要真的解析一遍命令行。
 
+import Eclose
 import Foundation
 
 enum ArgumentError: Error, LocalizedError {

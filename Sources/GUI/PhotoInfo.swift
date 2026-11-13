@@ -4,6 +4,7 @@
 // 读取（PhotoInfo.read）会碰磁盘，只在后台队列上调用（函数开头有 dispatchPrecondition）；
 // 这里的其余部分都是纯函数。
 
+import Eclose
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -11,7 +12,7 @@ import UniformTypeIdentifiers
 // MARK: - 格式
 
 /// 界面上说的「格式」。按扩展名定：列文件那一步要快，不打开文件。
-/// 内容与扩展名不符的（改了扩展名的 HEIC）转换时由 Core 跳过并说明原因。
+/// 内容与扩展名不符的（改了扩展名的 HEIC）转换时由 Eclose 跳过并说明原因。
 enum ImageFormat: Hashable {
     case jpeg, heif
     case other(String)
@@ -178,20 +179,6 @@ func mergeNotes(_ found: [(NoteOrigin, String)]) -> [Note] {
     return notes
 }
 
-/// EXIF 备注该显示什么。`seenByImageIO` 是 ImageIO 视图里的 UserComment，`reading` 是 Core 自己
-/// 解析原始字节（readUserComment）的结果。
-/// - Core 的修补规则（SourceUserComment.toRepair，与转换、校验同一把尺子）要修补时，用修补出的文本；
-/// - 原始字节解出来只是猜的（不是合法的 UTF-8 等）：不显示——ImageIO 视图里那串是乱码；
-/// - 否则用 ImageIO 视图里的值。
-func displayedUserComment(seenByImageIO: String?, reading: UserCommentReading) -> String? {
-    let source = SourceUserComment(seenByImageIO: seenByImageIO, reading: reading)
-    if let repaired = source.toRepair { return repaired }
-    if case .guessed = reading { return nil }
-    guard let seen = seenByImageIO else { return nil }
-    let text = normalizedUserComment(seen)
-    return text.isEmpty ? nil : text
-}
-
 // MARK: - 一张图的信息
 
 struct PhotoInfo: Equatable {
@@ -209,7 +196,7 @@ struct PhotoInfo: Equatable {
     var location: GeoPoint?
     var notes: [Note] = []
     /// 「照片」的说明在、而文件里没有说明字段——勾「把备注写进文件」能写进去的那种
-    /// （判定直接用 Core 的 captionPlan，与转换时同一把尺子）。只对 JPEG 有意义。
+    /// （判定用 Eclose 的 captionCanBeEmbedded，与转换时同一把尺子）。只对 JPEG 有意义。
     var captionOutsideOnly = false
 
     var hasNotes: Bool { !notes.isEmpty }
@@ -250,7 +237,7 @@ func trimmedNumber(_ v: Double, decimals: Int) -> String {
 }
 
 /// 界面上的文件大小：`3.3 MB`、`989 KB`、`612 MB`。十以下留一位小数，其余取整；
-/// 进位与 Core 的 humanSize 相同（1024）。
+/// 进位与 Eclose 的 humanSize 相同（1024）。
 func shortSize(_ bytes: Int) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"]
     var v = Double(bytes), i = 0
@@ -262,26 +249,14 @@ func shortSize(_ bytes: Int) -> String {
 
 // MARK: - 从文件读
 
-/// 访达备注所在的扩展属性。
-let finderCommentXattr = "com.apple.metadata:kMDItemFinderComment"
-
-/// 读 EXIF 备注原始字节时只读文件开头这么多：EXIF 的 APP1 段不超过 64 KB，前面通常只有
-/// 一个很短的 APP0。段落在这个范围之外时 JPEGLayout 解析不出它，结果是 `.absent`，
-/// 显示退回 ImageIO 视图里的值。
-let userCommentPrefixBytes = 192 * 1024
-
 extension PhotoInfo {
     /// 读一张图的信息。会打开文件，只能在后台调用。读不出图像时只有扩展属性里的备注。
     static func read(_ url: URL) -> PhotoInfo {
         dispatchPrecondition(condition: .notOnQueue(.main))
         var info = PhotoInfo()
         var found: [(NoteOrigin, String)] = []
-        if let raw = extendedAttributeValue(url.path, photosCaptionXattr), let s = String(validatingUTF8Bytes: raw) {
-            found.append((.photos, s))
-        }
-        if let raw = extendedAttributeValue(url.path, finderCommentXattr), let s = plistValue(raw) as? String {
-            found.append((.finder, s))
-        }
+        if let s = photosCaption(of: url) { found.append((.photos, s)) }
+        if let s = finderComment(of: url) { found.append((.finder, s)) }
         let options = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let src = CGImageSourceCreateWithURL(url as CFURL, options), CGImageSourceGetCount(src) > 0 else {
             info.notes = mergeNotes(found)
@@ -289,7 +264,6 @@ extension PhotoInfo {
         }
         let props = imageProperties(src)
         let index = (CGImageSourceCopyPropertiesAtIndex(src, 0, options) as? [CFString: Any]) ?? [:]
-        let isJPEG = (CGImageSourceGetType(src) as String?) == UTType.jpeg.identifier
         let exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         let tiff = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
         let iptc = (props[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
@@ -337,22 +311,9 @@ extension PhotoInfo {
                       text(tiff[kCGImagePropertyTIFFImageDescription])] {
             if let value { found.append((.fileDescription, value)) }
         }
-        let reading: UserCommentReading = isJPEG ? rawExifUserComment(in: filePrefix(url, userCommentPrefixBytes)) : .absent
-        if let comment = displayedUserComment(seenByImageIO: exif[kCGImagePropertyExifUserComment] as? String,
-                                              reading: reading) {
-            found.append((.exifComment, comment))
-        }
+        if let comment = displayedExifComment(of: url, image: src) { found.append((.exifComment, comment)) }
         info.notes = mergeNotes(found)
-        if isJPEG, case .write = captionPlan(source: url, properties: props, xmp: xmp) {
-            info.captionOutsideOnly = true
-        }
+        info.captionOutsideOnly = captionCanBeEmbedded(url, image: src)
         return info
     }
-}
-
-/// 文件开头的至多 `count` 个字节；读不出是空数组。
-func filePrefix(_ url: URL, _ count: Int) -> [UInt8] {
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
-    defer { try? handle.close() }
-    return [UInt8]((try? handle.read(upToCount: count)) ?? Data())
 }

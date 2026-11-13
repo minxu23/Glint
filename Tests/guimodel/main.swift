@@ -7,6 +7,7 @@
 //
 // 用法: guimodel <工作目录>   目录里需要已有若干 .jpg
 
+@testable import Eclose
 import Foundation
 
 

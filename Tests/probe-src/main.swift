@@ -7,11 +7,12 @@
 // 「ImageIO 读不出这种写法」，用默认模式问就会读到修补后的值，前提自然不成立。
 // 两种模式走的是同一个 metadataKeySpace，差别只有那一个布尔量。
 //
-// 键空间用的是 Core 里 --verify 同一个 metadataKeySpace，不另写一份：校验探针
+// 键空间用的是 Eclose 里 --verify 同一个 metadataKeySpace，不另写一份：校验探针
 // 和校验本身对"有哪些键、键路径长什么样"的理解必须一致，否则断言的是另一回事。
 // 自己拼一份最容易漏掉 XMP 那一层，漏了就对每个 `XMP/...` 查询都答「无」，
 // 不报错、不提示，看上去就像"这张图里没有这个字段"。
 
+@testable import Eclose
 import Foundation
 import ImageIO
 

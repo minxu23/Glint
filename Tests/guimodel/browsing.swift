@@ -1,6 +1,7 @@
 // 界面模型测试的第二部分：图库、条目信息、转换的对象、转换记录、设置（规格第 11 节各块）。
 // 由 main.swift 调用；样本都在这里用 ImageIO 和 setxattr 现造，不依赖外部脚本。
 
+@testable import Eclose
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -217,7 +218,7 @@ func testNotesRules() {
     check("文件里的说明和 EXIF 备注同值：存在文件里",
           mergeNotes([(.fileDescription, "一样"), (.exifComment, "一样")]).first?.placeText, "存在文件里")
 
-    print("备注：EXIF 备注用 Core 的读法")
+    print("备注：EXIF 备注用 Eclose 的读法")
     check("ImageIO 读不出、原始字节是可靠的文本：用原始字节",
           displayedUserComment(seenByImageIO: nil, reading: .reliable("无头的备注", header: .none)), "无头的备注")
     check("原始字节只能猜：不显示",
@@ -268,7 +269,7 @@ func testNotesOnDisk(_ dir: URL) {
     check("EXIF 备注读到了", exifInfo.notes.map(\.text), ["note from the camera"])
     check("EXIF 备注：存在文件里（EXIF 备注）", exifInfo.notes.first?.placeText, "存在文件里（EXIF 备注）")
 
-    // 不写字符集头的裸 UTF-8（部分安卓机这么写）：ImageIO 读不出，要用 Core 的原始字节读法。
+    // 不写字符集头的裸 UTF-8（部分安卓机这么写）：ImageIO 读不出，要用 Eclose 的原始字节读法。
     let headless = dir.appendingPathComponent("无头备注.jpg")
     writeImage(headless, properties: [kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: String(repeating: "x", count: 24)]])
     var patched = false

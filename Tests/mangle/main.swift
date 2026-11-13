@@ -58,6 +58,7 @@
 //       或 4:4:4，要「4:2:2 且带辅助图」的样本只能拿 4:2:2 的照片这样接。
 
 import CoreGraphics
+@testable import Eclose
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers

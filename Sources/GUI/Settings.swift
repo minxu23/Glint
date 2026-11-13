@@ -3,6 +3,7 @@
 // 存储可以注入（应用里是 UserDefaults，测试里是字典），好测「删除源文件」「覆盖同名的 HEIF」
 // 不被记住。不依赖 AppKit。
 
+import Eclose
 import Foundation
 
 /// 键值存储。
