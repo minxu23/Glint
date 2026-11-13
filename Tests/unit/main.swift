@@ -2574,6 +2574,138 @@ if case .skipped(let why) = tinyResult {
 }
 try? FileManager.default.removeItem(at: versionRoot)
 
+print("RAW 的校验：结构字段白名单，只放实测过的")
+for key in ["{raw}/CropSize/Width", "{raw}/SensorSize/Height", "{raw}/Thumbnails[0]/Width", "{DNG}/ColorMatrix1[3]",
+            "{DNG}/DNGVersion[0]", "{DNG}/UniqueCameraModel", "{Exif}/CFAPattern[2]", "{TIFF}/BitsPerPixel[0]",
+            "{TIFF}/Width", "{TIFF}/Height", "XMP/tiff:Compression"] {
+    checkRule(key, isRawStructuralKey(key), true, "结构字段不比")
+}
+for key in ["{Raw}/CropSize/Width", "{DNGPrivate}/X", "{GPS}/Latitude", "{GPS}/GPSVersion", "{Exif}/ExifVersion",
+            "{Exif}/CameraOwnerName", "{Exif}/CFAPatternX", "{TIFF}/Model", "{TIFF}/WidthX", "{TIFF}/Orientation",
+            "{MakerCanon}/AFInfo[0]", "XMP/tiff:Compressions", "XMP/exif:GPSLatitude", "XMP/tiff:ImageWidth"] {
+    checkRule(key, isRawStructuralKey(key), false, "白名单外的字段照比")
+}
+
+print("RAW 的校验：版本号按规范写法比，按源的原值")
+let cr3Version = ["{Exif}/ExifVersion[0]": "48", "{Exif}/ExifVersion[1]": "50", "{Exif}/ExifVersion[2]": "51",
+                  "{Exif}/ExifVersion[3]": "49", "{Exif}/FlashPixVersion[0]": "48", "{Exif}/FlashPixVersion[1]": "49",
+                  "{Exif}/FlashPixVersion[2]": "48", "{Exif}/FlashPixVersion[3]": "48",
+                  "{GPS}/GPSVersion[0]": "2", "{GPS}/GPSVersion[1]": "3", "{GPS}/GPSVersion[2]": "0", "{GPS}/GPSVersion[3]": "0"]
+check("规范化：三个字段各合成一个键", collapsingVersions(cr3Version),
+      ["{Exif}/ExifVersion": "0231", "{Exif}/FlashPixVersion": "0100", "{GPS}/GPSVersion": "2.3.0.0"])
+let fixedVersion = ["{Exif}/ExifVersion[0]": "2", "{Exif}/ExifVersion[1]": "3", "{Exif}/ExifVersion[2]": "1",
+                    "{Exif}/FlashPixVersion[0]": "1", "{Exif}/FlashPixVersion[1]": "0",
+                    "{GPS}/GPSVersion[0]": "2", "{GPS}/GPSVersion[1]": "3", "{GPS}/GPSVersion[2]": "0", "{GPS}/GPSVersion[3]": "0"]
+check("修整好的产物：与字符码的源等价，不报", rawKeySpaceDiff(before: cr3Version, after: fixedVersion), [])
+let brokenVersion = ["{Exif}/ExifVersion[0]": "48", "{Exif}/ExifVersion[1]": "0", "{Exif}/ExifVersion[2]": "1",
+                     "{Exif}/FlashPixVersion[0]": "48", "{Exif}/FlashPixVersion[1]": "9", "{Exif}/FlashPixVersion[2]": "8"]
+check("修整没修好：照报（写坏的、写丢的）", rawKeySpaceDiff(before: cr3Version, after: brokenVersion),
+      ["变化 {Exif}/ExifVersion: 0231 → 4801", "变化 {Exif}/FlashPixVersion: 0100 → 4898", "丢失 {GPS}/GPSVersion = 2.3.0.0"])
+check("空字符串的 CameraOwnerName 丢了照报",
+      rawKeySpaceDiff(before: ["{Exif}/CameraOwnerName": "", "{TIFF}/Model": "EOS R5"], after: ["{TIFF}/Model": "EOS R5"]),
+      ["丢失 {Exif}/CameraOwnerName = "])
+check("结构字段之外的丢失照报，MakerNote 照旧一行",
+      rawKeySpaceDiff(before: ["{DNG}/BlackLevel[0]": "0", "{raw}/CropSize/Width": "256", "{Exif}/CFAPattern[0]": "0",
+                               "{Exif}/LensModel": "RF50mm", "{MakerCanon}/AFInfo[0]": "1"], after: [:]),
+      ["丢失 {Exif}/LensModel = RF50mm",
+       "丢失 厂商私有数据 MakerNote（1 项：{MakerCanon} 1 项）——ImageIO 读不出原始 MakerNote，也无法把它写入 HEIF"])
+check("顶层 Orientation 不在键空间里报（rawProductIssues 核对）",
+      rawKeySpaceDiff(before: ["Orientation": "6", "{TIFF}/Orientation": "6"], after: ["Orientation": "1", "{TIFF}/Orientation": "1"]),
+      ["变化 {TIFF}/Orientation: 6 → 1"])
+
+print("RAW 的校验：GPS 只差在取整范围内时合成一行")
+// 夹具 DNG 转出来的真实值：{GPS} 的差在数值容差以内，XMP 的分被取整到 4 位、方向键丢了。
+let gpsSource = ["{GPS}/Latitude": "31.22935525", "{GPS}/LatitudeRef": "N",
+                 "{GPS}/Longitude": "121.4719787166667", "{GPS}/LongitudeRef": "E",
+                 "XMP/exif:GPSLatitude": "31,13.761315N", "XMP/exif:GPSLatitudeRef": "N",
+                 "XMP/exif:GPSLongitude": "121,28.318723E", "XMP/exif:GPSLongitudeRef": "E", "{TIFF}/Model": "TestCamera"]
+let gpsProduct = ["{GPS}/Latitude": "31.229355", "{GPS}/LatitudeRef": "N",
+                  "{GPS}/Longitude": "121.4719783333333", "{GPS}/LongitudeRef": "E",
+                  "XMP/exif:GPSLatitude": "31,13.7613N", "XMP/exif:GPSLongitude": "121,28.3187E", "{TIFF}/Model": "TestCamera"]
+let rounding = "GPS 精度降低：最大偏差 4 厘米（ImageIO 写入时取整）"
+check("夹具那样的取整：合成一行", rawKeySpaceDiff(before: gpsSource, after: gpsProduct), [rounding])
+check("盖住的是 XMP 的四个键", gpsRounding(before: gpsSource, after: gpsProduct).covered,
+      ["XMP/exif:GPSLatitude", "XMP/exif:GPSLatitudeRef", "XMP/exif:GPSLongitude", "XMP/exif:GPSLongitudeRef"])
+check("坐标没变就没有这一行", rawKeySpaceDiff(before: gpsProduct, after: gpsProduct), [])
+// 高纬度的 CR3 那样：{GPS}/Latitude 在第 6–7 位小数变了，超出数值容差，也合进这一行。
+var highLatSource = gpsSource, highLatProduct = gpsProduct
+highLatSource["{GPS}/Latitude"] = "69.194085"; highLatProduct["{GPS}/Latitude"] = "69.1940867"
+highLatSource["XMP/exif:GPSLatitude"] = "69,11.645100N"; highLatProduct["XMP/exif:GPSLatitude"] = "69,11.6452N"
+check("视图键超出容差的取整也合进这一行（最大偏差 19 厘米）", rawKeySpaceDiff(before: highLatSource, after: highLatProduct),
+      ["GPS 精度降低：最大偏差 19 厘米（ImageIO 写入时取整）"])
+check("{GPS}/Latitude 也被盖住", gpsRounding(before: highLatSource, after: highLatProduct).covered.contains("{GPS}/Latitude"), true)
+var tiny = gpsProduct
+tiny["XMP/exif:GPSLatitude"] = "31,13.76130002N"
+check("不到 1 厘米", gpsRounding(before: tiny, after: gpsProduct).issues, ["GPS 精度降低：最大偏差 不到 1 厘米（ImageIO 写入时取整）"])
+/// 产物的纬度换成源的纬度挪 `degrees` 度（{GPS} 与 XMP 一起挪），看还合不合成一行。
+func shiftedLatitude(_ degrees: Double) -> [String: String] {
+    var p = gpsProduct
+    p["{GPS}/Latitude"] = String(31.22935525 + degrees)
+    p["XMP/exif:GPSLatitude"] = String(format: "31,%.8fN", 13.761315 + degrees * 60)
+    return p
+}
+check("挪 0.5 米：合成一行", gpsRounding(before: gpsSource, after: shiftedLatitude(0.5 / 111_000)).issues,
+      ["GPS 精度降低：最大偏差 50 厘米（ImageIO 写入时取整）"])
+for (meters, label) in [(1.5, "1.5 米"), (2.0, "2 米"), (1110.0, "0.01°")] {
+    let moved = shiftedLatitude(meters / 111_000)
+    check("坐标真改了（\(label)）：不合成，逐字段报", gpsRounding(before: gpsSource, after: moved), GPSRounding())
+    check("坐标真改了（\(label)）：差异行里有 XMP 的纬度",
+          rawKeySpaceDiff(before: gpsSource, after: moved).contains { $0.hasPrefix("变化 XMP/exif:GPSLatitude:") }, true)
+}
+check("坐标真改了（0.01°）：{GPS}/Latitude 逐字段报",
+      rawKeySpaceDiff(before: gpsSource, after: shiftedLatitude(0.01)).contains { $0.hasPrefix("变化 {GPS}/Latitude:") }, true)
+var flipped = gpsProduct
+flipped["{GPS}/LatitudeRef"] = "S"; flipped["XMP/exif:GPSLatitude"] = "31,13.7613S"
+check("方向变了：不合成", gpsRounding(before: gpsSource, after: flipped), GPSRounding())
+check("方向变了：逐字段报", rawKeySpaceDiff(before: gpsSource, after: flipped),
+      ["变化 XMP/exif:GPSLatitude: 31,13.761315N → 31,13.7613S", "丢失 XMP/exif:GPSLatitudeRef = N",
+       "变化 XMP/exif:GPSLongitude: 121,28.318723E → 121,28.3187E", "丢失 XMP/exif:GPSLongitudeRef = E",
+       "变化 {GPS}/LatitudeRef: N → S"])
+var xmpOnlyFlip = gpsProduct
+xmpOnlyFlip["XMP/exif:GPSLatitude"] = "31,13.7613S"
+check("只有 XMP 坐标的方向变了：不合成", gpsRounding(before: gpsSource, after: xmpOnlyFlip), GPSRounding())
+var xmpRefChanged = gpsProduct
+xmpRefChanged["XMP/exif:GPSLatitudeRef"] = "S"
+check("XMP 的方向键还在但变了：不合成", gpsRounding(before: gpsSource, after: xmpRefChanged), GPSRounding())
+var noGPS = gpsProduct
+for k in ["{GPS}/Latitude", "{GPS}/LatitudeRef", "{GPS}/Longitude", "{GPS}/LongitudeRef",
+          "XMP/exif:GPSLatitude", "XMP/exif:GPSLongitude"] { noGPS.removeValue(forKey: k) }
+check("产物里没有 GPS：不合成", gpsRounding(before: gpsSource, after: noGPS), GPSRounding())
+check("产物里没有 GPS：逐字段报丢失", rawKeySpaceDiff(before: gpsSource, after: noGPS).filter { $0.hasPrefix("丢失 {GPS}/") }.count, 4)
+var noXMPLat = gpsProduct
+noXMPLat.removeValue(forKey: "XMP/exif:GPSLatitude")
+check("XMP 坐标一边有一边没有：不合成", gpsRounding(before: gpsSource, after: noXMPLat), GPSRounding())
+var sourceWithoutGPS = gpsSource
+for k in ["{GPS}/Latitude", "{GPS}/Longitude"] { sourceWithoutGPS.removeValue(forKey: k) }
+check("源的 {GPS} 坐标不全：不合成", gpsRounding(before: sourceWithoutGPS, after: gpsProduct), GPSRounding())
+for (text, degrees, ref) in [("31,13.761315N", 31.22935525, "N"), ("31,13,45.6789N", 31 + 13.0 / 60 + 45.6789 / 3600, "N"),
+                             ("121,28.3187E", 121 + 28.3187 / 60, "E"), ("0,0.5S", 0.5 / 60, "S")] {
+    let got = xmpGPSCoordinate(text)
+    checkRule(text, got.map { abs($0.degrees - degrees) < 1e-12 && $0.ref == ref }, true, "XMP 的 GPS 坐标读得出")
+}
+for text in ["31,13.76", "31N", "31,60.0N", "31,13,60N", "-31,13.7N", "31,1e3N", "31,13.7X", "３１,13.7N", "31,,13N", "31,13.7.1N"] {
+    checkRule(text, xmpGPSCoordinate(text) == nil, true, "XMP 的 GPS 坐标读不出就是读不出")
+}
+
+print("RAW 的校验：产物本身——10 位、宽高不变、方向照抄")
+let good: [CFString: Any] = [kCGImagePropertyDepth: 10, kCGImagePropertyPixelWidth: 256, kCGImagePropertyPixelHeight: 192,
+                             kCGImagePropertyOrientation: 6]
+let rawProps: [CFString: Any] = [kCGImagePropertyDepth: 16, kCGImagePropertyPixelWidth: 256, kCGImagePropertyPixelHeight: 192,
+                                 kCGImagePropertyOrientation: 6]
+check("都对：不报", rawProductIssues(source: rawProps, product: good), [])
+var eight = good; eight[kCGImagePropertyDepth] = 8
+check("8 位：报", rawProductIssues(source: rawProps, product: eight), ["产物不是 10 位（Depth = 8）"])
+var noDepth = good; noDepth.removeValue(forKey: kCGImagePropertyDepth)
+check("读不出位深：报", rawProductIssues(source: rawProps, product: noDepth), ["读不出产物的位深"])
+var rotated = good; rotated[kCGImagePropertyPixelWidth] = 192; rotated[kCGImagePropertyPixelHeight] = 256
+check("像素被转过：报", rawProductIssues(source: rawProps, product: rotated), ["变化 像素尺寸（不按方向转正）：256×192 → 192×256"])
+var upright = good; upright[kCGImagePropertyOrientation] = 1
+check("方向标签没照抄：报", rawProductIssues(source: rawProps, product: upright), ["变化 方向标签：6 → 1"])
+var noOrientation = rawProps; noOrientation.removeValue(forKey: kCGImagePropertyOrientation)
+check("源里没有方向、产物里多出一个：报", rawProductIssues(source: noOrientation, product: good), ["变化 方向标签：1 → 6"])
+upright.removeValue(forKey: kCGImagePropertyOrientation)
+check("源里没有方向、产物里也没有：不报", rawProductIssues(source: noOrientation, product: upright), [])
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args, command: .jpeg2heif) else { return nil }

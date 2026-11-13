@@ -810,6 +810,10 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
           let destImage = CGImageSourceCreateWithURL(dest as CFURL, nil) else {
         return ["无法重新打开文件进行校验"]
     }
+    // 按源类型分派。RAW 另有一套（rawMetadataDiff）：下面这些核对读的是 JPEG 的段结构。
+    if SourceKind(typeIdentifier: CGImageSourceGetType(sourceImage) as String?) == .raw {
+        return rawMetadataDiff(source: source, dest: dest, sourceImage: sourceImage, destImage: destImage)
+    }
     guard let data = try? Data(contentsOf: source, options: .mappedIfSafe) else {
         return ["无法重新读取源文件进行校验"]
     }
