@@ -381,7 +381,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     destProps[kCGImageDestinationLossyCompressionQuality] = opts.quality
     /// 「编码 + 照搬」一遍，写进一个新的临时文件。编码失败是 nil，临时文件已删。
     func encodeAndCarry() -> (url: URL, rawExif: RawExifOutcome?)? {
-        let tmp = folder.appendingPathComponent(".jpeg2heif-\(UUID().uuidString).heic")
+        let tmp = folder.appendingPathComponent(".glint-\(UUID().uuidString).heic")
         guard encode(src, destProps, xmp, tmp) else {
             try? fm.removeItem(at: tmp)
             return nil
@@ -591,7 +591,7 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
     case .failure(let skip): return .kept(skip.reason)
     }
     let candidate = product.deletingLastPathComponent()
-        .appendingPathComponent(".jpeg2heif-\(UUID().uuidString).heic")
+        .appendingPathComponent(".glint-\(UUID().uuidString).heic")
     defer { try? FileManager.default.removeItem(at: candidate) }
     guard (try? Data(carried).write(to: candidate)) != nil else { return .kept("写不出照搬后的产物") }
     let check = rawExifRegression(source: source, sourceBytes: sourceBytes, intended: intended,

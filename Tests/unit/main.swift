@@ -930,7 +930,7 @@ let commentSamples: [(String, String)] = [
 let xmpForSecondPass = CGImageMetadataCreateMutable()
 CGImageMetadataSetValueWithPath(xmpForSecondPass, nil, "xmp:Label" as CFString, "第二遍" as CFString)
 if let jpegSource = tinyJPEGSource() {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-unit-\(UUID().uuidString)")
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("glint-unit-\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     for (label, comment) in commentSamples {
         let text = withoutTrailingNUL(comment)
@@ -1108,7 +1108,7 @@ func jpegWithUniqueID(type: Int = 2, count: Int? = nil, value: [UInt8]) -> [UInt
                                tail: le16(1) + le16(0xA420) + le16(type) + le32(count ?? value.count) + field + le32(0)
                                    + (value.count <= 4 ? [] : value)))
 }
-let uidDir = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-uid-\(UUID().uuidString)")
+let uidDir = FileManager.default.temporaryDirectory.appendingPathComponent("glint-uid-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(at: uidDir, withIntermediateDirectories: true)
 func writtenUniqueID(_ jpeg: [UInt8], props: [CFString: Any] = [:]) -> String? {
     let url = uidDir.appendingPathComponent("\(UUID().uuidString).jpg")
@@ -1179,7 +1179,7 @@ check("逐字节截短的 TIFF 都不崩", tiffCuts.count, cyclic.count)
 
 print("HEIF 的 Exif 项：只认 ImageIO 写出来的形态，读不出就照实说")
 if let jpegSource = tinyJPEGSource() {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-unit-\(UUID().uuidString).heic")
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("glint-unit-\(UUID().uuidString).heic")
     let props = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifLensModel: "RF50mm"],
                  kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 30.5, kCGImagePropertyGPSLatitudeRef: "N"]]
         as [CFString: Any]
@@ -1450,7 +1450,7 @@ check("随机改坏 5000 次都不崩，换了的读回都是源 TIFF", randomBa
 
 print("EXIF 整块照搬：ImageIO 写的 HEIC，截断与改坏 meta 都不崩")
 if let jpegSource = tinyJPEGSource() {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-carry-\(UUID().uuidString).heic")
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("glint-carry-\(UUID().uuidString).heic")
     let props = [kCGImagePropertyExifDictionary: [kCGImagePropertyExifLensModel: "RF50mm"]] as [CFString: Any]
     if encodeHEIF(jpegSource, properties: props, xmp: nil, to: url), let heic = try? [UInt8](Data(contentsOf: url)),
        case .success(let children) = heifMetaChildren(heic), let top = heifBoxes(heic, in: 0..<heic.count),
@@ -2123,7 +2123,7 @@ print("产物比原图大时重编一次：注入假的编码步骤")
 // 写出给定字节数的文件（每遍的填充字节不同，好认出留下的是哪一份），nil 表示这一遍
 // 失败（失败前先写几个字节，看临时文件有没有被清掉）。
 let reencodeRoot = FileManager.default.temporaryDirectory
-    .appendingPathComponent("jpeg2heif-reencode-\(UUID().uuidString)")
+    .appendingPathComponent("glint-reencode-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(at: reencodeRoot, withIntermediateDirectories: true)
 let reencodeSource = reencodeRoot.appendingPathComponent("源.jpg")
 if let image = tinyJPEGSource().flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }),
@@ -2165,7 +2165,7 @@ func expectReencode(_ name: String, _ plan: [Int?], calls: Int, kept: Int?, grow
         pass("\(name)：转换失败")
     }
     let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
-        .filter { $0.hasPrefix(".jpeg2heif-") }
+        .filter { $0.hasPrefix(".glint-") }
     check("\(name)：目标目录里不留临时文件", leftovers, [])
 }
 let big = sourceBytes * 3, bigger = sourceBytes * 4, small = sourceBytes / 2
@@ -2256,7 +2256,7 @@ check("属性列表读不出：报无法核对",
 
 print("扩展属性核对：真实文件")
 // 转一张带扩展属性的图，再动产物上的属性，看 metadataDiff 报什么。
-let xattrRoot = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-xattr-\(UUID().uuidString)")
+let xattrRoot = FileManager.default.temporaryDirectory.appendingPathComponent("glint-xattr-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(at: xattrRoot, withIntermediateDirectories: true)
 let xattrJPEG = xattrRoot.appendingPathComponent("源.jpg")
 if let image = tinyJPEGSource().flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }),
@@ -2300,7 +2300,7 @@ print("把「照片」的说明写进文件")
 // 源是小 JPEG，扩展属性里有说明；默认带 TIFF 的 Make/Model/DateTime（实测有 DateTime 时 ImageIO 写第一遍
 // 会写 XMP 项，只有 Make/Model 时不写），
 // `bare` 时一个属性都不带。
-let captionRoot = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg2heif-caption-\(UUID().uuidString)")
+let captionRoot = FileManager.default.temporaryDirectory.appendingPathComponent("glint-caption-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(at: captionRoot, withIntermediateDirectories: true)
 let captionText = "西湖日落\n第二行 😀"
 /// 新造一张带说明的源，返回路径。

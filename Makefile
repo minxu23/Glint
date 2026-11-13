@@ -3,7 +3,7 @@ SWIFTC ?= swiftc
 DEPLOY ?= $(shell uname -m)-apple-macos13.0
 SWIFTFLAGS ?= -O -swift-version 5 -target $(DEPLOY)
 
-BIN  := jpeg2heif
+BIN  := glint
 # 应用的名字（应用包名、Info.plist 的 CFBundleName / CFBundleDisplayName 都由它来）。
 # 改名只改这里和 Sources/GUI/AppName.swift。
 APP_NAME := 吉光
@@ -93,7 +93,7 @@ Tests/fixture: Tests/fixture.swift
 	$(SWIFTC) $(SWIFTFLAGS) -o $@ $<
 
 snapshot: Tests/uisnapshot
-	./Tests/uisnapshot $(or $(OUT),/tmp/jpeg2heif-ui.png) $(ARGS)
+	./Tests/uisnapshot $(or $(OUT),/tmp/glint-ui.png) $(ARGS)
 
 # 「跑一遍自检需要哪些产物」只定义一处：test 的前置和 selftest.sh 的新鲜度
 # 守卫都从这里取。

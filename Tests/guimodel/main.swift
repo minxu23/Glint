@@ -36,7 +36,7 @@ func wait(until done: () -> Bool, timeout: TimeInterval = 60) -> Bool {
 /// 转换中断时留下的半成品临时文件。
 func temporaryLeftovers(in dir: URL) -> [URL] {
     ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
-        .filter { $0.lastPathComponent.hasPrefix(".jpeg2heif-") }
+        .filter { $0.lastPathComponent.hasPrefix(".glint-") }
 }
 
 func runningCount(_ m: ConversionModel) -> Int {

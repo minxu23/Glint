@@ -1,9 +1,9 @@
 #!/bin/bash
-# jpeg2heif 自检：造一张元数据齐全的 JPEG，转成 HEIC，然后逐项校验。
+# glint 自检：造一张元数据齐全的 JPEG，转成 HEIC，然后逐项校验。
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-BIN="./jpeg2heif"
+BIN="./glint"
 # 每次运行一个独立的工作目录（见下面 mktemp），并发的两次运行互不相干。
 # 成功结束时删掉；失败或提前退出时留着供诊断，并打印路径。
 WORK=""
@@ -231,11 +231,11 @@ make_sample xattr -w com.apple.assetsd.description "西湖日落，和外婆一�
 make_sample xattr_plist com.apple.metadata:kMDItemFinderComment "$XA" "$PL_HEAD<string>访达里的备注</string></plist>"
 make_sample xattr_plist com.apple.metadata:_kMDItemUserTags "$XA" "$PL_HEAD<array><string>红色
 6</string><string>旅行</string></array></plist>"
-make_sample xattr -w user.jpeg2heif.custom "自定义的值" "$XA"
+make_sample xattr -w user.glint.custom "自定义的值" "$XA"
 XATTRS4='com.apple.assetsd.description
 com.apple.metadata:kMDItemFinderComment
 com.apple.metadata:_kMDItemUserTags
-user.jpeg2heif.custom'
+user.glint.custom'
 cp "$XA" "$WORK/扩展属性/删源.jpg"
 xa_out=$("$BIN" --verify -v "$XA" 2>&1)
 grep -q "元数据校验通过" <<< "$xa_out" \

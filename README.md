@@ -1,4 +1,4 @@
-# jpeg2heif
+# Glint（吉光）
 
 把 JPEG 转成 HEIF（`.heic`），并完整保留元数据——拍摄时间、拍摄位置、备注、
 相机参数、版权、访达备注与标签、文件时间戳，一样不丢。
@@ -16,7 +16,7 @@ libheif、exiftool 或 Python 包，也不需要安装完整的 Xcode——命�
 make
 ```
 
-`make` 会同时产出命令行工具 `jpeg2heif` 和应用 `吉光.app`。装到系统里：
+`make` 会同时产出命令行工具 `glint` 和应用 `吉光.app`。装到系统里：
 
 ```bash
 sudo make install
@@ -79,13 +79,13 @@ sudo make install
 ## 命令行
 
 ```bash
-jpeg2heif 照片.jpg
+glint 照片.jpg
 ```
 
 整个文件夹批量转换（`-r` 递归子目录，`-o` 指定输出位置）：
 
 ```bash
-jpeg2heif -r ~/Pictures/2024 -o ~/Pictures/2024-heic
+glint -r ~/Pictures/2024 -o ~/Pictures/2024-heic
 ```
 
 不加 `-r` 只处理该文件夹顶层，不下钻子目录；不加 `-o` 就把 `.heic` 输出到每张
@@ -109,7 +109,7 @@ jpeg2heif -r ~/Pictures/2024 -o ~/Pictures/2024-heic
 想在替换原图前确认万无一失：
 
 ```bash
-jpeg2heif --verify -r ~/Pictures/相册 -o /tmp/heic-试转
+glint --verify -r ~/Pictures/相册 -o /tmp/heic-试转
 ```
 
 ## 保留了哪些元数据

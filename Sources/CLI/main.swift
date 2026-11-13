@@ -1,10 +1,10 @@
-// jpeg2heif 命令行入口。转换逻辑全部在 Sources/Core/Converter.swift，
+// glint 命令行入口。转换逻辑全部在 Sources/Core/Converter.swift，
 // 这里只负责解析参数和把结果打印出来。
 
 import Foundation
 
 let usage = """
-用法: jpeg2heif [选项] <文件或目录> ...
+用法: glint [选项] <文件或目录> ...
 
 把 JPEG 转换成 HEIF(.heic)，同时完整保留 EXIF（拍摄时间/相机参数）、
 GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间戳、访达备注与标签。
@@ -31,10 +31,10 @@ GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间�
   -h, --help               显示本帮助
 
 示例:
-  jpeg2heif photo.jpg                          转单张
-  jpeg2heif ~/Pictures/2024                    转该文件夹顶层的所有 JPEG
-  jpeg2heif -r ~/Pictures/2024 -o ~/输出       递归整个文件夹，输出到别处
-  jpeg2heif --verify --delete-original -r ./相册   校验无损后替换源文件
+  glint photo.jpg                          转单张
+  glint ~/Pictures/2024                    转该文件夹顶层的所有 JPEG
+  glint -r ~/Pictures/2024 -o ~/输出       递归整个文件夹，输出到别处
+  glint --verify --delete-original -r ./相册   校验无损后替换源文件
 """
 
 func fail(_ msg: String) -> Never {

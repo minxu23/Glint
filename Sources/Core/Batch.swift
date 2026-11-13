@@ -153,7 +153,7 @@ enum OutputPlan {
 /// 开工前把每个任务的目标路径一次性定下来，并消解重名。
 ///
 /// 必须串行地、在任何转换开始之前做完。把「输出已存在」的判断留在并发执行的
-/// convert() 里的话，`jpeg2heif A B -o OUT` 且 A/B 各有一个 a.jpg 时，两个任务
+/// convert() 里的话，`glint A B -o OUT` 且 A/B 各有一个 a.jpg 时，两个任务
 /// 会同时看到 OUT/a.heic 不存在，双双写入，后写的静默覆盖先写的。
 ///
 /// 消解办法：把撞在一起的那一组**整组**挪进各自源目录名下（OUT/A/a.heic、
@@ -282,7 +282,7 @@ func runConversions(_ jobs: [Job], opts: ConversionOptions, plan: OutputPlan,
                                                avoidingExistingFiles: !opts.overwrite)
 
     let concurrency = max(1, min(opts.jobs, max(jobs.count, 1)))
-    let queue = DispatchQueue(label: "jpeg2heif.convert", attributes: .concurrent)
+    let queue = DispatchQueue(label: "glint.convert", attributes: .concurrent)
     let group = DispatchGroup()
     let semaphore = DispatchSemaphore(value: concurrency)
     let callbackLock = NSLock()
