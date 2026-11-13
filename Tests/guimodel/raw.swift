@@ -43,6 +43,11 @@ func testRAWLibrary() {
           "6 张，其中 JPEG 2 张、RAW 2 张，共 51 MB")
     check("只有 RAW 时副标题只写 RAW", subtitle(items: lib.items(in: .folder("/库/子")), selected: [], scanning: false),
           "1 张，其中 RAW 1 张，共 20 MB")
+    check("窄窗口的短写法去掉「其中 …」", subtitle(items: lib.items(in: .all), selected: [], scanning: true, detailed: false),
+          "6 张，共 51 MB，正在读取…")
+    check("有选中时短写法与完整写法相同",
+          subtitle(items: lib.items(in: .all), selected: lib.items(in: .convertible), scanning: false, detailed: false),
+          subtitle(items: lib.items(in: .all), selected: lib.items(in: .convertible), scanning: false))
     check("一张能转的都没有时不写「其中」", subtitle(items: lib.items(in: .all).filter { !$0.isConvertible }, selected: [], scanning: false),
           "2 张，共 2.0 MB")
     check("按格式的汇总：JPEG、RAW、HEIF 在前", ItemsSummary(items: lib.items(in: .all), selected: false).formatLines,

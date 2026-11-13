@@ -1,9 +1,9 @@
 # make test 不可复现：同一棵树连跑两次，一次全过一次红
 
-Status: needs-triage
+Status: resolved
 Round: 11
 Source: 我自己（两轴都没提——是我在本轮改动中间偶然撞上的）
-Fixed by: —
+Fixed by: 10c2dfd
 Review: ../reviews/round-11-aggregate.md
 
 ## 缺陷
@@ -36,3 +36,10 @@ Review: ../reviews/round-11-aggregate.md
 
 这条值得特别记一笔，因为它意味着：**这个会话里每一句「全部通过」，都只在
 「那一次目录恰好是干净的」这个前提下成立**，而这个前提当时没人查。
+
+## Comments
+
+2026-11-13 复核：根因是两次 `make test` 共用固定的 `Tests/.work`，并发时互相擦对方的文件
+（第 12 轮交接稿的 L1「并发互踩」）。`10c2dfd` 改成每次运行用 `mktemp -d` 建独立的
+`Tests/.work.XXXXXX`，通过即删、失败保留，同时删掉了本条加的「擦完数文件」守卫（它防的是错的
+假设）。当时错开 1/2/4/6 秒并发两次，八次全过；之后到 `16a0dcd` 没再出现过。

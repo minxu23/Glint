@@ -134,6 +134,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         rightItem.minimumThickness = 600
         outerSplit.addSplitViewItem(sidebarItem)
         outerSplit.addSplitViewItem(rightItem)
+        // 拖侧栏会改标题区的宽度，副标题要重新挑写法。
+        NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification,
+                                               object: outerSplit.splitView, queue: .main) { [weak self] _ in
+            self?.scheduleFitSubtitle()
+        }
 
         // 默认宽度：侧栏 208，信息栏 280。记住的宽度由 autosave 恢复。
         outerSplit.splitView.setPosition(208, ofDividerAt: 0)
@@ -245,8 +250,52 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         window.title = entryTitle
         let scanning = !library.library.scanning.isEmpty
-        window.subtitle = subtitle(items: visible, selected: browser.selectedItems, scanning: scanning)
+        let selected = browser.selectedItems
+        subtitleTexts = (subtitle(items: visible, selected: selected, scanning: scanning),
+                         subtitle(items: visible, selected: selected, scanning: scanning, detailed: false))
+        fitSubtitle()
     }
+
+    /// 副标题的完整写法和去掉「其中 …」的短写法。窗口或侧栏宽度一变就要重新挑，不必重算。
+    private var subtitleTexts = (full: "", short: "")
+
+    /// 先放完整的副标题，标题栏把它截断了（末尾成了「…」）就换短的。
+    ///
+    /// 「截断了没有」直接问 AppKit 排好的那个文本框：在标题栏的视图里找显示这句话的
+    /// NSTextField，比较它的宽度和文字需要的宽度。标题区有多宽取决于窗口宽度、侧栏宽度和
+    /// 工具栏各项，自己估算会和 AppKit 的排法对不上。这个文本框不是公开接口，哪个版本的系统里
+    /// 找不到时就一直用完整的写法——也就是改之前的样子，窄窗口下照旧截断，不会出错。
+    private func fitSubtitle() {
+        guard let window else { return }
+        window.subtitle = subtitleTexts.full
+        guard subtitleTexts.short != subtitleTexts.full, let frameView = window.contentView?.superview else { return }
+        frameView.layoutSubtreeIfNeeded()
+        guard let field = textField(in: frameView, showing: subtitleTexts.full),
+              let needed = field.cell?.cellSize.width else { return }
+        if needed > field.bounds.width + 0.5 { window.subtitle = subtitleTexts.short }
+    }
+
+    private func textField(in view: NSView, showing text: String) -> NSTextField? {
+        if let field = view as? NSTextField, field.stringValue == text { return field }
+        for sub in view.subviews {
+            if let found = textField(in: sub, showing: text) { return found }
+        }
+        return nil
+    }
+
+    /// 窗口或侧栏宽度变了：排完这一轮布局再重新挑副标题。不在布局通知里直接排，
+    /// fitSubtitle 要 layoutSubtreeIfNeeded，在布局中途调会重入。一轮里多次变化只挑一次。
+    private func scheduleFitSubtitle() {
+        guard !fitSubtitleScheduled else { return }
+        fitSubtitleScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.fitSubtitleScheduled = false
+            self?.fitSubtitle()
+        }
+    }
+    private var fitSubtitleScheduled = false
+
+    func windowDidResize(_ notification: Notification) { scheduleFitSubtitle() }
 
     func refreshInspector() {
         let selected = browser.selectedItems

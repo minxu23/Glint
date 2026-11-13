@@ -1,0 +1,184 @@
+# Glint 交接文档
+
+更新于 2026-11-13，main 位于加入本文件的那个提交（`git log -1 -- HANDOVER.md`）。
+
+---
+
+## 一、需求总结
+
+**产品**：Glint（中文名「吉光」），macOS 原生的照片格式转换工具。
+
+- 技术约束：Swift + ImageIO + AppKit，零第三方依赖，只用 Command Line Tools 构建。
+- 注释、输出、界面都用中文。
+
+**转换模块 eclose（羽化）**：独立的 Swift 模块 `Eclose`，代码在 `Sources/Eclose`。
+
+- `jpeg2heif`：JPEG 转 HEIF，完整保留元数据：
+  - EXIF、GPS、IPTC、XMP；
+  - 扩展属性、文件时间戳、访达备注与标签。
+  - CMYK 的 JPEG 默认跳过，`--allow-cmyk` 强制转换。
+- `raw2heif`：相机 RAW 转 HEIF。
+  - 系统默认显影，产物 10 位。
+  - RAW 原片永远不删（`--delete-original` 直接报错拒绝）。
+  - 原始 EXIF 整块搬进产物。
+- 删除源文件只对 JPEG，且要同时满足：校验无差异、产物不比原图大。
+
+**图形界面 Glint.app**
+
+- 三栏布局：浏览、查看、转换。
+- JPEG 和 RAW 都能转，可以混在一批里。
+- 只放在 `~/Developer/Glint.app`（`make install-dev`，与 Spark 同一做法），**不装进 /Applications**。
+- 标识符 `local.minxu.glint`，可执行文件 `Glint`。
+- 图标：极光色渐变底上一根白色羽毛，羽尖化成光（`Tools/make_icon.swift`，配色 A）。
+
+**质量原则**
+
+- `--verify` 宁可多报，绝不悄悄放过真实的元数据丢失。
+- 功能坏了，测试必须变红。
+- 没有真实数据支撑，就不加放行规则。
+- 合并前必须用测试集原件验（`/Users/minxu/Developer/Taihe_HMOS/artifacts/TEMP测试集-20261111/`，带 `-r -o <临时目录>`），不能只用拷贝或自造的样本。
+
+**隐私规则**
+
+- 用户的照片、RAW 只在本机临时目录里用，不提交、不上传、不交给子代理。
+- 测试样本不带人像；以家人名字命名的文件夹整个不取样。人像检测（Vision）漏判过小孩，不能当许可。
+
+**工作方式**
+
+1. 先测量，列出分级清单和建议，由用户划线。
+2. 在 `.scratch/<功能>/` 写交接稿，派 Opus 在独立 worktree 里实现。
+3. 主会话独立验收：
+   - 干净副本跑 `make test`；
+   - 自己改坏代码，确认测试变红；
+   - 测试集原件、2907 个畸形样本，与上一版逐行比；
+   - 真样本。
+4. 验收通过后 ff 合并，清理 worktree 和分支，重新构建并放置应用。
+
+---
+
+## 二、前期工作小结
+
+### 校验加固（第 17–25 轮）
+
+交接稿在 `.scratch/verify-hardening/`。主要内容：
+
+- EXIF 整块照搬：不再交给系统按字典重写。
+- UserComment 的可靠读法与原文核对。
+- XMP 按命名空间归一。
+- 扩展属性纳入核对，系统管的属性（quarantine、provenance 等）跳过。
+- 产物比原图大时重编一次。
+- `--embed-caption`：把「照片」App 的说明写进 XMP。
+
+### 界面与品牌
+
+- 三栏界面：规格在 `.scratch/gui-redesign/`。
+- 应用定名「吉光」，设计了图标。
+- 项目从 `~/Claude/jpeg2heif` 搬到 `~/Developer/Glint`；标识符改为 `local.minxu.glint`，设置已迁移。
+
+### eclose 第 1 段（已合并，`5ccab4b` … `2612c46`）
+
+- 转换核心做成独立模块 Eclose：
+  - 交付用的静态库只暴露 `public` 接口；
+  - 测试用另一份带 `-enable-testing` 的库。
+- 命令行拆成 `jpeg2heif`、`raw2heif`，`glint` 命令行取消。
+- 应用改名 Glint.app，删除两份旧的吉光.app。
+- RAW 管线：
+  - ImageIO 系统默认显影；
+  - 产物必须 10 位，否则失败；
+  - 修整 CR3 被写坏的 ExifVersion、FlashPixVersion。
+- RAW 校验：
+  - RAW 结构字段（`{raw}`、`{DNG}`、CFAPattern 等）白名单不比，每类都写了理由；
+  - 系统重写导致的 GPS 取整压成一行，偏差超过 1 米仍逐字段报。
+- 测试现场生成 DNG 夹具（`Tests/DNG.swift`）。256×192 以上才会被 ImageIO 认作 RAW。
+
+### eclose 第 2 段（已合并，`72e82ab` … `16a0dcd`）
+
+- **2a：RAW 的 EXIF 整块照搬**（`Sources/Eclose/CameraRawExif.swift`）
+  - 各格式取 EXIF 的地方：
+    - CR3：CMT1/CMT2/CMT4 盒子；
+    - RW2：内嵌 JPEG 预览（JpgFromRaw）的 APP1；
+    - DNG 等 TIFF 系：IFD0 指向的 Exif、GPS IFD。
+  - 拼成干净的 TIFF 块：不带 MakerNote，也不带描述图像数据的标签。
+  - 自检与 `--verify` 改成按字节比：ImageIO 读 RAW 和读 HEIC 的视图对同一组字节给出不同结果，比视图必然误报。
+  - 根治了：GPS 取整、空值丢失、拍摄时区（OffsetTime）被 ImageIO 的 CR3 读法隐藏而悄悄丢失。
+- **2b：Glint.app 转 RAW**
+  - 图库认 RAW，「可以转换」和统计都算上 RAW。
+  - JPEG 和 RAW 可以混在一批里转。
+  - 删除只对 JPEG 生效，界面写明 RAW 原片始终保留。
+  - RAW 缩略图优先用内嵌预览。
+- **合并收尾**（`bc8bcf7`）
+  - 接在另一个会话提交的 CMYK 改动（`922a2c7`）之后。
+  - RAW 的界面用例并回模型测试。
+  - RAW 的「照片」说明也能写进文件。
+  - 修了 `selftest.sh` 在 UTF-8 环境下被 `set -u` 中断的问题。
+
+### 验收现状
+
+| 项目 | 结果 |
+|---|---|
+| `make test` | 全绿：671 项断言，界面模型 310 项 |
+| 自己改坏代码 | 第 1 段 4 处、第 2 段 3 处，测试都变红 |
+| 真 RAW：3 个风景 CR3 + 用户指定的 RW2 | 都整块照搬；`--verify` 只剩 MakerNote 一行（已知局限）；CR3 的 39 条 EXIF、12 条 GPS 与源逐字节相同 |
+| JPEG 路线 | 与改动前的版本比，测试集原件和 2907 个畸形文件的输出逐行相同 |
+| 内存 | 单张 CR3 峰值约 1.2 GB；10 个 RAW 按默认并发 4 转，峰值约 4 GB（本机 48 GB） |
+
+---
+
+## 三、待完成工作小结
+
+### 需要真实样本才能确认的
+
+1. CR2、NEF、ARW、PEF、SRW、ORF、RAF 的 EXIF 照搬只用手搭样本测过，没有真样本。有合适的无人像样本时再验。拼错的话自检会退回系统重写，不会写坏文件。
+2. CRW、MRW、X3F、IIQ 等格式还不能整块照搬 EXIF，走系统重写。
+
+### 界面要在真实窗口里确认的（离屏截图看不准）
+
+3. ~~最小窗口宽度（900）下，工具栏副标题会被截断~~：已改，标题栏放不下时去掉「其中」那段，
+   写成「6 张，共 339 KB」（用户选的写法）。真实窗口里拖窗口宽度、拖侧栏时的切换还没亲眼看过。
+4. ~~转换完成后的活动条在离屏截图里只露出一角~~：用 `uisnapshot --onscreen --convert` 截了真实窗口，
+   活动条「转完 4 张，省下 181 KB。」和「好」按钮完整显示，正常。
+5. 用真实的一批 JPEG + RAW、勾上删除走一遍：JPEG 被删，RAW 留着，提示语正确。（要用户在窗口前做：
+   这个会话没有操作屏幕的工具。）
+
+### 已知局限，暂不处理
+
+6. 厂商私有数据（MakerNote）系统读不出也写不进 HEIF，校验照实报一行。
+7. RAW 旁边的 .xmp 附属文件不合并（用户的文件夹里没有）。
+8. RAW 和同名 JPEG 转出同名的 HEIF 时，后转的按「输出已存在」跳过；要两份就用 `-o` 分开目录。
+
+### 遗留问题单（`.scratch/` 里状态为 needs-triage 的）
+
+9. `encoder-variance/issues/01`：别的进程同时在编码时，产物大小偶尔不同（系统编码器从硬件退到软件）。
+10. ~~`verify-hardening/issues/11-16`：`make test` 有时复现不出~~：已关（resolved），根因是并发共用
+    `Tests/.work`，`10c2dfd` 起每次运行用独立的 mktemp 目录。
+11. ~~`verify-hardening/issues/01-03`、`02-05`、`03-04`~~：逐条对照代码都已落地，已关（resolved）。
+
+### 收尾小事
+
+12. 只用第 1 段那版转过的 CR3 缺拍摄时区；如有需要，用现在的版本重转一次。
+13. 合并时的两个小瑕疵（仓库没推送过，要清理可以改写历史）：
+    - 提交历史里留着一个误提交的 1.5 MB 测试二进制（`bc8bcf7` 加入，`16a0dcd` 删除）；
+    - 中间提交 `72e82ab` 单独检出时，测试计数可能对不上。
+14. ~~`.scratch/eclose/` 下规格与交接稿的状态还写着 `ready-for-agent`~~：已改成 resolved。
+    `.scratch/gui-redesign/spec.md` 也还写着 `ready-for-agent`，界面早已做完，没动，等确认。
+15. 本机临时目录里留着 3 个风景 CR3 和用户指定的 RW2，用来验收；不再需要时删除。
+
+---
+
+## 常用命令
+
+```bash
+make test          # 全套测试
+make all           # 编两个命令和 Glint.app
+make install-dev   # 把 Glint.app 放到 ~/Developer
+./raw2heif -v --verify -o <输出目录> <RAW 文件或目录>
+./jpeg2heif -r -v --verify -o <输出目录> <JPEG 目录>
+```
+
+## 注意事项
+
+- HEIC 编码不是逐字节确定的：别的进程同时在编码时会改走软件编码器。逐字节比较前确认没有别的转换或测试在跑。
+- 同一目录不要同时跑两个 `make test`。
+- make 的时间戳陷阱：用 `cp` 恢复文件后要 `touch`，并确认日志里有对应的 `swiftc` 行。
+- 子代理不在主仓库里构建或测试；测试不写真实设置域 `local.minxu.glint`。
+- 另一个会话「JPEG转HEIF格式限制」也在这个仓库里工作过（CMYK 改动），开工前先看 `git log`。

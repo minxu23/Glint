@@ -1,6 +1,6 @@
 # eclose（羽化）：格式转换模块
 
-Status: ready-for-agent
+Status: resolved
 
 ## 用户的要求与拍板（2026-11-13）
 
@@ -38,3 +38,7 @@ Status: ready-for-agent
 - **第 2 段**（第 1 段合并后再写交接稿，两个可并行）：
   - 2a：RAW 的 EXIF 整块照搬（CR3 的 CMT1/CMT2/CMT4，TIFF 系 RAW 的 IFD0/ExifIFD/GPS IFD → 干净的 TIFF 块 → 现有 `carryingExif` 写进 HEIF），根治 GPS 精度与版本号。
   - 2b：Glint.app 里 RAW 也能转（列表里 RAW 算可转换、转换面板 RAW 不给删除选项、记录与信息栏认 RAW）。
+
+## Comments
+
+2026-11-13：已实现并合并到 main（第 1 段 `5ccab4b` … `2612c46`，第 2 段 `72e82ab` … `16a0dcd`），验收结果见仓库根目录的 HANDOVER.md。

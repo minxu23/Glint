@@ -1,6 +1,6 @@
 # eclose 第 1 段交接稿
 
-Status: ready-for-agent
+Status: resolved
 
 先读 `spec.md`（同目录）：用户的拍板与主会话的实测都在那里，本稿不重复。再读仓库根的 `CLAUDE.md`、`README.md`、`GLOSSARY.md`、`docs/adr/`。
 
@@ -113,3 +113,7 @@ Status: ready-for-agent
 6. 变异清单与结果。
 7. `make test` 最后一次的计数行。
 8. 需要主会话用真 RAW 量的东西（至少：raw2heif 默认并发数的峰值内存、CR3 版本号修整在真 CR3 上的结果、GPS 一行在真样本上的偏差数值）。
+
+## Comments
+
+2026-11-13：已实现并合并到 main（`5ccab4b` … `2612c46`），验收结果见仓库根目录的 HANDOVER.md。

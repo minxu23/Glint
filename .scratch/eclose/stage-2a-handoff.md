@@ -1,6 +1,6 @@
 # eclose 第 2 段 a：RAW 的 EXIF 整块照搬
 
-Status: ready-for-agent
+Status: resolved
 
 先读同目录的 `spec.md`（用户拍板与实测）和 `stage-1-handoff.md`（第 1 段做了什么），再读 `Sources/Eclose/RawExifCarry.swift`、`Converter.swift` 的 `carryRawExif` / `rawExifRegression`、`CameraRaw.swift`、`HEIFExif.swift`、`ExifReader.swift`。
 
@@ -72,3 +72,7 @@ Status: ready-for-agent
 5. 变异清单与结果。
 6. 最后一次 `make test` 计数行。
 7. 需要主会话用真 CR3/RW2 验的东西。
+
+## Comments
+
+2026-11-13：已实现并合并到 main（`72e82ab`、`e2428c2`、`efc8c6e`），验收结果见仓库根目录的 HANDOVER.md。

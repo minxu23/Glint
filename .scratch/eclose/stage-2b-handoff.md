@@ -1,6 +1,6 @@
 # eclose 第 2 段 b：Glint.app 里 RAW 也能转
 
-Status: ready-for-agent
+Status: resolved
 
 先读同目录的 `spec.md`（用户拍板）和 `stage-1-handoff.md`（第 1 段做了什么），再读 `.scratch/gui-redesign/spec.md`（界面规格，界面的设计语言以它为准）、`Sources/GUI/` 全部、`Sources/Eclose/SourceKind.swift`、`Sources/Eclose/Batch.swift` 的公开部分。
 
@@ -48,3 +48,7 @@ Status: ready-for-agent
 4. 变异清单与结果。
 5. 最后一次 `make test` 计数行。
 6. 需要主会话在真实窗口里验的东西。
+
+## Comments
+
+2026-11-13：已实现并合并到 main（`fbc8b0f`、`bc8bcf7`（`16a0dcd` 删掉误提交的二进制）），验收结果见仓库根目录的 HANDOVER.md。

@@ -356,7 +356,10 @@ struct Library {
 
 /// 工具栏副标题：`248 张，其中 JPEG 196 张、RAW 30 张，共 612 MB`（能转的两种，没有的那种不写）；
 /// 有选中时 `选中 3 张，共 6.6 MB`；还在扫描时末尾加 `，正在读取…`。
-func subtitle(items: [PhotoItem], selected: [PhotoItem], scanning: Bool) -> String {
+///
+/// `detailed` 为 false 时去掉「其中 …」那段：`248 张，共 612 MB`。窗口窄、标题栏放不下完整的
+/// 那句时用（见 MainWindowController.fitSubtitle），按格式的张数和大小信息栏里有。
+func subtitle(items: [PhotoItem], selected: [PhotoItem], scanning: Bool, detailed: Bool = true) -> String {
     var text: String
     if !selected.isEmpty {
         text = "选中 \(selected.count) 张，共 \(shortSize(selected.reduce(0) { $0 + $1.size }))"
@@ -364,7 +367,7 @@ func subtitle(items: [PhotoItem], selected: [PhotoItem], scanning: Bool) -> Stri
         let total = items.reduce(0) { $0 + $1.size }
         text = "\(items.count) 张"
         let kinds = convertibleCounts(items)
-        if !kinds.isEmpty { text += "，其中 " + kinds }
+        if detailed && !kinds.isEmpty { text += "，其中 " + kinds }
         if !items.isEmpty { text += "，共 \(shortSize(total))" }
     }
     if scanning { text += "，正在读取…" }
