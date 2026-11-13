@@ -1,4 +1,4 @@
-# Glint（吉光）
+# Glint
 
 把 JPEG 转成 HEIF 并完整保留元数据的 macOS 原生工具（命令行 + 图形界面）。
 项目说明见 [README.md](README.md)。

@@ -61,6 +61,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         buildToolbar()
         if autosave {
             window.center()
+            // 窗口、分栏的 autosave 名和工具栏标识符存进了用户设置，应用改名 Glint 后保持「吉光.」
+            // 开头的旧名字：改了，用户记住的窗口位置和分栏宽度就丢了。它们不显示在界面上。
             window.setFrameAutosaveName("吉光.主窗口")
         }
         wireModels()

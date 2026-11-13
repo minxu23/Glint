@@ -1,6 +1,8 @@
 # 构建产物（Makefile 的 clean 目标清的就是这些）
 /glint
 /build/
+/Glint.app/
+# 改名 Glint 之前的应用包
 /吉光.app/
 /Tests/fixture
 /Tests/probe

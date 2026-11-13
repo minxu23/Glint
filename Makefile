@@ -5,8 +5,9 @@ SWIFTFLAGS ?= -O -swift-version 5 -target $(DEPLOY)
 
 BIN  := glint
 # 应用的名字（应用包名、Info.plist 的 CFBundleName / CFBundleDisplayName 都由它来）。
-# 改名只改这里和 Sources/GUI/AppName.swift。
-APP_NAME := 吉光
+# 改名只改这里和 Sources/GUI/AppName.swift。可执行文件名 Glint 和标识符 local.minxu.glint
+# 写在 Info.plist 里，改名时不动（用户设置跟着标识符走，不用迁）。
+APP_NAME := Glint
 APP  := $(APP_NAME).app
 ECLOSE := $(wildcard Sources/Eclose/*.swift)
 CLI  := $(wildcard Sources/CLI/*.swift)
@@ -30,7 +31,7 @@ GUI       := Sources/GUI/main.swift $(GUI_LIB)
 ECLOSE_RELEASE := build/release/libEclose.a
 ECLOSE_TESTING := build/testing/libEclose.a
 
-.PHONY: all cli app icon install install-cli install-app install-dev uninstall test run snapshot clean \
+.PHONY: all cli app icon install install-cli install-dev uninstall test run snapshot clean \
         print-artifacts
 
 all: cli app
@@ -77,17 +78,13 @@ icon:
 run: $(APP)
 	open $(APP)
 
-install: install-cli install-app
+# 应用不往 /Applications 装，只用 install-dev 放进 ~/Developer；install 只装命令行。
+install: install-cli
 
 install-cli: $(BIN)
 	install -d $(PREFIX)/bin
 	install -m 755 $(BIN) $(PREFIX)/bin/$(BIN)
 	@echo "命令行工具已装到 $(PREFIX)/bin/$(BIN)"
-
-install-app: $(APP)
-	rm -rf /Applications/$(APP)
-	cp -R $(APP) /Applications/
-	@echo "应用已装到 /Applications/$(APP)"
 
 # 在仓库的上一级目录（~/Developer）放一份应用，和那里的 Spark.app 一样随手能点开。
 # 是独立的一份拷贝，make clean 不会碰它；改了界面代码后重跑一次才会更新。
@@ -98,7 +95,6 @@ install-dev: $(APP)
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(BIN)
-	rm -rf /Applications/$(APP)
 
 # 测试工具一律按同一条规则构建：目标依赖它链的那一份 Eclose 库（ECLOSE_LIB），
 # 各自的额外源码写在 TOOL_SRC 里。加一个工具只改这一处。
