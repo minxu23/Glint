@@ -583,6 +583,15 @@ func testSettings() {
     check("单元边长读回时夹在 96–320", b2.cellSize, 320)
     SavedFolders.save(["/一", "/二"], to: store)
     check("加进来的文件夹记住", SavedFolders.load(from: store), ["/一", "/二"])
+
+    check("应用图标没选过时用浅色", AppIconChoice.load(from: store), .light)
+    check("默认款式就是应用包自带的那个（Info.plist 的 CFBundleIconFile）", AppIconChoice.default.resourceName, "AppIcon")
+    AppIconChoice.gradient.save(to: store)
+    check("应用图标选了渐变记住", AppIconChoice.load(from: store), .gradient)
+    store.setValue("以后删掉的款式", forKey: "app.icon")
+    check("存的款式不认识就回到默认", AppIconChoice.load(from: store), .light)
+    check("菜单里的名字", AppIconChoice.allCases.map(\.title), ["浅色", "渐变"])
+    check("每款各有图标文件，名字不重", Set(AppIconChoice.allCases.map(\.resourceName)).count, AppIconChoice.allCases.count)
 }
 
 // MARK: - 按 Job 转换（带来源根）

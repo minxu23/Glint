@@ -21,7 +21,7 @@ ROUNDS=0
 # 同时静默少了几条」。
 EXPECTED_ASSERTIONS=671
 EXPECTED_UNIT=1199
-EXPECTED_GUI=312
+EXPECTED_GUI=318
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、

@@ -87,6 +87,10 @@ sudo make install          # 或 make install-cli PREFIX=~/.local
   受影响的文件夹重新读取，新的 HEIF 出现在网格里。应用不在前台时在程序坞上提醒一下，
   不发系统通知。转换记录只在这次运行里有。
 - 不监视文件夹变化：切回应用、转完、⌘R 时重新读取。
+- **应用图标**：「Glint › 应用图标」里选「浅色」（米白底、青到靛的渐变线条，默认）或「渐变」（青到靛的
+  渐变底、白色线条），马上换上并记住。程序坞里运行中的图标直接换；访达和没运行时的程序坞靠给
+  应用包设自定义图标（同「显示简介」里粘贴图标），所以选了「渐变」后应用包的严格签名校验不过——
+  本机编译的应用照常打开，`make` 重新签名前会先去掉它，下次启动再补上。选回「浅色」应用包恢复原样。
 
 ## 命令行
 
@@ -991,8 +995,8 @@ make snapshot OUT=/tmp/ui.png ARGS="--appearance dark --view list --select IMG_0
 | `Sources/CLI/Run.swift` | 两个命令共用的流程：用法、串起解析、转换与输出 |
 | `Sources/CLI/jpeg2heif/main.swift`、`Sources/CLI/raw2heif/main.swift` | 两个命令的入口，各一行 |
 | `Sources/GUI/AppName.swift` | 应用的名字（与 `Makefile` 的 `APP_NAME` 一起，改名只动这两处） |
-| `Resources/` | 应用图标：`AppIcon.icns` 装进应用包，`AppIcon-1024.png` 是大图 |
-| `Tools/make_icon.swift` | 生成应用图标（`make icon`）：极光色渐变底上一根白色羽毛，羽尖化成光——「吉光片羽」「极光」与把格式转换看作「羽化」 |
+| `Resources/` | 应用图标两款：`AppIcon.icns`（浅色，默认）、`AppIcon-Gradient.icns`（渐变）都装进应用包，`*-1024.png` 是大图 |
+| `Tools/make_icon.swift` | 生成应用图标（`make icon`）：极简的线条羽毛，羽尖上方一颗星芒——「吉光片羽」的羽毛、羽化成光；青、靛取极光的颜色 |
 | `Sources/GUI/PhotoInfo.swift` | 一张图的信息：格式、尺寸、拍摄时间、相机、位置、备注的四种来源与存放位置（不依赖 AppKit） |
 | `Sources/GUI/Library.swift` | 图库：来源、后台扫描与读元数据、过滤排序搜索、张数、文件夹树、副标题与汇总（不依赖 AppKit） |
 | `Sources/GUI/ConversionRecord.swift` | 转换的对象（面板标题与说明）、转换记录（标记、汇总、最常见的差异、活动条那句话）（不依赖 AppKit） |

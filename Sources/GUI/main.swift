@@ -5,12 +5,16 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: MainWindowController!
+    private let store = DefaultsStore()
+    /// 「应用图标」子菜单里的各项，换了款式后更新勾选。
+    private var iconItems: [NSMenuItem] = []
     private var launched = false
     /// 启动时随「打开方式」送进来的路径会先于 applicationDidFinishLaunching 到，先攒着。
     private var pendingURLs: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        controller = MainWindowController(store: DefaultsStore())
+        AppIcon.apply(AppIconChoice.load(from: store), launching: true)
+        controller = MainWindowController(store: store)
         controller.showWindow(nil)
         NSApp.setActivationPolicy(.regular)
         NSApp.mainMenu = buildMenu()
@@ -30,6 +34,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 在访达里对图片或文件夹选「打开方式」，或拖到程序坞图标上。
     func application(_ application: NSApplication, open urls: [URL]) {
         if let controller { controller.add(urls: urls) } else { pendingURLs += urls }
+    }
+
+    /// 「应用图标」子菜单里选了一款：记住，马上换上。
+    @objc func chooseAppIcon(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let choice = AppIconChoice(rawValue: raw) else { return }
+        choice.save(to: store)
+        AppIcon.apply(choice)
+        updateIconItems(choice)
+    }
+
+    private func updateIconItems(_ choice: AppIconChoice) {
+        for i in iconItems { i.state = (i.representedObject as? String) == choice.rawValue ? .on : .off }
+    }
+
+    /// 应用菜单里的「应用图标」：每款一项，带一张小图。
+    private func appIconMenuItem() -> NSMenuItem {
+        let menu = NSMenu(title: "应用图标")
+        iconItems = AppIconChoice.allCases.map { choice in
+            let i = NSMenuItem(title: choice.title, action: #selector(chooseAppIcon(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = choice.rawValue
+            if let img = AppIcon.image(choice)?.copy() as? NSImage {
+                img.size = NSSize(width: 16, height: 16)
+                i.image = img
+            }
+            menu.addItem(i)
+            return i
+        }
+        updateIconItems(AppIconChoice.load(from: store))
+        let holder = NSMenuItem(title: "应用图标", action: nil, keyEquivalent: "")
+        holder.submenu = menu
+        return holder
     }
 
     /// 没有 nib 就得自己搭菜单。动作发给响应链（nil target），由主窗口或当前焦点处理。
@@ -54,6 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hideOthers = item("隐藏其他", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
         _ = submenu(appName, [
             item("关于\(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            .separator(),
+            appIconMenuItem(),
             .separator(),
             item("隐藏\(appName)", #selector(NSApplication.hide(_:)), "h"),
             hideOthers,

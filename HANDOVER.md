@@ -29,7 +29,7 @@
 - JPEG 和 RAW 都能转，可以混在一批里。
 - 只放在 `~/Developer/Glint.app`（`make install-dev`，与 Spark 同一做法），**不装进 /Applications**。
 - 标识符 `local.minxu.glint`，可执行文件 `Glint`。
-- 图标：极光色渐变底上一根白色羽毛，羽尖化成光（`Tools/make_icon.swift`，配色 A）。
+- 图标：极简线条羽毛加一颗星芒，两款——「浅色」（米白底、青到靛渐变线条，默认）和「渐变」（渐变底、白线条），用户在「Glint › 应用图标」里选（`Tools/make_icon.swift`、`Sources/GUI/AppIcon.swift`）。
 
 **质量原则**
 

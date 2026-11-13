@@ -168,3 +168,41 @@ enum SavedFolders {
         store.setValue(folders, forKey: key)
     }
 }
+
+// MARK: - 应用图标
+
+/// 应用图标的款式，用户在应用菜单「应用图标」里选。图标文件随应用包分发
+/// （Contents/Resources/<resourceName>.icns，由 Tools/make_icon.swift 生成）。
+enum AppIconChoice: String, CaseIterable {
+    /// 米白底、青到靛的渐变线条。应用包自带的就是这款（Info.plist 的 CFBundleIconFile）。
+    case light
+    /// 青到靛的渐变底、白色线条。
+    case gradient
+
+    static let `default` = AppIconChoice.light
+    private static let key = "app.icon"
+
+    var title: String {
+        switch self {
+        case .light: return "浅色"
+        case .gradient: return "渐变"
+        }
+    }
+
+    /// 应用包里图标文件的名字，不带扩展名。
+    var resourceName: String {
+        switch self {
+        case .light: return "AppIcon"
+        case .gradient: return "AppIcon-Gradient"
+        }
+    }
+
+    /// 没存过、或存的值不认识（比如以后删掉的款式），都用默认的。
+    static func load(from store: SettingsStore) -> AppIconChoice {
+        (store.value(forKey: key) as? String).flatMap(AppIconChoice.init(rawValue:)) ?? .default
+    }
+
+    func save(to store: SettingsStore) {
+        store.setValue(rawValue, forKey: Self.key)
+    }
+}

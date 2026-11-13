@@ -62,13 +62,17 @@ eclose-flags = -I $(dir $(filter %/libEclose.a,$^))
 $(CLIS): %: $(ECLOSE_RELEASE) $(CLI_SHARED) Sources/CLI/%/main.swift
 	$(SWIFTC) $(SWIFTFLAGS) $(eclose-flags) -o $@ $^
 
-$(APP): $(ECLOSE_RELEASE) $(GUI) Sources/GUI/Info.plist Resources/AppIcon.icns
+ICONS := Resources/AppIcon.icns Resources/AppIcon-Gradient.icns
+
+$(APP): $(ECLOSE_RELEASE) $(GUI) Sources/GUI/Info.plist $(ICONS)
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	$(SWIFTC) $(SWIFTFLAGS) $(eclose-flags) -o $(APP)/Contents/MacOS/Glint $(ECLOSE_RELEASE) $(GUI)
 	@cp Sources/GUI/Info.plist $(APP)/Contents/Info.plist
-	@cp Resources/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
+	@cp $(ICONS) $(APP)/Contents/Resources/
 	@plutil -insert CFBundleName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
 	@plutil -insert CFBundleDisplayName -string '$(APP_NAME)' $(APP)/Contents/Info.plist
+	@# 应用里选过别的图标时，应用包根目录有自定义图标（Icon\r 和 FinderInfo），签名前去掉
+	@rm -f $(APP)/Icon?; xattr -d com.apple.FinderInfo $(APP) 2>/dev/null || true
 	@codesign --force --sign - $(APP) 2>/dev/null || true
 	@touch $(APP)
 	@echo "已生成 $(APP)"
