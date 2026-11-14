@@ -19,7 +19,7 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=674
+EXPECTED_ASSERTIONS=680
 EXPECTED_UNIT=1199
 EXPECTED_GUI=318
 
@@ -354,6 +354,31 @@ for mode in "" "--no-repair"; do
         && pass "探针对垃圾文件报「无法读取」而不是「无」${mode:+（$mode）}" \
         || fail "探针把读取失败报成了 [$v]${mode:+（$mode）}"
 done
+
+# 读不了、写不进时说清原因，不笼统说「编码失败」。
+L="$WORK/权限"
+mkdir -p "$L/只读"
+cp "$WORK/照片.jpg" "$L/不可读.jpg"
+chmod 000 "$L/不可读.jpg"
+check "没有读权限：说清原因" "$("$BIN" "$L/不可读.jpg" 2>&1 | head -1)" "失败 不可读.jpg: 没有读取权限"
+chmod 644 "$L/不可读.jpg"
+chmod 555 "$L/只读"
+out=$("$BIN" -o "$L/只读" "$WORK/照片.jpg" 2>&1 | head -1)
+chmod 755 "$L/只读"
+check "输出目录只读：说清原因" "$out" "失败 照片.jpg: 写不进输出目录（没有写权限或建不出来）：$PWD/$L/只读"
+
+# 源是符号链接：文件时间、扩展属性按它指向的文件来（符号链接自己身上是另一套），体积也按那个文件算；
+# --delete-original 不删符号链接，也不删它指向的文件。
+cp "$WORK/照片.jpg" "$L/真身.jpg"
+touch -t 202001020304 "$L/真身.jpg"
+xattr -w com.apple.metadata:kMDItemFinderComment "真身上的访达备注" "$L/真身.jpg"
+ln -s 真身.jpg "$L/链接.jpg"   # 相对路径的符号链接，指向同一目录里的文件
+out=$("$BIN" --verify --delete-original "$L/链接.jpg" 2>&1)
+check "符号链接：产物的修改时间按它指向的文件" "$(stat -f %m "$L/链接.heic" 2>/dev/null)" "$(stat -f %m "$L/真身.jpg")"
+check "符号链接：扩展属性按它指向的文件" "$(xattr -p com.apple.metadata:kMDItemFinderComment "$L/链接.heic" 2>/dev/null)" "真身上的访达备注"
+grep -qF "源是符号链接，没有删除（它指向的文件也没删）" <<< "$out" && ! grep -qF "比原图大" <<< "$out" \
+    && pass "符号链接：体积按它指向的文件算，说明没删的原因" || { fail "符号链接：体积算错或没说明"; sed 's/^/     /' <<< "$out"; }
+[ -L "$L/链接.jpg" ] && [ -f "$L/真身.jpg" ] && pass "符号链接：链接和它指向的文件都还在" || fail "符号链接：删了不该删的"
 
 round "6. 不合规范的 UserComment（无字符集前缀的裸 UTF-8）"
 # 很多安卓机型这么写，ImageIO 认不出来会整条丢掉，工具需要自己解析补回。

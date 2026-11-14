@@ -367,9 +367,19 @@ public func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> Convert
 }
 
 /// `encode` 只供单测注入假的编码步骤；命令行和界面都走上面那个公开的入口（encodeHEIF）。
-func convert(_ input: URL, opts: ConversionOptions, dest: URL,
+func convert(_ given: URL, opts: ConversionOptions, dest: URL,
              encode: HEIFEncoder) -> ConvertResult {
+    // 源是符号链接时，读的是它指向的那个文件：大小、文件时间、扩展属性（访达备注与标签、「照片」的
+    // 说明）都在那个文件上，符号链接自己身上是另一套（扩展属性按 XATTR_NOFOLLOW 读）。不解开的话
+    // 这些会悄悄换成符号链接的，校验也读同一个符号链接，发现不了。产物的名字照旧取符号链接的名字
+    // （dest 早已定好）。删源时不删：删符号链接省不下空间，删它指向的文件又不是用户点名的那个。
+    let isSymlink = (try? given.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+    let input = isSymlink ? given.resolvingSymlinksInPath() : given
     guard let src = CGImageSourceCreateWithURL(input as CFURL, nil) else {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: input.path) && !fm.isReadableFile(atPath: input.path) {
+            return .failed("没有读取权限")
+        }
         return .failed("无法读取图像")
     }
     let type = CGImageSourceGetType(src) as String?
@@ -437,7 +447,9 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
         }
         return (tmp, opts.rawExif ? carryExif(kind, source: input, product: tmp) : nil)
     }
-    guard var product = encodeAndCarry() else { return .failed(encodeFailureReason(src, kind: kind)) }
+    guard var product = encodeAndCarry() else {
+        return .failed(encodeFailureReason(src, kind: kind, folder: folder))
+    }
     if kind == .raw, let problem = rawProductDepthProblem(product.url) {
         try? fm.removeItem(at: product.url)
         return .failed(problem)
@@ -488,6 +500,8 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
     if opts.deleteOriginal {
         if kind == .raw {
             notes.append("RAW 原片永远保留，没有删除")
+        } else if isSymlink {
+            notes.append("源是符号链接，没有删除（它指向的文件也没删）")
         } else if verification != .passed {
             notes.append("因元数据校验未通过，保留了源文件")
         } else if growth != nil {
@@ -907,7 +921,11 @@ func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
 
 /// 编码失败时说清是哪一头的问题。源本身解不出图像（截断、损坏的文件）时，「HEIC 编码失败」
 /// 会让人去怀疑编码器；这里先试着解一次源图。只在失败时才解：RAW 解一次就是整幅显影，平时不该多花这一遍。
-func encodeFailureReason(_ src: CGImageSource, kind: SourceKind) -> String {
+/// 输出目录写不进去（没有写权限、建不出来）时也会表现为编码失败，先查这一条。
+func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL) -> String {
+    if !FileManager.default.isWritableFile(atPath: folder.path) {
+        return "写不进输出目录（没有写权限或建不出来）：\(folder.path)"
+    }
     guard CGImageSourceCreateImageAtIndex(src, 0, nil) == nil else { return "HEIC 编码失败" }
     switch kind {
     case .raw: return "显影失败：读不出 RAW 的图像数据，文件可能不完整或已损坏"
