@@ -3,7 +3,7 @@
 Status: resolved
 Round: 9
 Source: Standards 基线气味（第 9 轮报告，2026-11-10T06:35Z）
-Fixed by: eac5f46
+Fixed by: 755285b
 Review: ../reviews/round-09-standards.md
 
 ## 意见原文

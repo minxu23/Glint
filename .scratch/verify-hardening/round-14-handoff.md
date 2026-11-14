@@ -3,7 +3,7 @@
 工作规则、长期要求、变异与 mtime 陷阱的注意事项，全部沿用
 [`round-12-handoff.md`](round-12-handoff.md) 的第 0 节，先读那一节。本稿只有一条。
 
-## 现象（交接方已复现，main = c4834fc）
+## 现象（交接方已复现，main = 0243ace）
 
 源 JPEG 里一条**完整的、带 `UNICODE\0` 前缀的非 ASCII UserComment**，如果字段后面
 没有足够的 NUL 填充，转成 HEIC 后只剩大约前一半：
@@ -15,7 +15,7 @@
 
 - ImageIO **读**源时拿到的是完整的字符串（`probe --no-repair` 读 B 得到全文），截断发生在
   **写**产物时。
-- 不是近两轮引入的：用 `10c2dfd`（单遍旧路径）的二进制转同一张 B，结果相同。
+- 不是近两轮引入的：用 `3bbf37d`（单遍旧路径）的二进制转同一张 B，结果相同。
 - 不是静默的：`--verify` 会报 `{Exif}/UserComment` 和 `XMP/exif:UserComment` 两条"变化"，
   `--delete-original` 保留源。但数据确实没搬过去。
 - README `## 已知限制` 写的是"本工具走的是源属性直通路径，源文件里的 NUL 填充恰好抵消了

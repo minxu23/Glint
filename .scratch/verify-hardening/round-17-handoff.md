@@ -5,7 +5,7 @@
 `cp -p` 从快照还原，会连旧 mtime 一起还原，make 不重编，下一次测的还是变异版——还原后
 `touch` 源文件，并确认那次 `make test` 里有 swiftc 那行。
 
-## 交接方量到的事实（main = 0bfa5b9）
+## 交接方量到的事实（main = 5cd36ee）
 
 量具在 [`round-17-repro/`](round-17-repro/)，只供参考写法，测试不得依赖。
 

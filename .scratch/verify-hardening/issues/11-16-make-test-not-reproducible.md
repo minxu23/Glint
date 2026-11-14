@@ -3,7 +3,7 @@
 Status: resolved
 Round: 11
 Source: 我自己（两轴都没提——是我在本轮改动中间偶然撞上的）
-Fixed by: 10c2dfd
+Fixed by: 3bbf37d
 Review: ../reviews/round-11-aggregate.md
 
 ## 缺陷
@@ -40,6 +40,6 @@ Review: ../reviews/round-11-aggregate.md
 ## Comments
 
 2026-11-13 复核：根因是两次 `make test` 共用固定的 `Tests/.work`，并发时互相擦对方的文件
-（第 12 轮交接稿的 L1「并发互踩」）。`10c2dfd` 改成每次运行用 `mktemp -d` 建独立的
+（第 12 轮交接稿的 L1「并发互踩」）。`3bbf37d` 改成每次运行用 `mktemp -d` 建独立的
 `Tests/.work.XXXXXX`，通过即删、失败保留，同时删掉了本条加的「擦完数文件」守卫（它防的是错的
-假设）。当时错开 1/2/4/6 秒并发两次，八次全过；之后到 `3db17b5` 没再出现过。
+假设）。当时错开 1/2/4/6 秒并发两次，八次全过；之后到 `f4d4d75` 没再出现过。

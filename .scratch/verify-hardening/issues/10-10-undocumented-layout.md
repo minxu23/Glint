@@ -3,7 +3,7 @@
 Status: resolved
 Round: 10
 Source: Standards 轴（第 10 轮报告，2026-11-10T08:27Z / 08:31Z）
-Fixed by: dbb1e1e
+Fixed by: 60b1783
 Review: ../reviews/round-10-standards.md
 
 ## 意见原文

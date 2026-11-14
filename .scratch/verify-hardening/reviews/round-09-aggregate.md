@@ -1,7 +1,7 @@
 # 第 9 轮 聚合报告（原文）
 
 - 报告时间：2026-11-10T06:35Z
-- 修复提交：eac5f46（定点 cb4b42e）
+- 修复提交：755285b（定点 851d6d1）
 - 来源：本仓库开发会话的转写本，逐字复制，未经编辑。
 
 > 下面是当时呈现给用户的聚合报告原文。两轴的措辞保持分开，没有合并也没有重排。
@@ -31,7 +31,7 @@
 struct DigitShape {
 ```
 
-这是既有的孤儿注释(在 `cb4b42e` 时悬在 `numericFields` 头上),但 diff 把它重新挂到了一个**新的公开类型**上,于是 `DigitShape` 现在被记载为"UTC 偏移"。应搬回 `struct UTCOffset`。
+这是既有的孤儿注释(在 `851d6d1` 时悬在 `numericFields` 头上),但 diff 把它重新挂到了一个**新的公开类型**上,于是 `DigitShape` 现在被记载为"UTC 偏移"。应搬回 `struct UTCOffset`。
 
 **`MetadataDiff.swift:337` 代码注释引用了 README 排除的键(判断题)**
 

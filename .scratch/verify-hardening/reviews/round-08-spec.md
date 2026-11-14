@@ -6,7 +6,7 @@
 
 ---
 
-## Spec 轴评审（4bbdf80...HEAD，1 个提交）
+## Spec 轴评审（9c67039...HEAD，1 个提交）
 
   已实跑 `make test`：全绿，「12 轮，60 项断言」，`unit-test` 实测 202 条、guimodel 37 条，三个 EXPECTED_* 与实际一致；工作树干净（`git status --short` 无输出）。另用 `swiftc Sources/Core/*.swift` + 临时 main 直接探了 `UTCOffset(parsing:)` / `splitIIMTime`（临时文件在 `/private/tmp/claude-501/-Users-minxu-Claude/44cedf7f-2708-42ba-bc48-8bf34b801508/scratchpad/p2/`）。
 

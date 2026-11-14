@@ -3,7 +3,7 @@
 Status: resolved
 Round: 6
 Source: Standards 3 + Spec (c) 4（第 6 轮报告，2026-11-10T01:51Z）
-Fixed by: d717eeb
+Fixed by: 909cd1e
 Review: ../reviews/round-06-standards.md
 
 ## 意见原文

@@ -116,4 +116,4 @@ Status: resolved
 
 ## Comments
 
-2026-11-13：已实现并合并到 main（`5ccab4b` … `2612c46`），验收结果见仓库根目录的 HANDOVER.md。
+2026-11-13：已实现并合并到 main（`c48b6bb` … `2e888c1`），验收结果见仓库根目录的 HANDOVER.md。

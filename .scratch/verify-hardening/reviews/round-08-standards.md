@@ -6,7 +6,7 @@
 
 ---
 
-## 标准轴评审（`4bbdf80...HEAD`，提交 `cb4b42e`）
+## 标准轴评审（`9c67039...HEAD`，提交 `851d6d1`）
 
   ### 硬违规：无
   仓库无 CODING_STANDARDS/CONTRIBUTING；`CLAUDE.md` 只规定 issue 位置与 triage 标签，`README.md ## 测试` 只描述自检覆盖范围、不约束断言计数。本次 diff 未触碰这两处的规则面。README 第 136 行补「秒允许 60，那是闰秒」与代码 `parts[2] <= 60` 一致，文档与实现同步，合格。

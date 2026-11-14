@@ -27,7 +27,7 @@
   struct DigitShape {
   ```
 
-  Pre-existing orphan (it hung over `numericFields` at cb4b42e), but the diff re-parents it onto a *new public type*, so `DigitShape` is now documented as "UTC 偏移". Move it back onto `struct UTCOffset`.
+  Pre-existing orphan (it hung over `numericFields` at 851d6d1), but the diff re-parents it onto a *new public type*, so `DigitShape` is now documented as "UTC 偏移". Move it back onto `struct UTCOffset`.
 
   ### MetadataDiff.swift:337 — code comment cites a key the README excludes (judgement call)
 

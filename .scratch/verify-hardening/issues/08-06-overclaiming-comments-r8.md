@@ -3,7 +3,7 @@
 Status: resolved
 Round: 8
 Source: Standards 1（第 8 轮报告，2026-11-10T04:28Z）
-Fixed by: b5244c1
+Fixed by: 72dd2d0
 Review: ../reviews/round-08-standards.md
 
 ## 意见原文

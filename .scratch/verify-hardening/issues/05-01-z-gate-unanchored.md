@@ -3,7 +3,7 @@
 Status: resolved
 Round: 5
 Source: Spec (c)（第 5 轮报告，2026-11-10T01:29Z）
-Fixed by: f2b016a
+Fixed by: 8028818
 Review: ../reviews/round-05-spec.md
 
 ## 意见原文

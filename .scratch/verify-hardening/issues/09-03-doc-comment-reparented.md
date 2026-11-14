@@ -3,7 +3,7 @@
 Status: resolved
 Round: 9
 Source: Standards 2 + Spec (c) 1（第 9 轮报告，2026-11-10T06:35Z）
-Fixed by: eac5f46
+Fixed by: 755285b
 Review: ../reviews/round-09-spec.md
 
 ## 意见原文
@@ -12,4 +12,4 @@ Review: ../reviews/round-09-spec.md
 
 ## 结论
 
-既有的孤儿注释（cb4b42e 时悬在 numericFields 头上），但上一轮我把它搬到了一个新引入的类型头上，从悬空变成错配。
+既有的孤儿注释（851d6d1 时悬在 numericFields 头上），但上一轮我把它搬到了一个新引入的类型头上，从悬空变成错配。

@@ -8,7 +8,7 @@
 
 ## Standards axis
 
-  ### Ledger (`4210cc2`) — documented-standard breaches
+  ### Ledger (`2885887`) — documented-standard breaches
 
   **1. Issue filenames don't match the documented scheme (hard).** `docs/agents/issue-tracker.md:9`: "Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`"; the Wayfinding section repeats `.scratch/<effort>/issues/NN-<slug>.md`. All 52 files use a two-part `NN-MM-<slug>.md` and restart `MM` at `01` each round. `spec.md` asserts "格式依 [`docs/agents/issue-tracker.md`]" and then defines its own scheme two lines later. Either rename to one running number or amend `issue-tracker.md` to bless `NN-MM`.
 
@@ -16,7 +16,7 @@
 
   *Not a violation, no action:* `Status: resolved` (47 files) is outside `triage-labels.md`'s five strings, but `issue-tracker.md:26` defines `resolved` and `spec.md` documents the borrowing. Numbering, `Round:`/`Review:` cross-references and header shape are internally consistent with no gaps (checked all 52).
 
-  ### Code (`eac5f46`)
+  ### Code (`755285b`)
 
   **3. The diff strands a doc comment it contradicts (hard).** `/Users/minxu/Claude/jpeg2heif/Sources/Core/MetadataDiff.swift:252-258`, unchanged, still reads: "`normalizedOffset` 里那句「宽度前提在本函数内成立」还在，而且该在，因为那里真有一个按宽度分支的 switch。调用点各自 guard 字段个数也是同一个道理". This diff deleted that `switch` (now `.first(where: { $0.length == body.count })`) and deleted both `parts.count` guards. Both halves of the sentence are now false.
 

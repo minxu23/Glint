@@ -21,7 +21,7 @@
 
 不能照搬的情形（见 3.3）退回现在的路，行为与现在逐字节相同。
 
-## 2. 交接方量到的事实（main = dff53a0）
+## 2. 交接方量到的事实（main = abc3b7b）
 
 量具在 [`round-18-repro/`](round-18-repro/)：`exifswap.py`（探针，`swapx` 是定稿的布局）、
 `chk.swift`（ImageIO 读回：属性、像素哈希、转正缩略图、辅助图）、`thumb.swift`、`fzone.sh`。
@@ -77,7 +77,7 @@
 
 ### 2.5 现行校验对替换后的产物怎么说
 
-用 0bfa5b9 的 `metadataDiff` 比「源 vs 替换后的产物」：EXIF 这一层的差异行全部消失
+用 5cd36ee 的 `metadataDiff` 比「源 vs 替换后的产物」：EXIF 这一层的差异行全部消失
 （MakerNote、PrintImageMatching、ImageUniqueID、GPS 秒的精度、类型不合规范的标签、放错 IFD 的
 标签），只剩 HEIF 里本来就没处放的东西（APP2 FPXR、APP7–10、APP8、EOI 之后的数据）。
 没有一张样本多出新的差异行——除了下面 2.6 的三种。
@@ -124,7 +124,7 @@
 `ConversionOptions` 加一个布尔量，默认开。命令行加 `--no-raw-exif` 关掉它（帮助里写：
 EXIF 交给系统重写、不整块照搬；遇到读不了产物的软件时用）。图形界面不加开关，用默认值。
 
-关掉时的产物和校验输出必须与 dff53a0 **逐字节、逐行相同**。
+关掉时的产物和校验输出必须与 abc3b7b **逐字节、逐行相同**。
 
 ### 3.2 容器改写（批 A 的核心，纯函数：进产物字节与源 EXIF 字节，出新字节或「不换」的原因）
 
@@ -274,7 +274,7 @@ ImageUniqueID 各条规则自然全过，不用为它们加分支。
 
 ### 6.4 零噪声与不退步
 
-- `--no-raw-exif`：测试套件里所有夹具、`test_pic/` 两张，产物与 dff53a0 逐字节相同，
+- `--no-raw-exif`：测试套件里所有夹具、`test_pic/` 两张，产物与 abc3b7b 逐字节相同，
   `--verify` 输出逐行相同。
 - 默认路径：同一批输入，`--verify` 的差异行**只少不多**（按条目名算，不看值）；源里没有 EXIF
   的、被挡回旧路的，产物与 `--no-raw-exif` 逐字节相同。

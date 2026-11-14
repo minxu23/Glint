@@ -6,7 +6,7 @@
 
 ---
 
-## Spec axis — round 9 (`b5244c1`)
+## Spec axis — round 9 (`72dd2d0`)
 
   Verified by mutation testing a scratch copy (baseline 215 unit assertions, `make test` green at 60/215/37).
 

@@ -1,7 +1,7 @@
 # 第 10 轮 聚合报告（原文）
 
 - 报告时间：2026-11-10T08:33Z
-- 修复提交：dbb1e1e、765150b、3d9cd10（定点 b5244c1）
+- 修复提交：60b1783、a36c55b、214fe00（定点 72dd2d0）
 - 来源：本仓库开发会话的转写本，逐字复制，未经编辑。
 
 > 下面是当时呈现给用户的聚合报告原文。两轴的措辞保持分开，没有合并也没有重排。
@@ -12,7 +12,7 @@
 
 ## Standards
 
-### 账本(`4210cc2`)——成文标准违反
+### 账本(`2885887`)——成文标准违反
 
 **1. issue 文件名不符合成文的命名方案(硬)。** `docs/agents/issue-tracker.md:9`:「Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`」;Wayfinding 一节重复了 `.scratch/<effort>/issues/NN-<slug>.md`。52 个文件全部用两段式 `NN-MM-<slug>.md`,且 `MM` 每轮从 `01` 重数。`spec.md` 先断言「格式依 `docs/agents/issue-tracker.md`」,两行之后又自定了一套方案。要么改成单一流水号,要么修改 `issue-tracker.md` 认可 `NN-MM`。
 
@@ -20,7 +20,7 @@
 
 *不算违反,无需动作:* `Status: resolved`(47 个文件)不在 `triage-labels.md` 的五个字符串里,但 `issue-tracker.md:26` 定义了 `resolved`,且 `spec.md` 写明了这是借用。编号、`Round:`/`Review:` 交叉引用和头部形状内部一致,无缺口(52 个全查了)。
 
-### 代码(`eac5f46`)
+### 代码(`755285b`)
 
 **3. diff 让一条它自己推翻的文档注释搁在那里(硬)。** `MetadataDiff.swift:252-258`,未改动,仍写着:「`normalizedOffset` 里那句「宽度前提在本函数内成立」还在,而且该在,因为那里真有一个按宽度分支的 switch。调用点各自 guard 字段个数也是同一个道理」。本 diff 删掉了那个 `switch`(现在是 `.first(where: { $0.length == body.count })`),也删掉了两个 `parts.count` 守卫。这句话的两个分句现在都是假的。
 

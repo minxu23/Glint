@@ -75,4 +75,4 @@ Status: resolved
 
 ## Comments
 
-2026-11-13：已实现并合并到 main（`72e82ab`、`e2428c2`、`efc8c6e`），验收结果见仓库根目录的 HANDOVER.md。
+2026-11-13：已实现并合并到 main（`e03a0e9`、`7b8554a`、`2dd7162`），验收结果见仓库根目录的 HANDOVER.md。

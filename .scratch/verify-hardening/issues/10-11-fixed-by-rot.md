@@ -3,7 +3,7 @@
 Status: resolved
 Round: 10
 Source: 我自己（两轴都没提——这个缺陷是在修本轮意见的过程中造出来的）
-Fixed by: 765150b
+Fixed by: a36c55b
 Review: ../reviews/round-10-spec.md
 
 ## 缺陷

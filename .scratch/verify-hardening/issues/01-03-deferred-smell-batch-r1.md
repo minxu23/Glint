@@ -16,11 +16,11 @@ Review: ../reviews/round-01-standards.md
 
 ## Comments
 
-2026-11-13 复核：三条逐条对照 `3db17b5` 的代码，都已落地：
+2026-11-13 复核：三条逐条对照 `f4d4d75` 的代码，都已落地：
 
 1. 测试里重复的 `allJpegs(in:)` / `heics(in:)`：已合成 `files(in:ext:deep:)`（`Tests/guimodel/main.swift`）。
 2. `detailText` 的重复 switch：现在是 `case .skipped(let why), .failed(let why)` 直接绑定；
    `RowStatus.isSettled` 已有，`recount()` 用它数完成的行（`Sources/GUI/Model.swift`）。
 3. `updateOptions` 放宽了口子：现在改完会把 `inputs`、`output` 还原成改之前的值，调用方改不动这两项。
 
-各处修法在仓库第一个提交 `ecc0f1b`（基线）里就已经在了，具体是哪一轮改的，从转写本里对不出来。
+各处修法在仓库第一个提交 `fada564`（基线）里就已经在了，具体是哪一轮改的，从转写本里对不出来。
