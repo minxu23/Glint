@@ -19,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=682
-EXPECTED_UNIT=1199
+EXPECTED_ASSERTIONS=685
+EXPECTED_UNIT=1203
 EXPECTED_GUI=319
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -379,6 +379,22 @@ check "符号链接：扩展属性按它指向的文件" "$(xattr -p com.apple.m
 grep -qF "源是符号链接，没有删除（它指向的文件也没删）" <<< "$out" && ! grep -qF "比原图大" <<< "$out" \
     && pass "符号链接：体积按它指向的文件算，说明没删的原因" || { fail "符号链接：体积算错或没说明"; sed 's/^/     /' <<< "$out"; }
 [ -L "$L/链接.jpg" ] && [ -f "$L/真身.jpg" ] && pass "符号链接：链接和它指向的文件都还在" || fail "符号链接：删了不该删的"
+
+# 批量转换中途被打断（kill，和终端里 Ctrl-C 一样）：输出目录里不留以点开头、看不见的临时产物，
+# 说一句已中断，退出码 128 + 15。等第一张产物出来再打断，保证是转到一半。
+# 打断的那一刻多半没有写到一半的文件（ImageIO 收尾时才建文件），所以「没剩下」这条拦不住清理被
+# 去掉；拦得住的是「说已中断」那条（没装信号处理就没有这句）。清理本身的逻辑在单测里按确定的时序验。
+I="$WORK/中断"
+mkdir -p "$I/源"
+make_sample ./Tests/fixture --camera panasonic "$I/源/0.jpg"
+for i in $(seq 1 299); do cp "$I/源/0.jpg" "$I/源/$i.jpg"; done
+"$BIN" -o "$I/出" -j 8 "$I/源" >/dev/null 2>"$I/err.txt" & pid=$!
+for _ in $(seq 1 1000); do ls "$I/出" 2>/dev/null | grep -q '\.heic$' && break; sleep 0.01; done
+kill -TERM "$pid"; wait "$pid"; st=$?
+done_count=$(ls "$I/出" | grep -c '\.heic$')
+[ "$done_count" -gt 0 ] && [ "$done_count" -lt 300 ] && pass "前提：打断时转到一半（$done_count / 300）" || fail "前提：打断时不是转到一半（$done_count / 300）"
+check "打断后输出目录里没有剩下的临时产物" "$(ls -A "$I/出" | grep -c '^\.glint-')" "0"
+[ "$st" -eq 143 ] && grep -qF "已中断" "$I/err.txt" && pass "打断时说已中断，退出码 143" || { fail "打断时退出码 $st 或没说已中断"; sed 's/^/     /' "$I/err.txt"; }
 
 round "6. 不合规范的 UserComment（无字符集前缀的裸 UTF-8）"
 # 很多安卓机型这么写，ImageIO 认不出来会整条丢掉，工具需要自己解析补回。

@@ -3419,6 +3419,29 @@ check("源里没有方向、产物里多出一个：报", rawProductIssues(sourc
 upright.removeValue(forKey: kCGImagePropertyOrientation)
 check("源里没有方向、产物里也没有：不报", rawProductIssues(source: noOrientation, product: upright), [])
 
+print("被打断时清理临时产物（TemporaryFiles）")
+// 用一个新实例，不碰 TemporaryFiles.shared：收尾以后它不再登记新的，后面的转换都会失败。
+do {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("glint-temporaries-\(UUID().uuidString)")
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let registry = TemporaryFiles()
+    let written = dir.appendingPathComponent(".glint-a.heic")
+    let late = dir.appendingPathComponent(".glint-b.heic")
+    check("收尾前登记得上", registry.register(written) && registry.register(late), true)
+    fm.createFile(atPath: written.path, contents: Data([1]))
+    // late 这张还在编码：0.1 秒后才冒出文件（ImageIO 收尾时才建文件），0.3 秒后转换收手、注销。
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { fm.createFile(atPath: late.path, contents: Data([2])) }
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { registry.forget([late]) }
+    let started = Date()
+    let removed = registry.shutDown(timeout: 2)
+    check("收尾删掉已经写出的、等待期间冒出来的临时文件", [removed == 2, fm.fileExists(atPath: written.path), fm.fileExists(atPath: late.path)],
+          [true, false, false])
+    check("收尾会等正在进行的转换收手（不是一删就走）", Date().timeIntervalSince(started) >= 0.25, true)
+    check("收尾以后不再登记新的临时文件", registry.register(dir.appendingPathComponent(".glint-c.heic")), false)
+    try? fm.removeItem(at: dir)
+}
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args, command: .jpeg2heif) else { return nil }

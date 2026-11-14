@@ -442,8 +442,13 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     var destProps = props
     destProps[kCGImageDestinationLossyCompressionQuality] = opts.quality
     /// 「编码 + 照搬」一遍，写进一个新的临时文件。编码失败是 nil，临时文件已删。
+    /// 临时文件登记在 TemporaryFiles 里，进程被打断时由命令行或应用删掉；convert 返回时注销。
+    var temporaries: [URL] = []
+    defer { TemporaryFiles.shared.forget(temporaries) }
     func encodeAndCarry() -> (url: URL, rawExif: RawExifOutcome?)? {
         let tmp = folder.appendingPathComponent(".glint-\(UUID().uuidString).heic")
+        guard TemporaryFiles.shared.register(tmp) else { return nil }   // 已经在收尾
+        temporaries.append(tmp)
         guard encode(src, destProps, xmp, tmp) else {
             try? fm.removeItem(at: tmp)
             return nil
@@ -936,6 +941,7 @@ func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
 /// 会让人去怀疑编码器；这里先试着解一次源图。只在失败时才解：RAW 解一次就是整幅显影，平时不该多花这一遍。
 /// 输出目录写不进去（没有写权限、建不出来）时也会表现为编码失败，先查这一条。
 func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL) -> String {
+    if TemporaryFiles.shared.isShuttingDown { return "已中断" }
     if !FileManager.default.isWritableFile(atPath: folder.path) {
         return "写不进输出目录（没有写权限或建不出来）：\(folder.path)"
     }

@@ -87,6 +87,33 @@ func warn(_ msg: String) {
     FileHandle.standardError.write(Data("警告: \(msg)\n".utf8))
 }
 
+// MARK: - 被打断时清理
+
+/// 信号源要一直留着，否则被释放就不再响应。
+private var interruptSources: [DispatchSourceSignal] = []
+
+/// Ctrl-C（SIGINT）、kill（SIGTERM）、关掉终端（SIGHUP）时：删掉还没写完的临时产物
+/// （输出目录里以点开头、看不见的 `.glint-*.heic`），说一句，再按惯例的退出码（128 + 信号）退出。
+/// 已经转完的那些照常（产物在，开了删源的、合乎条件的源已删）；没转完的源文件没有动——删源只在
+/// 一张转完、校验通过之后。
+/// 启动时就被忽略的信号照旧忽略：nohup 会忽略 SIGHUP，后台作业会忽略 SIGINT。
+func installInterruptCleanup() {
+    for sig in [SIGINT, SIGTERM, SIGHUP] {
+        let previous = signal(sig, SIG_IGN)
+        // 函数指针不能直接比，比地址（SIG_IGN 是一个固定的哨兵值）。
+        guard unsafeBitCast(previous, to: Int.self) != unsafeBitCast(SIG_IGN, to: Int.self) else { continue }
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
+        source.setEventHandler {
+            let removed = removeInFlightTemporaries()
+            let note = removed > 0 ? "，删掉了 \(removed) 个没写完的临时文件" : ""
+            FileHandle.standardError.write(Data("\n已中断\(note)；已经转完的照常保留，没转完的源文件没有动\n".utf8))
+            exit(128 + sig)
+        }
+        source.resume()
+        interruptSources.append(source)
+    }
+}
+
 // MARK: - 主流程
 
 func runCommandLine(_ command: Command) -> Never {
@@ -122,8 +149,11 @@ func runCommandLine(_ command: Command) -> Never {
     }
 
     var tally = BatchTally()
+    installInterruptCleanup()
 
     let renameNotices = runConversions(files, opts: opts, plan: plan) { job, result in
+        // 被打断以后还在收手的那几张不逐张报（多半是「已中断」），收尾的那句话会说清楚。
+        guard !conversionsInterrupted else { return }
         tally.record(result)
         let input = job.input
         switch result {

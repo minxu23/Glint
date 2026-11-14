@@ -2,6 +2,7 @@
 // 宏插件只随完整版 Xcode 分发，而 AppKit 用命令行工具即可构建。
 
 import AppKit
+import Eclose
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: MainWindowController!
@@ -24,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// 转换进行中退出：还没写完的临时产物（以点开头、访达里看不见）删掉，不留在用户的文件夹里。
+    func applicationWillTerminate(_ notification: Notification) {
+        _ = removeInFlightTemporaries()
+    }
 
     /// 切回应用时重新读取（不监视文件夹变化）。启动那一次不算。
     func applicationDidBecomeActive(_ notification: Notification) {
