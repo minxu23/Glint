@@ -115,7 +115,7 @@ expectEquivalent(timeKey, "184207", noOffset, true, "不带偏移的时间，目
 //     而 OffsetTime* 它不会自己补。所以源里不写 EXIF OffsetTime* 时，
 //     XMP 就是目标里唯一的偏移承载——selftest.sh 的「偏移只靠 XMP 承载」
 //     一轮走的正是这条路（夹具的 --no-exif-offset）。
-// 键的拼法已对着真实照片核过：IMG_1225.JPG / P1130939.JPG 的 ImageIO 输出里
+// 键的拼法已对着两张真实的相机照片（佳能、松下）核过：ImageIO 输出里
 // 确实是 `XMP/photoshop:DateCreated` 与 `XMP/xmp:CreateDate`（形如
 // `2011-01-19T22:01:00.00`），转成 HEIC 后两者都还在。
 expectEquivalent(timeKey, "184207+0800", ["XMP/photoshop:DateCreated": "2024-09-15T18:42:07+08:00"],

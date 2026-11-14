@@ -136,7 +136,7 @@ $(TEST_TOOLS): $$(ECLOSE_LIB) $$(TOOL_SRC)
 	$(SWIFTC) $(SWIFTFLAGS) $(eclose-flags) -o $@ $^
 
 # 夹具不需要 Eclose，单独一条。DNG.swift 是现场生成 DNG 的那一段，单测也链它。
-Tests/fixture: Tests/fixture-src/main.swift Tests/DNG.swift
+Tests/fixture: Tests/fixture-src/main.swift Tests/DNG.swift Tests/CameraJPEG.swift
 	$(SWIFTC) $(SWIFTFLAGS) -o $@ $^
 
 snapshot: Tests/uisnapshot

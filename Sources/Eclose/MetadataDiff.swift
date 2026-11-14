@@ -124,7 +124,7 @@ func isVolatile(_ key: String) -> Bool {
 /// 缩略图是从像素派生的预览，有意不报（README「--verify 到底比什么」）。
 ///
 /// ImageIO 在容器级属性的 `{FileContents}` 字典里给每张缩略图列一组键。实测这个
-/// 字典只在 JPEG 带辅助图时出现：带 IFD1 缩略图、不带辅助图的照片（`test_pic/` 两张）
+/// 字典只在 JPEG 带辅助图时出现：带 IFD1 缩略图、不带辅助图的相机照片（当时用两张真实照片量的）
 /// 读不出它。子键只收实测见过的五个，ImageIO 以后多吐一个子键，它会照常被报出来，
 /// 而不是被一个前缀悄悄吞掉。
 let thumbnailKeys: Set<String> = Set(["Width", "Height", "Orientation", "ThumbnailOffset", "ThumbnailSize"]

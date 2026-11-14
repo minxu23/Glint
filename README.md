@@ -451,8 +451,9 @@ XMP：批量并发转换时，两个文件用同一个前缀指不同的命名�
   - K 或 P 不是 0：`丢失 EOI 之后的 R 字节（尾部共 M 字节，其中 K 字节是已搬进产物的辅助图像，P 字节是 MPF 登记的预览图，不需要带）`，
     是 0 的那一项不写。
 
-  例如仓库里的 `test_pic/P1130939.JPG`：尾部 845456 字节，其中 845023 字节是预览图，
-  另有 384 字节 MPF 没登记的相机数据，报 `丢失 EOI 之后的 433 字节（…其中 845023 字节是 MPF 登记的预览图，不需要带）`。
+  例如一张松下相机直出的照片（测试里照它搭的样本是 `fixture --camera panasonic`）：尾部 105626 字节，
+  其中 105193 字节是预览图，另有 384 字节 MPF 没登记的相机数据，报
+  `丢失 EOI 之后的 433 字节（…其中 105193 字节是 MPF 登记的预览图，不需要带）`。
 
 **辅助图本身由键空间比对管着。** ImageIO 在容器级属性的 `{FileContents}` 里给每张
 辅助图列一组键（类型、宽、高、像素格式、增益图的 `HDRHeadroom`，ISO 增益图还有
@@ -593,8 +594,8 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
   （`0x4746`）、`RatingPercent`（`0x4749`）。ImageIO 不读这几个标签，系统重写 EXIF 时
   也不写。承载它们的有两种：产物原始 EXIF 的 IFD0 里有同一个标签、解出来的值相同
   （EXIF 整块照搬过的产物就是这样；源里值读不出的不算）；或者目标里的等价字段带着
-  同一个值。Windows 写它们时通常同时写一份标准字段（`test_pic/IMG_1225.JPG` 的
-  `XPAuthor` 与 `Artist` 都是 `Zhang San;Li Si`），标准字段会被搬走，所以判据和 IIM 日期
+  同一个值。Windows 写它们时通常同时写一份标准字段（例如 `XPAuthor` 与 `Artist` 都是
+  `Zhang San;Li Si`，测试里的 `fixture --camera canon` 照这种情形搭），标准字段会被搬走，所以判据和 IIM 日期
   一样：等价字段**确实带着同一个值**才算承载，不是"等价字段存在"。两种都没有时每个
   标签报一条丢失。等价字段：
 
@@ -659,7 +660,7 @@ ImageIO 视图里同一处的 `{GPS}/Latitude`、`XMP/exif:GPSLatitude` 就不�
 - 缩略图：EXIF IFD1 里的缩略图，以及 Photoshop 资源里的缩略图（8BIM `0x0409`、
   `0x040C`）。缩略图是从像素派生的预览，不是照片内容，和文件体积、压缩方式同类。
   系统重写 EXIF 的产物里不带内嵌缩略图，而几乎所有相机直出的 JPEG 都带一个
-  （`test_pic/` 里两张都有），报它会让这些照片一律校验不过，所以不检测。EXIF 整块照搬
+  （测试里的两种相机样本都有），报它会让这些照片一律校验不过，所以不检测。EXIF 整块照搬
   的产物里 IFD1 缩略图原样在，由上面「照搬过的产物逐字节相同」那条一并核对。带辅助图的 JPEG 还会在
   `{FileContents}/Images[n]/ThumbnailImages[m]/` 下列出内嵌缩略图的 `Width`、
   `Height`、`Orientation`、`ThumbnailOffset`、`ThumbnailSize`，这五个键按同一条策略

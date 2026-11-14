@@ -15,8 +15,8 @@
 /Tests/mangle-tool
 /Tests/.work*/
 
-# 真实参考照片的转换产物；.JPG 原件是不可再生的输入样本，要入库
-/test_pic/*.heic
+# 真实照片不入库（隐私）：测试改用 fixture --camera 自造的相机样本。本机留着的参考照片放这里也不会被提交
+/test_pic/
 
 .DS_Store
 .make_icon

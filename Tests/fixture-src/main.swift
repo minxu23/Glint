@@ -58,6 +58,11 @@
 //            （64x48 这种小于门槛的，ImageIO 认作 public.tiff）；--no-gps 不带 GPS；
 //            --gps-version-only 的 GPS IFD 只有 GPSVersion、没有坐标；
 //            --no-description 不带说明（TIFF ImageDescription），好测 --embed-caption 写进去。
+//   --camera <panasonic|canon>
+//            生成一张自造的「相机直出」JPEG 而不是默认那张：手搭的 EXIF（含厂商 MakerNote、IFD1
+//            缩略图）、4:2:2 主图，panasonic 还在 EOI 之后放一张 MPF 登记的预览图和两段相机数据，
+//            canon 带 Windows 写的作者（Artist、XPAuthor、XMP dc:creator）。结构与各自的用途见
+//            Tests/CameraJPEG.swift。替代原来入库的两张真实照片，值全是编的；产物逐字节确定。
 //   --unique-id <值>
 //            EXIF ImageUniqueID（ExifIFD 0xA420）写成 <值>。ImageIO 的写入器什么长度都照写
 //            （值的 UTF-8 加一个 NUL），读的时候却只认恰好 33 字节的写法，所以给别的长度的值
@@ -70,6 +75,22 @@ import ImageIO
 import UniformTypeIdentifiers
 
 var args = Array(CommandLine.arguments.dropFirst())
+
+if args.first == "--camera" {
+    let cameraUsage = "用法: fixture --camera panasonic|canon <输出.jpg>"
+    guard args.count == 3, let kind = ["panasonic": CameraKind.panasonic, "canon": .canon][args[1]] else {
+        FileHandle.standardError.write(Data("\(cameraUsage)\n".utf8))
+        exit(2)
+    }
+    do {
+        try Data(makeCameraJPEG(kind)).write(to: URL(fileURLWithPath: args[2]))
+    } catch {
+        FileHandle.standardError.write(Data("写不出 \(args[2])：\(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    print("已生成 \(args[2])（\(args[1])）")
+    exit(0)
+}
 
 if args.first == "--dng" {
     args.removeFirst()
@@ -129,6 +150,7 @@ args.removeAll {
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
     + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap]"
     + " [--unique-id <值>] [--caption-only tiff|iptc|xmp] <输出.jpg>"
+    + "\n      fixture --camera panasonic|canon <输出.jpg>"
     + "\n      fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--gps-version-only] [--no-description] <输出.dng>"
 var uniqueID: String?
 if let at = args.firstIndex(of: "--unique-id") {

@@ -443,10 +443,10 @@ cp "$WORK/照片.jpg" "$WORK/预演不删.jpg"
 "$BIN" -n --delete-original "$WORK/预演不删.jpg" >/dev/null 2>&1; st=$?
 refute "预演不删源文件" "$st" test ! -f "$WORK/预演不删.jpg"
 
-# 真实相机照片：MakerNote 必然丢失，校验必须报出汇总行，--delete-original 不能删源。
-# 用拷贝，test_pic/ 里的原件不可再生。截掉 EOI 之后的 MPF 预览图，让 MakerNote
-# 成为这张图唯一的差异——"源文件保留"这条于是只由 MakerNote 那一行撑着。
-cp test_pic/P1130939.JPG "$WORK/相机.jpg"
+# 相机直出的照片（夹具 --camera panasonic，照真实的松下照片搭的）：MakerNote 交给系统重写时
+# 必然丢失，校验必须报出汇总行，--delete-original 不能删源。截掉 EOI 之后的 MPF 预览图，让
+# MakerNote 成为这张图唯一的差异——"源文件保留"这条于是只由 MakerNote 那一行撑着。
+make_sample ./Tests/fixture --camera panasonic "$WORK/相机.jpg"
 make_sample ./Tests/mangle-tool --strip-trailer "$WORK/相机.jpg"
 # 默认路径整块照搬 EXIF，MakerNote 原样在产物里；交给系统重写时才丢。
 expect_carried "相机照片的 MakerNote" "$WORK/相机.jpg"
@@ -579,7 +579,7 @@ XFLAGS=--no-raw-exif expect_reported "只有 Windows 标签" "$WORK/只有XP.jpg
     "丢失 Windows 评级 Rating（IFD0 0x4746） = 4" \
     "丢失 Windows 评级百分比 RatingPercent（IFD0 0x4749） = 75"
 # 同值：每个标签都抄一份目标里会有的标准字段。Artist 改成带分号的两个作者，
-# 和 test_pic/IMG_1225.JPG 的情形一样；XPComment 抄源里 UserComment 实际存的值。
+# 和夹具 --camera canon 的情形一样；XPComment 抄源里 UserComment 实际存的值。
 ./Tests/fixture --ms-rating "$WORK/XP同值.jpg" >/dev/null
 note=$(./Tests/probe "$WORK/XP同值.jpg" '{Exif}/UserComment')
 make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP同值.jpg" '013B=作者甲;作者乙' \
@@ -603,15 +603,15 @@ XFLAGS=--no-raw-exif expect_reported "Windows 标签与等价字段不同值" "$
     "丢失 Windows 关键词 XPKeywords（IFD0 0x9C9E） = sunset;另一个关键词" \
     "丢失 Windows 评级 Rating（IFD0 0x4746） = 2" \
     "丢失 Windows 评级百分比 RatingPercent（IFD0 0x4749） = 25"
-# 真实照片：IMG_1225 的 XPAuthor 与 Artist 同值，不能报；把 Artist 改掉就必须报——
-# 后一条同时证明前一条不是因为根本没读到 XPAuthor 才安静。
-cp test_pic/IMG_1225.JPG "$WORK/XP作者.jpg"
+# Windows 写过作者的相机照片（夹具 --camera canon）：XPAuthor 与 Artist 同值，不能报；把 Artist
+# 改掉就必须报——后一条同时证明前一条不是因为根本没读到 XPAuthor 才安静。
+make_sample ./Tests/fixture --camera canon "$WORK/XP作者.jpg"
 out=$("$BIN" --verify "$WORK/XP作者.jpg" 2>&1); st=$?
-refute "IMG_1225 的 XPAuthor 由同值的 Artist 承载，不报" "$st" grep -qF "XPAuthor" <<< "$out"
-cp test_pic/IMG_1225.JPG "$WORK/XP作者改.jpg"
+refute "佳能样本的 XPAuthor 由同值的 Artist 承载，不报" "$st" grep -qF "XPAuthor" <<< "$out"
+make_sample ./Tests/fixture --camera canon "$WORK/XP作者改.jpg"
 make_sample ./Tests/mangle-tool --ifd0 "$WORK/XP作者改.jpg" '013B=Someone Else'
-expect_carried "IMG_1225 改掉 Artist" "$WORK/XP作者改.jpg"
-XFLAGS=--no-raw-exif expect_reported "IMG_1225 改掉 Artist" "$WORK/XP作者改.jpg" \
+expect_carried "佳能样本改掉 Artist" "$WORK/XP作者改.jpg"
+XFLAGS=--no-raw-exif expect_reported "佳能样本改掉 Artist" "$WORK/XP作者改.jpg" \
     "丢失 Windows 作者 XPAuthor（IFD0 0x9C9D） = Zhang San;Li Si"
 # APP13 里 IPTC 以外的资源：默认夹具本来就有 0x0404 和 0x0425，第 1 轮守着它们不报；
 # 追加一个 0x0BB7 就必须报出汇总行。
@@ -679,14 +679,14 @@ out=$("$BIN" --verify "$gain_ref" -o "$WORK/辅助图/缩略图.heic" 2>&1); st=
 refute "缩略图：校验不报 ThumbnailImages 这组键" "$st" grep -qF "ThumbnailImages" <<< "$out"
 
 # 尾部记账：辅助图在 JPEG 里放在 EOI 之后、由 MPF 登记。搬进产物的那几段、MPF 登记的
-# 大尺寸预览图不报，其余照报。这张相机照片的 EOI 之后是一张预览图（类型码 0x010002，
-# 845023 字节），前面 16 字节 0xFF 加 128 字节、后面 33 字节 0xFF 加 256 字节 MPF 没登记的
+# 大尺寸预览图不报，其余照报。松下样本的 EOI 之后是一张预览图（类型码 0x010002，
+# 105193 字节），前面 16 字节 0xFF 加 128 字节、后面 33 字节 0xFF 加 256 字节 MPF 没登记的
 # 相机数据（含非填充字节），连同夹着的填充一共 433 字节照报。
-cp test_pic/P1130939.JPG "$WORK/辅助图/带预览图.jpg"
+make_sample ./Tests/fixture --camera panasonic "$WORK/辅助图/带预览图.jpg"
 expect_reported "EOI 之后是预览图加相机数据" "$WORK/辅助图/带预览图.jpg" \
-    "丢失 EOI 之后的 433 字节（尾部共 845456 字节，其中 845023 字节是 MPF 登记的预览图，不需要带）"
+    "丢失 EOI 之后的 433 字节（尾部共 105626 字节，其中 105193 字节是 MPF 登记的预览图，不需要带）"
 # 把 MPF 没登记的字节都改成填充，只剩预览图：不报。
-cp test_pic/P1130939.JPG "$WORK/辅助图/只有预览图.jpg"
+make_sample ./Tests/fixture --camera panasonic "$WORK/辅助图/只有预览图.jpg"
 make_sample ./Tests/mangle-tool --pad-trailer "$WORK/辅助图/只有预览图.jpg"
 out=$("$BIN" -v --delete-original "$WORK/辅助图/只有预览图.jpg" 2>&1); st=$?
 grep -q "元数据校验通过" <<< "$out" \
@@ -841,10 +841,10 @@ grep -qF "1 个比原图大" <<< "$out" && pass "汇总单列变大的个数" ||
 
 round "7j. 带辅助图的 4:2:2 照片"
 # 带辅助图的 JPEG 才有 {FileContents}；4:2:2 的源转成 HEIF 是 4:2:0，这是编码参数，
-# 不报。ImageIO 重新编码 JPEG 只会出 4:2:0 或 4:4:4，所以拿 4:2:2 的相机照片，原样接上
-# 夹具的深度图。
+# 不报。ImageIO 重新编码 JPEG 只会出 4:2:0 或 4:4:4，所以拿 4:2:2 的松下样本（夹具自己编的
+# 主图），原样接上夹具的深度图。
 ./Tests/fixture --aux depth "$WORK/深度图供体.jpg" >/dev/null
-cp test_pic/P1130939.JPG "$WORK/四二二.jpg"
+make_sample ./Tests/fixture --camera panasonic "$WORK/四二二.jpg"
 make_sample ./Tests/mangle-tool --graft-aux "$WORK/四二二.jpg" "$WORK/深度图供体.jpg"
 check "前提：源是 4:2:2" "$(./Tests/probe "$WORK/四二二.jpg" '{FileContents}/Images[0]/ChromaSubsampling')" "4:2:2"
 check "前提：源里接上了深度图" "$(./Tests/probe --aux "$WORK/四二二.jpg" Depth)" "150x120 1717855600"
@@ -956,20 +956,20 @@ check "整块照搬：前提，ImageIO 写的产物 Exif 项不在文件末尾" 
 check_same "整块照搬：产物比 --no-raw-exif 的恰好大 10 + 源 TIFF 的字节数" \
     "$(( $(stat -f %z "${f%.jpg}.heic") - $(stat -f %z "${rw%.jpg}.heic") ))" "$(( 10 + ${n:-0} ))"
 
-# 2. 真实的 MakerNote：两张相机照片都带 IFD1 缩略图，逐字节相同就说明缩略图也过去了。
-for name in IMG_1225 P1130939; do
-    cp "test_pic/$name.JPG" "$WORK/照搬/$name.jpg"
+# 2. 相机的 MakerNote：两种相机样本都带 IFD1 缩略图，逐字节相同就说明缩略图也过去了。
+for name in canon panasonic; do
+    make_sample ./Tests/fixture --camera "$name" "$WORK/照搬/$name.jpg"
     out=$("$BIN" --verify "$WORK/照搬/$name.jpg" 2>&1)
     check "$name：产物的 EXIF 与源逐字节相同" \
         "$(./Tests/probe --exif-same "$WORK/照搬/$name.jpg" "$WORK/照搬/$name.heic")" "相同"
-    if [ "$name" = IMG_1225 ]; then
+    if [ "$name" = canon ]; then
         grep -q "元数据校验通过" <<< "$out" \
             && pass "$name：校验通过" || { fail "$name：校验报了差异"; sed 's/^/     /' <<< "$out"; }
         check_same "$name：产物里读得出 {MakerCanon}/LensModel，与源相同" \
             "$(./Tests/probe "$WORK/照搬/$name.heic" '{MakerCanon}/LensModel')" \
             "$(./Tests/probe "$WORK/照搬/$name.jpg" '{MakerCanon}/LensModel')"
     else
-        grep -q "发现 1 处差异" <<< "$out" && grep -qF "丢失 EOI 之后的 433 字节（尾部共 845456 字节" <<< "$out" \
+        grep -q "发现 1 处差异" <<< "$out" && grep -qF "丢失 EOI 之后的 433 字节（尾部共 105626 字节" <<< "$out" \
             && pass "$name：只剩 EOI 之后那一行" || { fail "$name：差异不止 EOI 之后那一行"; sed 's/^/     /' <<< "$out"; }
     fi
 done
@@ -1092,13 +1092,13 @@ for want in '丢失 EXIF 标签 GPSProcessingMethod（GPS 0x001B，ASCII，"CELL
     grep -qF -- "$want" <<< "$RW_OUT" \
         && pass "大端中文（--no-raw-exif）：照报「$want」" || { fail "大端中文（--no-raw-exif）：没报「$want」"; sed 's/^/     /' <<< "$RW_OUT"; }
 done
-# 2. 小端：真实相机照片（没有 UserComment）加一条无前缀的中文备注。MakerNote 原样过去，
+# 2. 小端：松下样本（没有 UserComment）加一条无前缀的中文备注。MakerNote 原样过去，
 #    {ExifAux}/ImageStabilization 读得出；交给系统重写时它没了。
 f="$WORK/备注改写/小端中文.jpg"
-cp test_pic/P1130939.JPG "$f"
+make_sample ./Tests/fixture --camera panasonic "$f"
 make_sample ./Tests/mangle-tool --strip-trailer "$f"
 make_sample ./Tests/mangle-tool --tags "$f" "exif:9286:undef=$NOTE"
-# P1130939 的第一个段就是 EXIF 的 APP1：TIFF 头在文件的第 12 个字节。
+# 松下样本的第一个段就是 EXIF 的 APP1：TIFF 头在文件的第 12 个字节。
 check "小端中文：前提，TIFF 是小端" "$(dd if="$f" bs=1 skip=6 count=4 2>/dev/null; dd if="$f" bs=1 skip=12 count=2 2>/dev/null)" "ExifII"
 check "小端中文：前提，ImageIO 读不出源里的备注" "$(./Tests/probe --no-repair "$f" '{Exif}/UserComment')" "<无>"
 stab=$(./Tests/probe "$f" '{ExifAux}/ImageStabilization')
@@ -1113,7 +1113,7 @@ f="$WORK/备注改写/大端ASCII.jpg"
 make_sample ./Tests/mangle-tool "$f" "Leuven City Hall 2024"
 expect_rewritten "大端 ASCII" "$f" "Leuven City Hall 2024" "$ASCII_HEAD"
 f="$WORK/备注改写/小端ASCII.jpg"
-cp test_pic/P1130939.JPG "$f"
+make_sample ./Tests/fixture --camera panasonic "$f"
 make_sample ./Tests/mangle-tool --strip-trailer "$f"
 make_sample ./Tests/mangle-tool --tags "$f" "exif:9286:undef=Leuven City Hall 2024"
 expect_rewritten "小端 ASCII" "$f" "Leuven City Hall 2024" "$ASCII_HEAD"
@@ -1127,8 +1127,8 @@ mkdir -p "$WORK/备注改写/不改写"
 ./Tests/fixture "$WORK/备注改写/不改写/普通.jpg" >/dev/null
 ./Tests/fixture "$WORK/备注改写/不改写/UNICODE头.jpg" >/dev/null
 make_sample ./Tests/mangle-tool --unicode-comment "$WORK/备注改写/不改写/UNICODE头.jpg" "备注：带合规头的中文备注"
-# 没有备注的用相机照片：夹具 --no-text 那张的 EXIF 与 ImageIO 写的逐字节相同，不走照搬。
-cp test_pic/P1130939.JPG "$WORK/备注改写/不改写/没有备注.jpg"
+# 没有备注的用松下样本：夹具 --no-text 那张的 EXIF 与 ImageIO 写的逐字节相同，不走照搬。
+make_sample ./Tests/fixture --camera panasonic "$WORK/备注改写/不改写/没有备注.jpg"
 check "没有备注：前提，源里没有 0x9286" "$(./Tests/probe --raw-exif "$WORK/备注改写/不改写/没有备注.jpg" 9286)" "<无>"
 for what in 普通 UNICODE头 没有备注; do
     f="$WORK/备注改写/不改写/$what.jpg"
@@ -1140,7 +1140,7 @@ for what in 普通 UNICODE头 没有备注; do
 done
 
 round "7n. 备注的读法：可靠的文本照原文修补，猜的原样照搬"
-# 备注的各种存法，大端（夹具）、小端（相机照片）各一份。`ASCII` 头里装 UTF-8 的，ImageIO 按
+# 备注的各种存法，大端（夹具）、小端（松下样本）各一份。`ASCII` 头里装 UTF-8 的，ImageIO 按
 # Latin-1 读成乱码，要修补；字节不是合法 UTF-8 的（GBK、Latin-1 写的西欧文字），工具分不出是
 # 哪种编码，默认路径原样照搬、一个字节不动。
 mkdir -p "$WORK/备注读法"
@@ -1149,7 +1149,7 @@ comment_sample() {
     if [ "$2" = 大端 ]; then
         ./Tests/fixture "$1" >/dev/null || fail "造不出样本：$1"
     else
-        cp test_pic/P1130939.JPG "$1"
+        make_sample ./Tests/fixture --camera panasonic "$1"
         make_sample ./Tests/mangle-tool --strip-trailer "$1"
     fi
     make_sample ./Tests/mangle-tool --tags "$1" "exif:9286:undef=$3"
@@ -1289,9 +1289,9 @@ done <<'EOF'
 尾部NUL填充|ASCII\0\0\0Leuven\0\0\0\0\0\0
 尾部空格填充|鲁汶市政厅\x20\x20\x20\x20\x20\x20
 EOF
-cp test_pic/IMG_1225.JPG "$z/IMG_1225.jpg"
-cp test_pic/P1130939.JPG "$z/P1130939.jpg"
-for name in 普通 UNICODE备注 中英混排 ASCII开头的中文 大端无BOM带emoji 纯ASCII 尾部NUL填充 尾部空格填充 IMG_1225 P1130939; do
+make_sample ./Tests/fixture --camera canon "$z/canon.jpg"
+make_sample ./Tests/fixture --camera panasonic "$z/panasonic.jpg"
+for name in 普通 UNICODE备注 中英混排 ASCII开头的中文 大端无BOM带emoji 纯ASCII 尾部NUL填充 尾部空格填充 canon panasonic; do
     expect_no_comment_line "零噪声 $name" "$z/$name.jpg"
 done
 
@@ -1337,9 +1337,8 @@ caption_variant() {
 }
 caption_variant "带换行和emoji" $'第一行：西湖\n第二行：日落 🌅😀' 16
 caption_variant "很长的说明" "$(printf '长说明%.0s' $(seq 1 1200))" 3600
-# 源里没有 XMP 包的相机照片（截掉尾部的 MPF 预览图，让校验能通过）：照样写得进去，EXIF 照常整块照搬。
-cp test_pic/P1130939.JPG "$C/相机-不带.jpg"
-chmod u+w "$C/相机-不带.jpg"
+# 源里没有 XMP 包的相机照片（松下样本，截掉尾部的 MPF 预览图，让校验能通过）：照样写得进去，EXIF 照常整块照搬。
+make_sample ./Tests/fixture --camera panasonic "$C/相机-不带.jpg"
 make_sample ./Tests/mangle-tool --strip-trailer "$C/相机-不带.jpg"
 make_sample xattr -w "$CAPX" "松下相机拍的" "$C/相机-不带.jpg"
 cp "$C/相机-不带.jpg" "$C/相机-带.jpg"
@@ -1523,9 +1522,9 @@ mkdir -p "$P/零噪声"
 for v in 普通 no-exif-offset lossy rich-xmp no-text; do
     if [ "$v" = 普通 ]; then ./Tests/fixture "$P/零噪声/$v.jpg" >/dev/null; else ./Tests/fixture "--$v" "$P/零噪声/$v.jpg" >/dev/null; fi
 done
-cp test_pic/IMG_1225.JPG "$P/零噪声/IMG_1225.jpg"
-cp test_pic/P1130939.JPG "$P/零噪声/P1130939.jpg"
-for name in 普通 no-exif-offset lossy rich-xmp no-text IMG_1225 P1130939; do
+make_sample ./Tests/fixture --camera canon "$P/零噪声/canon.jpg"
+make_sample ./Tests/fixture --camera panasonic "$P/零噪声/panasonic.jpg"
+for name in 普通 no-exif-offset lossy rich-xmp no-text canon panasonic; do
     for flags in "" --no-raw-exif; do
         copy="$P/零噪声/$name${flags:+-重写}.jpg"
         [ -f "$copy" ] || cp "$P/零噪声/$name.jpg" "$copy"
