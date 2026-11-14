@@ -19,9 +19,9 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=680
+EXPECTED_ASSERTIONS=682
 EXPECTED_UNIT=1199
-EXPECTED_GUI=318
+EXPECTED_GUI=319
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -441,6 +441,15 @@ cp "$WORK/照片.jpg" "$WORK/可删.jpg"
 "$BIN" --delete-original "$WORK/可删.jpg" >/dev/null 2>&1
 [ -f "$WORK/可删.heic" ] && [ ! -e "$WORK/可删.jpg" ] \
     && pass "校验无损时才删除源文件" || fail "无损却没删，或没产出 .heic"
+
+# 合乎条件、可删不掉（源所在的目录只读）：必须说出来，不然看上去和删掉了一样。
+mkdir -p "$WORK/删不掉/只读" "$WORK/删不掉/出"
+cp "$WORK/照片.jpg" "$WORK/删不掉/只读/源.jpg"
+chmod 555 "$WORK/删不掉/只读"
+out=$("$BIN" --delete-original -o "$WORK/删不掉/出" "$WORK/删不掉/只读/源.jpg" 2>&1)
+chmod 755 "$WORK/删不掉/只读"
+grep -qF "没能删除源文件：没有权限" <<< "$out" && pass "删不掉时说出来" || { fail "删不掉却没说"; sed 's/^/     /' <<< "$out"; }
+[ -f "$WORK/删不掉/只读/源.jpg" ] && [ -f "$WORK/删不掉/出/源.heic" ] && pass "删不掉：源还在，产物照常写出" || fail "删不掉：源或产物不对"
 
 # 反向：有真实丢失时必须保留源文件。这是最关键的一条。
 ./Tests/fixture --lossy "$WORK/有损.jpg" >/dev/null

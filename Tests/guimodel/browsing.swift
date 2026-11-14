@@ -80,7 +80,7 @@ func item(_ path: String, size: Int = 100, modified: TimeInterval = 0, root: Str
 func names(_ items: [PhotoItem]) -> [String] { items.map(\.name) }
 
 func row(_ name: String, _ status: RowStatus, inBytes: Int = 0, outBytes: Int = 0,
-         verification: Verification = .notVerified, dest: String? = nil) -> FileRow {
+         verification: Verification = .notVerified, dest: String? = nil, sourceDeleted: Bool = false) -> FileRow {
     let url = URL(fileURLWithPath: "/库/\(name)")
     var r = FileRow(job: Job(input: url, relative: name, root: URL(fileURLWithPath: "/库")))
     r.status = status
@@ -88,6 +88,7 @@ func row(_ name: String, _ status: RowStatus, inBytes: Int = 0, outBytes: Int = 
     r.outBytes = outBytes
     r.verification = verification
     r.dest = dest.map { URL(fileURLWithPath: $0) }
+    r.sourceDeleted = sourceDeleted
     return r
 }
 
@@ -439,7 +440,8 @@ func testRecord() {
     print("转换记录：计数与体积")
     let mb = 1024 * 1024
     let rows = [
-        row("ok.jpg", .done, inBytes: 4 * mb, outBytes: 1 * mb, verification: .passed, dest: "/库/ok.heic"),
+        row("ok.jpg", .done, inBytes: 4 * mb, outBytes: 1 * mb, verification: .passed, dest: "/库/ok.heic",
+            sourceDeleted: true),
         row("diff.jpg", .done, inBytes: 4 * mb, outBytes: 1 * mb,
             verification: .differences(["丢失 APP8 段（ITUT35&，24 字节）", "变化 {TIFF}/Model: A → B", "照片里的东西：不一样"]),
             dest: "/库/diff.heic"),
@@ -494,7 +496,7 @@ func testRecord() {
     rec.deleteRequested = true
     check("转完、开了删除", rec.activityText,
           "转完 5 张，省下 6.5 MB。2 张有差异，1 张 HEIF 比源文件大，1 张跳过，1 张失败，它们的源文件都还在。")
-    check("删除规则：无差异且不变大的源才算删掉",
+    check("源删掉没有：照 Eclose 的报告",
           rows.map { rec.sourceDeleted($0) }, [true, false, false, false, false, false, false])
     let clean = ConversionRecord(rows: [rows[0]], deleteRequested: true)
     check("全都无差异", clean.activityText, "转完 1 张，省下 3.0 MB。")

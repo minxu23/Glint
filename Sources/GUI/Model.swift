@@ -43,6 +43,8 @@ struct FileRow {
     var rawExif: RawExifOutcome?
     var reencode: Reencode?
     var caption: CaptionOutcome?
+    /// Eclose 报告源文件确实被删掉了（ConversionReport.sourceDeleted）。
+    var sourceDeleted = false
     /// 列表里同时存在多个来源文件夹时置位，副标题才带上来源名——
     /// 只拖进一个文件夹时带上它纯属噪声。
     var showsRoot = false
@@ -325,6 +327,7 @@ final class ConversionModel {
             rows[i].rawExif = r.rawExif
             rows[i].reencode = r.reencode
             rows[i].caption = r.caption
+            rows[i].sourceDeleted = r.sourceDeleted
         case .skipped(let why):
             rows[i].status = .skipped(why)
         case .failed(let why):

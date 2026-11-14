@@ -281,8 +281,11 @@ public struct ConversionReport {
     public let caption: CaptionOutcome?
 
     /// 与元数据差异无关的状态说明：产物比原图大，以及请求了删除源文件却没删的原因
-    /// （校验未通过、产物比原图大）。几句用「；」连成一行。没有要说的就是 nil。
+    /// （校验未通过、产物比原图大、源是符号链接、删的时候出错）。几句用「；」连成一行。没有要说的就是 nil。
     public let note: String?
+    /// 源文件确实被删掉了。界面据此把源从图库里拿掉：删不删的规则只在 convert 里，删的时候还可能出错，
+    /// 下游不该自己再推一遍。
+    public let sourceDeleted: Bool
 
     public var savingPercent: Int? { percentSaved(inBytes: inBytes, outBytes: outBytes) }
 }
@@ -417,7 +420,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: 0,
                                           tagCount: tagCount, xattrCount: 0,
                                           verification: .notVerified, rawExif: nil, reencode: nil,
-                                          caption: nil, note: nil))
+                                          caption: nil, note: nil, sourceDeleted: false))
     }
 
     // 要写说明时，要合并进产物的 XMP 换成带说明的那份（源里没有 XMP 时是只有说明的一份）。
@@ -493,6 +496,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     // 删源文件的前提是逐条比对确认无损，而且产物不比原图大——换成更大的文件不是
     // 用户要的结果。不删就说明为什么。
     var notes: [String] = []
+    var sourceDeleted = false
     let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
     if let growth { notes.append("HEIF 比原图大 \(growth)") }
     // 没校验时差异列表不存在，没写成的说明放进状态说明，不让它静默。
@@ -507,7 +511,15 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         } else if growth != nil {
             notes.append("因产物比原图大，保留了源文件")
         } else {
-            try? fm.removeItem(at: input)
+            do {
+                try fm.removeItem(at: input)
+                sourceDeleted = true
+            } catch {
+                // 删不掉（源所在的目录只读、文件被锁）不能不出声：不然看上去和删掉了一样。
+                let code = (error as NSError).code
+                let why = code == NSFileWriteNoPermissionError ? "没有权限" : error.localizedDescription
+                notes.append("没能删除源文件：\(why)")
+            }
         }
     }
 
@@ -515,7 +527,8 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
                                       tagCount: tagCount, xattrCount: xattrs,
                                       verification: verification, rawExif: rawExif,
                                       reencode: reencode, caption: captionOutcome,
-                                      note: notes.isEmpty ? nil : notes.joined(separator: "；")))
+                                      note: notes.isEmpty ? nil : notes.joined(separator: "；"),
+                                      sourceDeleted: sourceDeleted))
 }
 
 // MARK: - 把「照片」的说明写进文件（--embed-caption）

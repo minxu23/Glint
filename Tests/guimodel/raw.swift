@@ -128,13 +128,16 @@ func testRAWRecord() {
     print("RAW：转换记录")
     let mb = 1024 * 1024
     let rows = [
-        row("a.jpg", .done, inBytes: 4 * mb, outBytes: mb, verification: .passed, dest: "/库/a.heic"),
+        row("a.jpg", .done, inBytes: 4 * mb, outBytes: mb, verification: .passed, dest: "/库/a.heic", sourceDeleted: true),
         row("c.CR3", .done, inBytes: 24 * mb, outBytes: 4 * mb, verification: .passed, dest: "/库/c.heic"),
         row("d.dng", .done, inBytes: 20 * mb, outBytes: 4 * mb, verification: .differences(["GPS 精度降低：最大偏差 3 厘米"]),
             dest: "/库/d.heic"),
     ]
     let deleted = ConversionRecord(rows: rows, deleteRequested: true)
     check("勾了删除：只有 JPEG 的源算删掉，无差异的 RAW 也不算", rows.map { deleted.sourceDeleted($0) }, [true, false, false])
+    // 合乎删除条件、可删的时候出错了（源所在的目录只读）：Eclose 报告没删，界面就不能把它从图库里拿掉。
+    let failedDelete = row("ro.jpg", .done, inBytes: 4 * mb, outBytes: mb, verification: .passed, dest: "/库/ro.heic")
+    check("删除没成功：报告说没删就不算删掉", deleted.sourceDeleted(failedDelete), false)
     check("RAW 的源按扩展名认", rows.map(ConversionRecord.isRAWSource), [false, true, true])
     check("勾了删除、批里有 RAW：说一句 RAW 原片都留着", deleted.activityText,
           "转完 3 张，省下 39 MB。1 张有差异，它们的源文件都还在。RAW 原片都留着。")

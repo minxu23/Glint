@@ -277,12 +277,11 @@ struct ConversionRecord {
     /// 这一行的源是相机 RAW（按扩展名，与图库的格式同一个判定）。
     static func isRAWSource(_ row: FileRow) -> Bool { ImageFormat(url: row.job.input) == .raw }
 
-    /// 源文件按 Eclose 的规则被删掉了：勾了删除、源不是 RAW（RAW 原片永远保留）、校验无差异、
-    /// 产物不比源大。
+    /// 源文件确实被删掉了：照 Eclose 的报告（ConversionReport.sourceDeleted），不在这里再推一遍规则——
+    /// 规则（RAW 永远保留、校验无差异、产物不比源大、源不是符号链接）只在 convert 里，删的时候还可能出错
+    /// （源所在的目录只读）。原来在这里重推，删失败或源是符号链接时会把还在磁盘上的源从图库里拿掉。
     func sourceDeleted(_ row: FileRow) -> Bool {
-        guard deleteRequested, !ConversionRecord.isRAWSource(row), row.status == .done, row.verification == .passed
-        else { return false }
-        return growthPercent(inBytes: row.inBytes, outBytes: row.outBytes) == nil
+        row.status == .done && row.sourceDeleted
     }
 
     static func mark(of row: FileRow) -> ConversionMark? {
