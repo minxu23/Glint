@@ -266,8 +266,14 @@ func previewTrailerRanges(in bytes: [UInt8], _ layout: JPEGLayout, claimed: [Ran
 }
 private let previewMPFTypes: Set<Int> = [0x010001, 0x010002]
 
+/// 源 JPEG 没有 EOI 时那一条注意（见 unportableSegments）。
+let truncatedSourceNotice = "源文件不完整：没有找到 JPEG 的结束标记（EOI），图像数据可能被截断；转出的 HEIF 里缺的部分是解码器补的"
+
 /// 源 JPEG 里 ImageIO 看不见、因而转换后必然丢失的部分，每段一条差异：
 /// COM 注释段、不认识的 APPn 段、EOI 之后的数据（全是 0x00/0xFF 填充的不算）。
+/// 另外，文件在 EOI 之前就结束了（截断的 JPEG）报一条注意：ImageIO 照样解得出前面那部分、
+/// 缺的地方补成灰色，转换和元数据校验都会「成功」，可产物里那块像素是解码器编的。报出来，
+/// `--delete-original` 就不会删掉这样的源文件。
 /// 这些都不在属性视图里，键空间比对发现不了。没有可带信息的几种段不报（isWorthlessSegment）。
 ///
 /// EOI 之后共 M 字节，其中已经随辅助图搬进产物的 K 字节（carriedTrailerRanges）、MPF 登记的
@@ -290,6 +296,9 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
             let id = String(decoding: content.prefix { $0 >= 0x20 && $0 < 0x7F }.prefix(32), as: UTF8.self)
             issues.append("丢失 APP\(s.marker - 0xE0) 段（\(id.isEmpty ? "无标识" : id)，\(content.count) 字节）")
         }
+    }
+    if layout.eoi == nil {
+        issues.append(truncatedSourceNotice)
     }
     if let eoi = layout.eoi {
         let trailer = (eoi + 2)..<bytes.count

@@ -19,7 +19,7 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=671
+EXPECTED_ASSERTIONS=674
 EXPECTED_UNIT=1199
 EXPECTED_GUI=318
 
@@ -506,6 +506,12 @@ check "前提：ImageIO 视图把 EXIF 拍摄时间调和成 IIM 的 10:42:07" \
 expect_reported "只改过 IIM 时间" "$WORK/只改IIM.jpg" \
     "变化 {Exif}/DateTimeOriginal: 2024:09:15 18:42:07 → 2024:09:15 10:42:07" \
     "变化 EXIF 说明 ImageDescription 的原文：西湖日落 sunset at West Lake → IPTC 备注字段"
+
+# 截断的 JPEG：ImageIO 照样解出前面那部分、缺的补成灰色，转换和元数据都「成功」。
+# 源里没有 EOI 必须报出来，--delete-original 不能删源。截在扫描数据中间（文件的一半处）。
+half=$(( $(stat -f %z "$WORK/照片.jpg") / 2 ))
+head -c "$half" "$WORK/照片.jpg" > "$WORK/截断.jpg"
+expect_reported "截断的 JPEG" "$WORK/截断.jpg" "源文件不完整：没有找到 JPEG 的结束标记（EOI）"
 
 # ImageIO 不读的段：COM 注释、不认识的 APPn（APP11 是 C2PA 用的）、EOI 之后的数据。
 cp "$WORK/照片.jpg" "$WORK/注释段.jpg"
@@ -1637,6 +1643,11 @@ check "前提：门槛下的 DNG 被认作 TIFF" "$(./Tests/probe --image "$R/�
 out=$("$RAW_BIN" "$R/小.dng" 2>&1); st=$?
 check "门槛下的 DNG：跳过并说明系统认作什么" "$out" "跳过 小.dng: 不是 RAW 文件（系统认作 public.tiff）"
 refute "门槛下的 DNG：没有产物" "$st" test -e "$R/小.heic"
+# 截断的 DNG（只留四分之三，原始数据缺一截）：显影不出来，报的是读不出 RAW，不是怪编码器。
+./Tests/fixture --dng --size 1024x768 "$R/整.dng" >/dev/null || fail "造不出 1024×768 的 DNG"
+head -c $(( $(stat -f %z "$R/整.dng") * 3 / 4 )) "$R/整.dng" > "$R/截断.dng"
+check "截断的 DNG：说清是读不出 RAW" "$("$RAW_BIN" "$R/截断.dng" 2>&1 | head -1)" \
+    "失败 截断.dng: 显影失败：读不出 RAW 的图像数据，文件可能不完整或已损坏"
 # --delete-original：报错退出，一张都不转，RAW 原样还在。
 mkdir -p "$R/删"
 ./Tests/fixture --dng "$R/删/原片.dng" >/dev/null

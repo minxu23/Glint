@@ -437,7 +437,7 @@ func convert(_ input: URL, opts: ConversionOptions, dest: URL,
         }
         return (tmp, opts.rawExif ? carryExif(kind, source: input, product: tmp) : nil)
     }
-    guard var product = encodeAndCarry() else { return .failed("HEIC 编码失败") }
+    guard var product = encodeAndCarry() else { return .failed(encodeFailureReason(src, kind: kind)) }
     if kind == .raw, let problem = rawProductDepthProblem(product.url) {
         try? fm.removeItem(at: product.url)
         return .failed(problem)
@@ -903,6 +903,16 @@ func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
           let out = CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil) else { return false }
     let options = [kCGImageDestinationMetadata: xmp, kCGImageDestinationMergeMetadata: true] as CFDictionary
     return CGImageDestinationCopyImageSource(out, firstPass, options, nil)
+}
+
+/// 编码失败时说清是哪一头的问题。源本身解不出图像（截断、损坏的文件）时，「HEIC 编码失败」
+/// 会让人去怀疑编码器；这里先试着解一次源图。只在失败时才解：RAW 解一次就是整幅显影，平时不该多花这一遍。
+func encodeFailureReason(_ src: CGImageSource, kind: SourceKind) -> String {
+    guard CGImageSourceCreateImageAtIndex(src, 0, nil) == nil else { return "HEIC 编码失败" }
+    switch kind {
+    case .raw: return "显影失败：读不出 RAW 的图像数据，文件可能不完整或已损坏"
+    case .jpeg: return "读不出图像数据，文件可能不完整或已损坏"
+    }
 }
 
 func fileSize(_ url: URL) -> Int {
