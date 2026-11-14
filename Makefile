@@ -144,7 +144,9 @@ snapshot: Tests/uisnapshot
 
 # 「跑一遍自检需要哪些产物」只定义一处：test 的前置和 selftest.sh 的新鲜度
 # 守卫都从这里取。
-ARTIFACTS := $(CLIS) Tests/fixture $(TEST_TOOLS)
+# 应用本身也在里面：截图工具编的是界面代码里除入口（Sources/GUI/main.swift）以外的部分，
+# 入口编不过时（比如漏了 import Eclose）测试照样全绿、应用却建不出来。
+ARTIFACTS := $(CLIS) $(APP) Tests/fixture $(TEST_TOOLS)
 
 # selftest.sh 用它来问「该检查哪些产物」，免得在脚本里抄一份。
 print-artifacts:
