@@ -450,13 +450,13 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         guard TemporaryFiles.shared.register(tmp) else { return nil }   // 已经在收尾
         temporaries.append(tmp)
         guard encode(src, destProps, xmp, tmp) else {
-            try? fm.removeItem(at: tmp)
+            _ = TemporaryFiles.remove(tmp)
             return nil
         }
         return (tmp, opts.rawExif ? carryExif(kind, source: input, product: tmp) : nil)
     }
     guard var product = encodeAndCarry() else {
-        return .failed(encodeFailureReason(src, kind: kind, folder: folder))
+        return .failed(encodeFailureReason(src, kind: kind, folder: folder, sourceBytes: inBytes))
     }
     if kind == .raw, let problem = rawProductDepthProblem(product.url) {
         try? fm.removeItem(at: product.url)
@@ -939,11 +939,16 @@ func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
 
 /// 编码失败时说清是哪一头的问题。源本身解不出图像（截断、损坏的文件）时，「HEIC 编码失败」
 /// 会让人去怀疑编码器；这里先试着解一次源图。只在失败时才解：RAW 解一次就是整幅显影，平时不该多花这一遍。
-/// 输出目录写不进去（没有写权限、建不出来）时也会表现为编码失败，先查这一条。
-func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL) -> String {
+/// 输出目录写不进去（没有写权限、建不出来）、所在的卷满了，也都表现为编码失败，先查这两条。
+/// 「满了」的判据是剩余空间不到源文件的大小：产物通常比源小，连一个源文件都放不下多半就是它。
+func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL, sourceBytes: Int) -> String {
     if TemporaryFiles.shared.isShuttingDown { return "已中断" }
     if !FileManager.default.isWritableFile(atPath: folder.path) {
         return "写不进输出目录（没有写权限或建不出来）：\(folder.path)"
+    }
+    if let free = (try? folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?.volumeAvailableCapacity,
+       free < sourceBytes {
+        return "磁盘空间不够：输出目录所在的卷只剩 \(humanSize(free))"
     }
     guard CGImageSourceCreateImageAtIndex(src, 0, nil) == nil else { return "HEIC 编码失败" }
     switch kind {

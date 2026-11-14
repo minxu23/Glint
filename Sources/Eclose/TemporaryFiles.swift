@@ -56,8 +56,20 @@ final class TemporaryFiles {
 
     private func removeRegisteredFiles() -> Int {
         lock.lock(); let pending = paths; lock.unlock()
-        var removed = 0
-        for u in pending where (try? FileManager.default.removeItem(at: u)) != nil { removed += 1 }
+        return pending.reduce(0) { $0 + TemporaryFiles.remove($1) }
+    }
+
+    /// 删掉一个临时产物，连同 ImageIO 写它时在旁边建的临时文件：ImageIO 先写进同一目录里的
+    /// `.<文件名>-XXXXXX`，写完再改名；写到一半失败（磁盘满了）或进程被打断时，那个文件留下来，
+    /// 名字形如 `..glint-<UUID>.heic-u41uww`。返回删掉的个数。
+    static func remove(_ url: URL) -> Int {
+        let fm = FileManager.default
+        var removed = (try? fm.removeItem(at: url)) != nil ? 1 : 0
+        let prefix = "." + url.lastPathComponent + "-"
+        let folder = url.deletingLastPathComponent()
+        for name in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] where name.hasPrefix(prefix) {
+            if (try? fm.removeItem(at: folder.appendingPathComponent(name))) != nil { removed += 1 }
+        }
         return removed
     }
 }

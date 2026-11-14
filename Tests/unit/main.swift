@@ -3439,6 +3439,14 @@ do {
           [true, false, false])
     check("收尾会等正在进行的转换收手（不是一删就走）", Date().timeIntervalSince(started) >= 0.25, true)
     check("收尾以后不再登记新的临时文件", registry.register(dir.appendingPathComponent(".glint-c.heic")), false)
+    // ImageIO 写到一半失败时留在旁边的 `.<文件名>-XXXXXX` 一并删掉，别的文件不动。
+    let tmp = dir.appendingPathComponent(".glint-d.heic")
+    for name in [".glint-d.heic", "..glint-d.heic-u41uww", "..glint-e.heic-abc123", "照片.heic"] {
+        fm.createFile(atPath: dir.appendingPathComponent(name).path, contents: Data([3]))
+    }
+    check("删临时产物连同 ImageIO 的半截文件，别的不动", [TemporaryFiles.remove(tmp) == 2,
+          fm.fileExists(atPath: dir.appendingPathComponent("..glint-e.heic-abc123").path),
+          fm.fileExists(atPath: dir.appendingPathComponent("照片.heic").path)], [true, true, true])
     try? fm.removeItem(at: dir)
 }
 
