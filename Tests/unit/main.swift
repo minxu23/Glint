@@ -3442,6 +3442,31 @@ do {
     try? fm.removeItem(at: dir)
 }
 
+print("-o 的解读（OutputPlan.resolve）")
+do {
+    func plan(_ path: String, _ count: Int) -> String {
+        do {
+            switch try OutputPlan.resolve(output: URL(fileURLWithPath: path), fileCount: count, createDirectories: false) {
+            case .singleFile(let u): return "文件 \(u.lastPathComponent)"
+            case .directory(let u): return "目录 \(u.lastPathComponent)"
+            case .sameFolder: return "源旁边"
+            }
+        } catch { return "错误 \(error.localizedDescription)" }
+    }
+    let missing = "/glint-不存在-\(UUID().uuidString)"
+    check("单个输入、.heic 名字：是产物的文件名", plan("\(missing)/x.heic", 1), "文件 x.heic")
+    check("单个输入、大写 .HEIF：也是文件名", plan("\(missing)/y.HEIF", 1), "文件 y.HEIF")
+    check("多个输入、.heic 名字：报错，不悄悄建一个叫 x.heic 的目录", plan("\(missing)/x.heic", 2),
+          "错误 有多个输入时 -o 要给一个目录，x.heic 是文件名（单个输入时才能指定产物的文件名）")
+    check("别的图片后缀：报错，不写出名叫 .jpg 的 HEIF", plan("\(missing)/w.jpg", 1), "错误 产物的文件名要以 .heic 或 .heif 结尾：w.jpg")
+    check("不认识的后缀照旧当目录", plan("\(missing)/2024.09", 1), "目录 2024.09")
+    let existing = FileManager.default.temporaryDirectory.appendingPathComponent("glint-plain-\(UUID().uuidString)")
+    FileManager.default.createFile(atPath: existing.path, contents: Data())
+    check("多个输入、指向已有的文件：报错说清", plan(existing.path, 2),
+          "错误 -o 指向的 \(existing.path) 是一个已有的文件；有多个输入时 -o 要给一个目录")
+    try? FileManager.default.removeItem(at: existing)
+}
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args, command: .jpeg2heif) else { return nil }

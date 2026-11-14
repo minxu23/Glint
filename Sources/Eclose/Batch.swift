@@ -103,11 +103,28 @@ public enum OutputPlan {
 
     enum PlanError: Error, LocalizedError {
         case cannotCreate(URL, String)
+        case fileForManyInputs(URL)
+        case existingFileForManyInputs(URL)
+        case notHEIFName(URL)
         var errorDescription: String? {
-            if case let .cannotCreate(url, why) = self { return "无法创建输出目录 \(url.path): \(why)" }
-            return nil
+            switch self {
+            case let .cannotCreate(url, why): return "无法创建输出目录 \(url.path): \(why)"
+            case let .fileForManyInputs(url):
+                return "有多个输入时 -o 要给一个目录，\(url.lastPathComponent) 是文件名（单个输入时才能指定产物的文件名）"
+            case let .existingFileForManyInputs(url):
+                return "-o 指向的 \(url.path) 是一个已有的文件；有多个输入时 -o 要给一个目录"
+            case let .notHEIFName(url):
+                return "产物的文件名要以 .heic 或 .heif 结尾：\(url.lastPathComponent)"
+            }
         }
     }
+
+    /// 产物文件名认的后缀（不分大小写）。
+    static let heifExtensions: Set<String> = ["heic", "heif"]
+    /// 一看就是别的图片格式的后缀：拿它当产物的文件名，写出来的是 HEIF、名字却说是 JPEG。
+    /// 不在两张表里的后缀（`2024.09`、`相册.v2`）照旧当目录。
+    static let otherImageExtensions: Set<String> = SourceKind.jpeg.extensions.union(SourceKind.raw.extensions)
+        .union(["png", "gif", "tif", "tiff", "bmp", "webp", "avif", "jxl"])
 
     /// - Parameters:
     ///   - fileCount: 待转换文件数。只有单个文件时，`output` 才可以是一个文件名。
@@ -122,7 +139,12 @@ public enum OutputPlan {
 
         if exists && isDir.boolValue { return .directory(url) }
 
-        if fileCount == 1 && !url.pathExtension.isEmpty {
+        let ext = url.pathExtension.lowercased()
+        if exists && fileCount > 1 { throw PlanError.existingFileForManyInputs(url) }
+        if heifExtensions.contains(ext) && fileCount > 1 { throw PlanError.fileForManyInputs(url) }
+        if otherImageExtensions.contains(ext) { throw PlanError.notHEIFName(url) }
+        // 单个输入：.heic/.heif 的名字，或者已经存在的文件（覆盖与否由 -f 管），就是产物的文件名。
+        if fileCount == 1 && (heifExtensions.contains(ext) || exists) {
             if createDirectories {
                 try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                          withIntermediateDirectories: true)

@@ -16,7 +16,7 @@ func usage(for command: Command) -> String {
 
         选项:
           -q, --quality <0.0-1.0>  有损压缩质量，默认 0.8（越高越清晰、文件越大）
-          -o, --output <路径>       输出目录；单个输入时也可以是输出文件名。
+          -o, --output <路径>       输出目录；单个输入时也可以是产物的文件名（以 .heic 或 .heif 结尾）。
                                    默认输出到源文件同一目录
           -r, --recursive          递归处理目录中的所有 JPEG
           -f, --overwrite          覆盖已存在的输出文件
@@ -53,7 +53,7 @@ func usage(for command: Command) -> String {
 
         选项:
           -q, --quality <0.0-1.0>  有损压缩质量，默认 0.8（越高越清晰、文件越大）
-          -o, --output <路径>       输出目录；单个输入时也可以是输出文件名。
+          -o, --output <路径>       输出目录；单个输入时也可以是产物的文件名（以 .heic 或 .heif 结尾）。
                                    默认输出到源文件同一目录
           -r, --recursive          递归处理目录中的所有 RAW
           -f, --overwrite          覆盖已存在的输出文件。RAW 与同名 JPEG 放在一起时，
