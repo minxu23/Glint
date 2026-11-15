@@ -19,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=697
-EXPECTED_UNIT=1212
+EXPECTED_ASSERTIONS=700
+EXPECTED_UNIT=1221
 EXPECTED_GUI=319
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -399,10 +399,9 @@ done_count=$(ls "$I/出" | grep -c '\.heic$')
 check "打断后输出目录里没有剩下的临时产物" "$(ls -A "$I/出" | grep -c '^\.glint-')" "0"
 [ "$st" -eq 143 ] && grep -qF "已中断" "$I/err.txt" && pass "打断时说已中断，退出码 143" || { fail "打断时退出码 $st 或没说已中断"; sed 's/^/     /' "$I/err.txt"; }
 
-# 输出目录所在的卷满了：ImageIO 写到一半失败。要说「磁盘空间不够」而不是「HEIC 编码失败」，它写了一半的
-# `..glint-*.heic-XXXXXX` 也得删掉（去掉这一步的清理，这里会剩下一个）。建一个 1 MB 的磁盘映像，填到只剩
-# 100 KB：比源（噪声 JPEG，约 280 KB）小，也比产物小，一定写不完。-j 1 让结果确定：并发时别的临时文件
-# 可能刚好删掉，剩余空间一时又够了，那一张仍报「HEIC 编码失败」。
+# 输出目录所在的卷满了：产物写到一半失败。要说「磁盘空间不够」而不是「HEIC 编码失败」，写了一半的临时文件
+# 也得删掉（去掉这一步的清理，这里会剩下一个）。建一个 1 MB 的磁盘映像，先填到只剩 100 KB，转一张
+# 噪声 JPEG（产物约 370 KB，一定写不完）。
 F="$WORK/磁盘满"
 mkdir -p "$F"
 make_sample ./Tests/fixture --noise "$F/噪声.jpg"
@@ -417,10 +416,24 @@ if hdiutil create -size 1m -fs HFS+ -volname GlintFull "$F/满.dmg" -quiet \
         && pass "磁盘满：说磁盘空间不够" \
         || { fail "磁盘满：没说磁盘空间不够"; sed 's/^/     /' <<< "$out"; }
     check "磁盘满：输出目录里没有剩下写了一半的文件" "$(ls -A "$F/卷" | grep -c 'glint-')" "0"
+    # 同时转好几张：放得下的转完，后面的写不下。原来按「剩余空间不到源文件大小」猜，产物比源大时、
+    # 或别的临时文件刚好删掉时猜错，报「HEIC 编码失败」；现在认写盘时系统给的错误，每一张都说得对。
+    rm -f "$F/卷/占位"
+    mkdir -p "$F/一批"
+    for i in $(seq 1 16); do cp "$F/噪声.jpg" "$F/一批/$i.jpg"; done
+    out=$("$BIN" -j 8 -o "$F/卷" "$F/一批" 2>&1)
+    n_failed=$(grep -c '^失败 ' <<< "$out")
+    [ "$n_failed" -gt 0 ] && pass "前提：同时转 8 张时有写不下的（$n_failed / 16）" \
+        || { fail "前提：同时转 8 张时都写下了"; sed 's/^/     /' <<< "$out"; }
+    check "磁盘满（同时转 8 张）：每一张失败的都说磁盘空间不够" \
+        "$(grep -c '^失败 [0-9]*\.jpg: 磁盘空间不够：输出目录所在的卷只剩 ' <<< "$out")" "$n_failed"
+    check "磁盘满（同时转 8 张）：没有剩下写了一半的文件" "$(ls -A "$F/卷" | grep -c 'glint-')" "0"
     hdiutil detach "$F/卷" -quiet && DISK_MNT=""
 else
     # 条数和上面一样，免得断言条数的守卫再报一条「跑少了」。
-    for what in 退出码 说磁盘空间不够 没有剩下写了一半的文件; do fail "磁盘满：建不出或挂不上磁盘映像（$what）"; done
+    for what in 退出码 说磁盘空间不够 没有剩下写了一半的文件 有写不下的 并发时说磁盘空间不够 并发时没有剩下; do
+        fail "磁盘满：建不出或挂不上磁盘映像（$what）"
+    done
 fi
 
 round "6. 不合规范的 UserComment（无字符集前缀的裸 UTF-8）"

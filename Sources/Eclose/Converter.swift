@@ -444,7 +444,10 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     /// 「编码 + 照搬」一遍，写进一个新的临时文件。编码失败是 nil，临时文件已删。
     /// 临时文件登记在 TemporaryFiles 里，进程被打断时由命令行或应用删掉；convert 返回时注销。
     var temporaries: [URL] = []
-    defer { TemporaryFiles.shared.forget(temporaries) }
+    defer {
+        TemporaryFiles.shared.forget(temporaries)
+        _ = ProductWriteFailures.shared.take(temporaries)   // 没用上的写盘错误（例如重编那一遍的）不留着
+    }
     // 编码用的源。源里的 ICC 色彩描述文件坏了、ImageIO 因此解不出图像时，换成去掉 ICC 的那份。
     var pixels = src
     var droppedICC = false
@@ -469,7 +472,8 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         return encodeAndCarry()
     }
     guard var product = encodeAndCarry() ?? encodeWithoutDamagedICC() else {
-        return .failed(encodeFailureReason(src, kind: kind, folder: folder, sourceBytes: inBytes))
+        return .failed(encodeFailureReason(src, kind: kind, folder: folder,
+                                           writeError: ProductWriteFailures.shared.take(temporaries)))
     }
     if kind == .raw, let problem = rawProductDepthProblem(product.url) {
         try? fm.removeItem(at: product.url)
@@ -684,7 +688,9 @@ private func replacingProduct(_ product: URL, with carried: [UInt8], check: (URL
     let candidate = product.deletingLastPathComponent()
         .appendingPathComponent(".glint-\(UUID().uuidString).heic")
     defer { try? FileManager.default.removeItem(at: candidate) }
-    guard (try? Data(carried).write(to: candidate)) != nil else { return "写不出照搬后的产物" }
+    do { try Data(carried).write(to: candidate) } catch {
+        return "写不出照搬后的产物" + (isOutOfSpace(error) ? "：磁盘空间不够" : "")
+    }
     if let problem = check(candidate) { return problem }
     guard rename(candidate.path, product.path) == 0 else { return "换不上照搬后的产物" }
     return nil
@@ -930,29 +936,70 @@ private func encodeFirstPass(_ src: CGImageSource, properties: [CFString: Any],
 ///    它不认 kCGImageDestinationMetadata，XMP 包里属性字典表达不了的标签
 ///    （xmp:Label、lr:hierarchicalSubject、dc:title 的其它语言、人脸区域的 Name、
 ///    自定义命名空间、xmpMM:* 等）这一遍都带不过去。
-/// 2. CopyImageSource 把第一遍的结果写到 `url`，同时把源的 XMP 合并进去。
+/// 2. CopyImageSource 把第一遍的结果再写一遍，同时把源的 XMP 合并进去。
 ///    这一步只改元数据，不重新编码像素，第一遍加进去的辅助图原样留在产物里。
 ///    它的选项里只有 XMP 和合并开关起作用：属性字典传进来会被忽略（实测带不带它，
 ///    产物逐字节相同），所以 EXIF 等字典只能靠第一遍写进去。
+///
+/// 两遍都写进内存，最后由这里自己写到 `url`（writeProduct）。交给 ImageIO 直接写文件的话，
+/// 卷满了它只回一个 false，说不清是编码器还是磁盘的问题，还会在旁边留下写了一半的临时文件。
 func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
                 xmp: CGImageMetadata?, to url: URL) -> Bool {
     let properties = propertiesForHEIFWriter(properties)
     let heic = UTType.heic.identifier as CFString
-    // 源里没有 XMP 就没有第二遍可做；CopyImageSource 不带元数据选项时直接失败。
-    guard let xmp else {
-        return encodeFirstPass(src, properties: properties) {
-            CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil)
-        }
-    }
     var encoded = NSMutableData()
     guard encodeFirstPass(src, properties: properties, makeDestination: {
-              encoded = NSMutableData()
-              return CGImageDestinationCreateWithData(encoded, heic, 1, nil)
-          }),
-          let firstPass = CGImageSourceCreateWithData(encoded, nil),
-          let out = CGImageDestinationCreateWithURL(url as CFURL, heic, 1, nil) else { return false }
+        encoded = NSMutableData()
+        return CGImageDestinationCreateWithData(encoded, heic, 1, nil)
+    }) else { return false }
+    // 源里没有 XMP 就没有第二遍可做；CopyImageSource 不带元数据选项时直接失败。
+    guard let xmp else { return writeProduct(encoded as Data, to: url) }
+    let merged = NSMutableData()
+    guard let firstPass = CGImageSourceCreateWithData(encoded, nil),
+          let out = CGImageDestinationCreateWithData(merged, heic, 1, nil) else { return false }
     let options = [kCGImageDestinationMetadata: xmp, kCGImageDestinationMergeMetadata: true] as CFDictionary
-    return CGImageDestinationCopyImageSource(out, firstPass, options, nil)
+    guard CGImageDestinationCopyImageSource(out, firstPass, options, nil) else { return false }
+    return writeProduct(merged as Data, to: url)
+}
+
+/// 把编好的产物写进 `url`（一个临时文件，写完由 convert 挪到目标位置）。写不进去时记下原因
+/// （ProductWriteFailures），convert 报失败原因时据此说清是磁盘满了还是别的写盘错误。
+/// 写了一半的文件留给调用方删（它登记在 TemporaryFiles 里）。
+func writeProduct(_ data: Data, to url: URL) -> Bool {
+    do {
+        try data.write(to: url)
+        return true
+    } catch {
+        ProductWriteFailures.shared.record(error, for: url)
+        return false
+    }
+}
+
+/// 产物文件写不进去的原因，按临时文件的路径记。encode 只回成功与否（测试里换成假编码器），
+/// 原因从这里取；取一次就清掉。
+final class ProductWriteFailures {
+    static let shared = ProductWriteFailures()
+    private let lock = NSLock()
+    private var errors: [URL: Error] = [:]
+
+    func record(_ error: Error, for url: URL) {
+        lock.lock(); errors[url] = error; lock.unlock()
+    }
+
+    /// 取出并清掉这些路径上记下的写盘错误；有好几个时给最后一个。
+    func take(_ urls: [URL]) -> Error? {
+        lock.lock(); defer { lock.unlock() }
+        return urls.reduce(nil) { found, url in errors.removeValue(forKey: url) ?? found }
+    }
+}
+
+/// 写盘错误是不是卷满了（含超出配额）。Data.write 给的是 Cocoa 错误，底下的 POSIX 错误在 underlying 里。
+func isOutOfSpace(_ error: Error) -> Bool {
+    let ns = error as NSError
+    if ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteOutOfSpaceError { return true }
+    if ns.domain == NSPOSIXErrorDomain && (ns.code == Int(ENOSPC) || ns.code == Int(EDQUOT)) { return true }
+    if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error { return isOutOfSpace(underlying) }
+    return false
 }
 
 /// 源图第 0 张真解得出像素。CGImageSourceCreateImageAtIndex 拿到图不算：它先不解码，量化表
@@ -1030,16 +1077,19 @@ func jpegWithoutICC(_ url: URL) -> Data? {
 
 /// 编码失败时说清是哪一头的问题。源本身解不出图像（截断、损坏的文件）时，「HEIC 编码失败」
 /// 会让人去怀疑编码器；这里先试着解一次源图。只在失败时才解：RAW 解一次就是整幅显影，平时不该多花这一遍。
-/// 输出目录写不进去（没有写权限、建不出来）、所在的卷满了，也都表现为编码失败，先查这两条。
-/// 「满了」的判据是剩余空间不到源文件的大小：产物通常比源小，连一个源文件都放不下多半就是它。
-func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL, sourceBytes: Int) -> String {
+/// 输出目录写不进去（没有写权限、建不出来）、编好的产物写盘失败（`writeError`，见 writeProduct），
+/// 也都表现为编码失败，先查这两条。卷满了是写盘失败里最常见的，单说「磁盘空间不够」。
+func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL, writeError: Error?) -> String {
     if TemporaryFiles.shared.isShuttingDown { return "已中断" }
     if !FileManager.default.isWritableFile(atPath: folder.path) {
         return "写不进输出目录（没有写权限或建不出来）：\(folder.path)"
     }
-    if let free = (try? folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?.volumeAvailableCapacity,
-       free < sourceBytes {
-        return "磁盘空间不够：输出目录所在的卷只剩 \(humanSize(free))"
+    if let writeError {
+        guard isOutOfSpace(writeError) else {
+            return "写不进输出文件：\(writeError.localizedDescription)"
+        }
+        let free = (try? folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?.volumeAvailableCapacity
+        return "磁盘空间不够" + (free.map { "：输出目录所在的卷只剩 \(humanSize($0))" } ?? "")
     }
     guard !imageDecodes(src) else { return "HEIC 编码失败" }
     switch kind {

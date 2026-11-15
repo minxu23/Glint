@@ -3470,6 +3470,43 @@ do {
     try? FileManager.default.removeItem(at: url)
 }
 
+print("产物写盘失败（writeProduct、isOutOfSpace、encodeFailureReason）")
+do {
+    func posix(_ code: Int32) -> NSError { NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+    func cocoa(_ code: Int, underlying: Error? = nil) -> NSError {
+        NSError(domain: NSCocoaErrorDomain, code: code, userInfo: underlying.map { [NSUnderlyingErrorKey: $0] } ?? [:])
+    }
+    check("卷满了的几种写法都认得", [isOutOfSpace(cocoa(NSFileWriteOutOfSpaceError)), isOutOfSpace(posix(ENOSPC)),
+                                 isOutOfSpace(posix(EDQUOT)), isOutOfSpace(cocoa(NSFileWriteUnknownError, underlying: posix(ENOSPC)))],
+          [true, true, true, true])
+    check("别的写盘错误不算卷满", [isOutOfSpace(posix(EIO)), isOutOfSpace(cocoa(NSFileWriteNoPermissionError)),
+                               isOutOfSpace(cocoa(NSFileWriteUnknownError, underlying: posix(EIO)))], [false, false, false])
+
+    // 写不进去时记下原因，按路径取一次就清掉；写成功的不记。
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("glint-write-\(UUID().uuidString)")
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let missing = dir.appendingPathComponent("没有这个目录/a.heic"), fine = dir.appendingPathComponent("b.heic")
+    check("写进不存在的目录：失败", writeProduct(Data([1, 2, 3]), to: missing), false)
+    check("写成功：字节原样", [writeProduct(Data([1, 2, 3]), to: fine) ? 1 : 0] + [UInt8]((try? Data(contentsOf: fine)) ?? Data()).map(Int.init),
+          [1, 1, 2, 3])
+    check("失败的原因按路径记着，成功的不记", ProductWriteFailures.shared.take([fine, missing]) != nil, true)
+    check("取过一次就清掉", ProductWriteFailures.shared.take([fine, missing]) == nil, true)
+
+    // 失败原因：卷满了说磁盘空间不够（带剩余空间），别的写盘错误照实说，没有写盘错误才去查源解不解得出。
+    if let src = tinyJPEGSource() {
+        check("写盘时卷满了：磁盘空间不够",
+              encodeFailureReason(src, kind: .jpeg, folder: dir, writeError: posix(ENOSPC)).hasPrefix("磁盘空间不够：输出目录所在的卷只剩 "), true)
+        check("别的写盘错误：写不进输出文件",
+              encodeFailureReason(src, kind: .jpeg, folder: dir, writeError: posix(EIO)).hasPrefix("写不进输出文件："), true)
+        check("没有写盘错误、源解得出：编码器的问题",
+              encodeFailureReason(src, kind: .jpeg, folder: dir, writeError: nil), "HEIC 编码失败")
+    } else {
+        check("造得出小 JPEG", false, true)
+    }
+    try? fm.removeItem(at: dir)
+}
+
 print("-o 的解读（OutputPlan.resolve）")
 do {
     func plan(_ path: String, _ count: Int) -> String {
