@@ -22,6 +22,9 @@ func usage(for command: Command) -> String {
           -f, --overwrite          覆盖已存在的输出文件
               --delete-original    删除源 JPEG（会自动先做 --verify，只有完全无损、
                                    且 HEIF 不比原图大才删）
+              --keep-stale-mpf     原图的 MPF 索引登记的附加图像（如 HDR 增益图）已不在文件里时，
+                                   --delete-original 也不删源。默认照删：那张图转换前就没了，
+                                   转换没丢东西；不管加不加，都会写一句说明
               --verify             转换后逐条比对元数据，报告任何丢失或变化的条目
               --no-raw-exif        EXIF 交给系统重写，不整块照搬源文件的 EXIF。
                                    遇到读不了产物的软件时用

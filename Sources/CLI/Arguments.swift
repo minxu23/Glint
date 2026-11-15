@@ -8,7 +8,7 @@ import Foundation
 
 /// 两个命令：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。选项大体相同，差在：收的源、
 /// 默认并发数（RAW 用 ConversionOptions.defaultRAWJobs）、raw2heif 不接受 --delete-original
-/// 和 --allow-cmyk（RAW 没有 CMYK 一说，当未知选项报错），以及画质核对的四个选项只有 jpeg2heif 有
+/// 和 --allow-cmyk（RAW 没有 CMYK 一说，当未知选项报错）、--keep-stale-mpf（MPF 是 JPEG 的），以及画质核对的四个选项只有 jpeg2heif 有
 /// （raw2heif 给了就报错，RAW 不核对画质）。
 enum Command {
     case jpeg2heif, raw2heif
@@ -98,6 +98,7 @@ func parseArguments(_ arguments: [String], command: Command) throws -> ParsedArg
         case "--no-raw-exif": o.rawExif = false
         case "--embed-caption": o.embedCaption = true
         case "--allow-cmyk" where command == .jpeg2heif: o.convertCMYK = true
+        case "--keep-stale-mpf" where command == .jpeg2heif: o.keepStaleMPF = true
         case "--no-quality-check": o.qualityCheck = false
         case "--min-ssim":
             let raw = try next(a)

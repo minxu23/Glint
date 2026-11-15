@@ -19,9 +19,9 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=730
-EXPECTED_UNIT=1386
-EXPECTED_GUI=363
+EXPECTED_ASSERTIONS=734
+EXPECTED_UNIT=1392
+EXPECTED_GUI=366
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -884,6 +884,24 @@ out=$("$BIN" -v --verify "$WORK/ISO增益图/只有标记段.jpg" 2>&1)
 grep -q "元数据校验通过" <<< "$out" \
     && pass "只有 ISO 21496 标记段、没有增益图：标记段不报，校验通过" \
     || { fail "只有 ISO 21496 标记段、没有增益图：校验报了差异"; sed 's/^/     /' <<< "$out"; }
+# MPF 索引还登记着截掉的那张增益图：不算差异，写一句说明（太和测试集 10 号就是这样）。删不删源由
+# --keep-stale-mpf 定：默认照删（那张图转换前就没了），加了就保留。
+STALE_NOTE="原图的 MPF 索引登记的附加图像（类型码 0x000000，"
+grep -qF "$STALE_NOTE" <<< "$out" \
+    && pass "MPF 登记的增益图不在文件里：状态说明写明" \
+    || { fail "MPF 登记的增益图不在文件里：没写说明"; sed 's/^/     /' <<< "$out"; }
+cp "$WORK/ISO增益图/只有标记段.jpg" "$WORK/ISO增益图/旧索引照删.jpg"
+cp "$WORK/ISO增益图/只有标记段.jpg" "$WORK/ISO增益图/旧索引保留.jpg"
+out=$("$BIN" --delete-original "$WORK/ISO增益图/旧索引照删.jpg" 2>&1)
+[ ! -f "$WORK/ISO增益图/旧索引照删.jpg" ] && grep -qF "$STALE_NOTE" <<< "$out" \
+    && pass "MPF 旧索引：默认照删源，说明照写" \
+    || { fail "MPF 旧索引：默认没删源或没写说明"; sed 's/^/     /' <<< "$out"; }
+out=$("$BIN" --delete-original --keep-stale-mpf "$WORK/ISO增益图/旧索引保留.jpg" 2>&1)
+[ -f "$WORK/ISO增益图/旧索引保留.jpg" ] && grep -qF "按设置，原图缺了 MPF 登记的附加图像时保留源文件" <<< "$out" \
+    && pass "MPF 旧索引：加 --keep-stale-mpf 保留源，说明为什么" \
+    || { fail "MPF 旧索引：加了 --keep-stale-mpf 还是删了源或没说明"; sed 's/^/     /' <<< "$out"; }
+check "raw2heif 不接受 --keep-stale-mpf" "$("$RAW_BIN" --keep-stale-mpf "$WORK/ISO增益图/旧索引保留.jpg" 2>&1 | head -1)" \
+    "错误: 未知选项: --keep-stale-mpf（用 --help 查看用法）"
 # 新版 MPF 给增益图的类型码 0x050000（华为的 HDR 照片用它）：搬进产物了就不计入尾部的丢失。
 # 0x040000（编辑前的原图）不是辅助图，照报。
 for code in 050000 040000; do

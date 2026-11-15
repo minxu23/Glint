@@ -790,6 +790,22 @@ let segmentCuts = (mpfStart + 4 + 4 + 1..<mpfEnd).filter { cut in
 }
 check("MPF 段截短到任何长度，附加图像都照报", segmentCuts, [])
 
+print("MPF 登记的图不在文件里（编辑后留下的旧索引）：写进状态说明，不算校验差异")
+// 实例：编辑软件重存了主图，增益图没带上，MP 索引原样留着，增益图的偏移指到文件末尾之后。
+let staleMPF = mpfJPEG([(0x050000, gainMap)]) { $0[1].offset = 0x10_0000 }
+check("登记到文件末尾之后的增益图：列出类型码与长度",
+      mpfMissingImages(in: staleMPF, JPEGLayout(staleMPF)!).map { "\($0.typeCode) \($0.size)" }, ["\(0x050000) \(oneTrailer)"])
+check("登记的图都在文件里：不列", mpfMissingImages(in: one, JPEGLayout(one)!).count, 0)
+let stalePreview = mpfJPEG([(0x010002, gainMap)]) { $0[1].offset = 0x10_0000 }
+check("不在文件里的是大尺寸预览图：不列（派生物，在也不带）",
+      mpfMissingImages(in: stalePreview, JPEGLayout(stalePreview)!).count, 0)
+let staleOnly = Array(staleMPF.prefix(staleMPF.count - oneTrailer))
+check("增益图本来就不在：不算校验差异（源里本来就没有）", unportableSegments(in: staleOnly, carriedAuxiliary: []), [])
+check("增益图本来就不在：状态说明写明类型、长度",
+      staleMPFNotice(staleOnly), "原图的 MPF 索引登记的附加图像（增益图，类型码 0x050000，\(oneTrailer) 字节）不在文件里："
+        + "原图被编辑或截短过，这张图转换前就没了，HEIF 里也没有")
+check("登记的图都在：没有说明", staleMPFNotice(one), nil)
+
 print("多份 EXIF：第二份里有第一份之外的信息才报，列出字段")
 func twoExif(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
     let id = Array("Exif".utf8) + [0, 0]

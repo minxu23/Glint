@@ -157,9 +157,42 @@ struct MPFImage: Equatable {
 
 /// 读 APP2 `MPF\0` 段里的 MP 索引，返回第二个条目起的附加图像（第一个条目是主图
 /// 自己）。偏移、长度、条目数都来自源文件，一律不信：段内结构越界或自相矛盾就整个
-/// 返回空数组；单个条目的范围越出文件或长度为 0 就不收这一条。
+/// 返回空数组；单个条目的范围越出文件或长度为 0 就不收这一条（越出文件的见 mpfMissingImages）。
 /// 只读文件里第一个 MPF 段，偏移按 MP 规范从段内 TIFF 头的起点算。
 func mpfImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [MPFImage] {
+    mpfEntries(in: bytes, layout).compactMap { e in
+        guard e.start + e.size <= bytes.count else { return nil }
+        return MPFImage(typeCode: e.typeCode, range: e.start..<(e.start + e.size))
+    }
+}
+
+/// MPF 索引登记了、范围却越出文件末尾的附加图像：文件截短了，或者编辑软件重存主图时把旧索引原样留着
+/// （主图变小了，附加图像没带上）。源里本来就没有这张图，产物里也不会有。
+/// 大尺寸预览图（0x010001/0x010002）不算：它是主图的派生物，在文件里也不带（previewTrailerRanges），
+/// 不在了也没少什么。去掉尾部的工具常把预览图连同索引里的登记一起留成这样。
+func mpfMissingImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [(typeCode: Int, size: Int)] {
+    mpfEntries(in: bytes, layout)
+        .filter { $0.start + $0.size > bytes.count && !previewMPFTypes.contains($0.typeCode) }
+        .map { ($0.typeCode, $0.size) }
+}
+
+/// 原图的 MPF 索引登记了不在文件里的附加图像时，写进状态说明的那句；都在是 nil。
+/// 只是说明，不算校验差异：源里本来就没有这些图，转换没丢东西。要不要因此保留源文件由
+/// ConversionOptions.keepStaleMPF 定（默认照删）。
+func staleMPFNotice(_ bytes: [UInt8]) -> String? {
+    guard let layout = JPEGLayout(bytes) else { return nil }
+    let missing = mpfMissingImages(in: bytes, layout)
+    guard !missing.isEmpty else { return nil }
+    let items = missing.map { m -> String in
+        let kind = m.typeCode == 0x050000 ? "增益图，" : ""
+        return kind + "类型码 " + String(format: "0x%06X", m.typeCode) + "，\(m.size) 字节"
+    }
+    return "原图的 MPF 索引登记的附加图像（" + items.joined(separator: "；") + "）不在文件里："
+        + "原图被编辑或截短过，这张图转换前就没了，HEIF 里也没有"
+}
+
+/// MP 索引里第二个条目起的原始登记：类型码、在文件里的绝对起点、长度。偏移或长度为 0 的不收。
+private func mpfEntries(in bytes: [UInt8], _ layout: JPEGLayout) -> [(typeCode: Int, start: Int, size: Int)] {
     guard let segment = layout.segments.first(where: { $0.marker == 0xE2 && $0.begins(with: mpfID, in: bytes) })
     else { return [] }
     let base = segment.payload.lowerBound + mpfID.count
@@ -194,13 +227,12 @@ func mpfImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [MPFImage] {
         break
     }
     guard let entries, entries.count >= 1 else { return [] }
-    var images: [MPFImage] = []
+    var images: [(typeCode: Int, start: Int, size: Int)] = []
     for k in 1..<entries.count {
         let at = entries.offset + k * 16
         guard let attribute = u32(at), let size = u32(at + 4), let offset = u32(at + 8) else { return [] }
-        let start = base + offset
-        guard offset > 0, size > 0, start + size <= bytes.count else { continue }
-        images.append(MPFImage(typeCode: attribute & 0xFF_FFFF, range: start..<(start + size)))
+        guard offset > 0, size > 0 else { continue }
+        images.append((attribute & 0xFF_FFFF, base + offset, size))
     }
     return images
 }

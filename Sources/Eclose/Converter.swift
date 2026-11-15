@@ -44,6 +44,11 @@ public struct ConversionOptions: Equatable {
     /// 命令行 jpeg2heif --allow-cmyk、界面转换面板「高级」里的「也转 CMYK 的 JPEG」打开。
     /// 强制转换时校验照样报出 ColorModel、ProfileName 两条变化，--delete-original 不删源。
     public var convertCMYK = false
+    /// 原图的 MPF 索引登记了不在文件里的附加图像（编辑软件重存时扔了增益图、索引原样留着）时，
+    /// --delete-original 也保留源文件。默认关：那张图转换前就没了，转换没丢东西，照删。不管开不开，
+    /// 都在状态说明里写一句（staleMPFNotice）。命令行 jpeg2heif --keep-stale-mpf；界面转换面板里
+    /// 「校验无差异后删除源文件」下面那一项。
+    public var keepStaleMPF = false
     /// 转完核对画质（只对 JPEG，见 QualityCheck.swift）：产物交出之前与源比 PSNR 和最差 1% 局部 SSIM，
     /// 不达标按 `onQualityDrop` 处理。命令行 jpeg2heif --no-quality-check 关掉；界面转换面板「高级」里
     /// 的「转完核对画质」。
@@ -574,8 +579,12 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     var notes: [String] = []
     var sourceDeleted = false
     let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
+    // 原图的 MPF 索引登记了不在文件里的附加图像：不算校验差异（源里本来就没有），只写一句。
+    let staleMPF = kind == .jpeg
+        ? (try? Data(contentsOf: input, options: .mappedIfSafe)).flatMap { staleMPFNotice([UInt8]($0)) } : nil
     if let qualityNote = quality?.note { notes.append(qualityNote) }
     if let growth { notes.append("HEIF 比原图大 \(growth)") }
+    if let staleMPF { notes.append(staleMPF) }
     // 没校验时差异列表不存在，去掉坏 ICC、说明没写成这些放进状态说明，不让它们静默。
     if !opts.verifyEnabled { notes += conversionIssues }
     if opts.deleteOriginal {
@@ -587,6 +596,8 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
             notes.append("因元数据校验未通过，保留了源文件")
         } else if growth != nil {
             notes.append("因产物比原图大，保留了源文件")
+        } else if staleMPF != nil && opts.keepStaleMPF {
+            notes.append("按设置，原图缺了 MPF 登记的附加图像时保留源文件")
         } else {
             do {
                 try fm.removeItem(at: input)

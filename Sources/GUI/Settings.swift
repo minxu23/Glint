@@ -32,7 +32,8 @@ final class MemoryStore: SettingsStore {
 
 /// 转换面板上的设置。打开面板时从存储读，开始转换时写回。
 /// 「删除源文件」「覆盖同名的 HEIF」「也转 CMYK 的 JPEG」不读也不写：每次打开面板都是关的。
-/// 画质核对的四项（开关、两个门槛、不达标时的处理）和「转完逐项校验」一样记住。
+/// 画质核对的四项（开关、两个门槛、不达标时的处理）、「原图缺了增益图等附加图像时保留 JPEG」和
+/// 「转完逐项校验」一样记住。
 struct PanelSettings: Equatable {
     var quality: Double
     /// 保存到指定文件夹；nil 是源文件旁边。
@@ -49,6 +50,9 @@ struct PanelSettings: Equatable {
     var qualityCheck = ConversionOptions.default.qualityCheck
     var qualityThresholds = ConversionOptions.default.qualityThresholds
     var onQualityDrop = ConversionOptions.default.onQualityDrop
+    /// 「原图缺了增益图等附加图像时保留 JPEG」，即 ConversionOptions.keepStaleMPF。只在勾了删除源文件时
+    /// 显示、起作用。记住：这是用户对删除的偏好，不是一次性的选择。
+    var keepStaleMPF = ConversionOptions.default.keepStaleMPF
 
     private enum Key {
         static let quality = "panel.quality"
@@ -60,6 +64,7 @@ struct PanelSettings: Equatable {
         static let minSSIM = "panel.minSSIM"
         static let minPSNR = "panel.minPSNR"
         static let onQualityDrop = "panel.onQualityDrop"
+        static let keepStaleMPF = "panel.keepStaleMPF"
     }
 
     /// 没存过时的默认值：取自 ConversionOptions.default，只有校验有意不同（界面默认校验，
@@ -90,6 +95,7 @@ struct PanelSettings: Equatable {
         if let raw = store.value(forKey: Key.onQualityDrop) as? String, let v = QualityDropAction(rawValue: raw) {
             s.onQualityDrop = v
         }
+        if let v = store.value(forKey: Key.keepStaleMPF) as? Bool { s.keepStaleMPF = v }
         return s
     }
 
@@ -104,6 +110,7 @@ struct PanelSettings: Equatable {
         store.setValue(qualityThresholds.minSSIM, forKey: Key.minSSIM)
         store.setValue(qualityThresholds.minPSNR, forKey: Key.minPSNR)
         store.setValue(onQualityDrop.rawValue, forKey: Key.onQualityDrop)
+        store.setValue(keepStaleMPF, forKey: Key.keepStaleMPF)
     }
 
     /// 两个门槛输入框里的文字落到设置上：合法的那个写进 qualityThresholds；有不合法的，返回给用户看的
@@ -146,6 +153,7 @@ struct PanelSettings: Equatable {
         options.qualityCheck = qualityCheck
         options.qualityThresholds = qualityThresholds
         options.onQualityDrop = onQualityDrop
+        options.keepStaleMPF = keepStaleMPF
     }
 }
 

@@ -568,6 +568,13 @@ func testSettings() {
     del.convertCMYK = true
     del.apply(to: &opts)
     check("勾了「也转 CMYK 的 JPEG」落到 ConversionOptions 上", opts.convertCMYK, true)
+    check("「原图缺了附加图像时保留 JPEG」默认不勾（照删）", [fresh.keepStaleMPF, ConversionOptions.default.keepStaleMPF], [false, false])
+    var keep = back
+    keep.keepStaleMPF = true
+    keep.save(to: store)
+    check("「原图缺了附加图像时保留 JPEG」记住了", PanelSettings.load(from: store).keepStaleMPF, true)
+    keep.apply(to: &opts)
+    check("勾了「原图缺了附加图像时保留 JPEG」落到 ConversionOptions 上", opts.keepStaleMPF, true)
     s.outputFolder = nil
     s.save(to: store)
     check("改回源文件旁边也记住", PanelSettings.load(from: store).outputFolder, nil)

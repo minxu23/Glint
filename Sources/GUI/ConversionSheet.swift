@@ -25,6 +25,8 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
     private let captionCheck = NSButton(checkboxWithTitle: "把备注写进文件", target: nil, action: nil)
     private let deleteCheck = NSButton(checkboxWithTitle: "校验无差异后删除源文件", target: nil, action: nil)
     private let deleteNote = makeLabel("删除后不进废纸篓", size: 11, color: .secondaryLabelColor)
+    /// 勾了删除才显示（和 deleteNote 在同一个缩进里）。
+    private let keepStaleCheck = NSButton(checkboxWithTitle: "原图里的增益图等附加图像已不在时，保留 JPEG", target: nil, action: nil)
     private let advancedToggle = NSButton()
     private let advancedBox = NSStackView()
     private let exifCheck = NSButton(checkboxWithTitle: "EXIF 交给系统重写", target: nil, action: nil)
@@ -84,7 +86,7 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
         outputPath.lineBreakMode = .byTruncatingMiddle
         outputPath.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        for c in [verifyCheck, captionCheck, deleteCheck, exifCheck, overwriteCheck, cmykCheck] {
+        for c in [verifyCheck, captionCheck, deleteCheck, keepStaleCheck, exifCheck, overwriteCheck, cmykCheck] {
             c.target = self
             c.action = #selector(toggled(_:))
         }
@@ -94,7 +96,11 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
         switch targets.deleteChoice {
         case let .offered(title, hint, _):
             deleteCheck.title = title
-            deleteBlock = check(deleteCheck, hint, extra: deleteNote)
+            keepStaleCheck.controlSize = .small
+            keepStaleCheck.font = .systemFont(ofSize: 11)
+            keepStaleCheck.toolTip = "编辑软件重存照片时常扔掉 HDR 增益图、却留着登记它的 MPF 索引。"
+                + "那张图转换前就没了，默认照删；勾上则保留这样的 JPEG"
+            deleteBlock = check(deleteCheck, hint, extra: vstack([deleteNote, keepStaleCheck], spacing: 4))
         case .unavailable(let text):
             let label = makeWrappingLabel(text, size: 13)
             label.preferredMaxLayoutWidth = 320
@@ -271,7 +277,8 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
         captionCheck.isEnabled = canEmbed
         captionCheck.state = canEmbed && settings.embedCaption ? .on : .off
         deleteCheck.state = settings.deleteOriginal ? .on : .off
-        deleteNote.superview?.isHidden = !settings.deleteOriginal
+        deleteNote.superview?.superview?.isHidden = !settings.deleteOriginal
+        keepStaleCheck.state = settings.keepStaleMPF ? .on : .off
         exifCheck.state = settings.systemExif ? .on : .off
         overwriteCheck.state = settings.overwrite ? .on : .off
         cmykCheck.state = settings.convertCMYK ? .on : .off
@@ -299,6 +306,7 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
         case verifyCheck: settings.verify = on
         case captionCheck: settings.embedCaption = on
         case deleteCheck: settings.deleteOriginal = on
+        case keepStaleCheck: settings.keepStaleMPF = on
         case exifCheck: settings.systemExif = on
         case overwriteCheck: settings.overwrite = on
         case cmykCheck: settings.convertCMYK = on
