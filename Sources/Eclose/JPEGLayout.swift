@@ -300,6 +300,7 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
     if layout.eoi == nil {
         issues.append(truncatedSourceNotice)
     }
+    issues += extraExifIssues(in: bytes, layout)
     if let eoi = layout.eoi {
         let trailer = (eoi + 2)..<bytes.count
         let carried = carriedTrailerRanges(in: bytes, layout, carried: carriedAuxiliary)
@@ -329,6 +330,70 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
         }
     }
     return issues
+}
+
+// MARK: - 多份 EXIF
+
+/// 源里有不止一个 APP1 `Exif` 段时，第二份起每份一条差异：ImageIO 和照搬都只认第一份，后面的
+/// 不进产物。后面那份里的每个条目（IFD0、Exif IFD、GPS IFD、Interop IFD；指针不算）在第一份的
+/// 同一个 IFD 里都有、值也相同（字节序不同按值比）时，它没有第一份之外的信息，不报。
+/// 列出不同或第一份没有的字段名，最多 8 个；读不出结构的整份报。
+func extraExifIssues(in bytes: [UInt8], _ layout: JPEGLayout) -> [String] {
+    let id: [UInt8] = Array("Exif".utf8) + [0, 0]
+    let copies = layout.segments.filter { $0.marker == 0xE1 && $0.begins(with: id, in: bytes) }
+    guard copies.count > 1 else { return [] }
+    func fields(_ s: JPEGSegment) -> [String: [UInt8]]? {
+        let base = s.payload.lowerBound + id.count
+        guard let tiff = TIFFStructure(bytes, base: base, length: s.payload.upperBound - base) else { return nil }
+        return exifFieldValues(tiff)
+    }
+    let first = fields(copies[0]) ?? [:]
+    var issues: [String] = []
+    for (k, copy) in copies.enumerated().dropFirst() {
+        let head = "丢失 第 \(k + 1) 份 EXIF（APP1，\(copy.payload.count) 字节）：产物只带第 1 份"
+        guard let other = fields(copy) else { issues.append(head + "，这份读不出结构"); continue }
+        // 按 IFD0、Exif、GPS、Interop 的顺序，同一个 IFD 里按标签号。
+        let order = ["IFD0": 0, "ExifIFD": 1, "GPS": 2, "Interop": 3]
+        func rank(_ key: String) -> (Int, Int) {
+            let parts = key.split(separator: ":")
+            return (order[String(parts[0])] ?? 4, Int(parts[1]) ?? 0)
+        }
+        let differing = other.filter { first[$0.key] != $0.value }.keys.sorted { rank($0) < rank($1) }
+        guard !differing.isEmpty else { continue }
+        let names = differing.prefix(8).map { key -> String in
+            let parts = key.split(separator: ":")
+            return carriedEntryName(String(parts[0]), Int(parts[1]) ?? 0)
+        }
+        issues.append(head + "，这份里 \(differing.count) 个字段与第 1 份不同或第 1 份没有："
+                      + names.joined(separator: "、") + (differing.count > 8 ? " 等" : ""))
+    }
+    return issues
+}
+
+/// 一块 EXIF（TIFF 结构）里各条目的值，键是「IFD:标签号」，值是类型码加按大端序写的值字节——
+/// 两份 EXIF 字节序不同时也能直接比。指向子 IFD 的指针（0x8769、0x8825、0xA005）不收。
+func exifFieldValues(_ tiff: TIFFStructure) -> [String: [UInt8]] {
+    let pointers: Set<Int> = [0x8769, 0x8825, 0xA005]
+    var result: [String: [UInt8]] = [:]
+    func collect(_ ifd: Int?, _ name: String) {
+        guard let ifd else { return }
+        for e in tiff.entries(ifd) where !pointers.contains(e.tag) {
+            guard var value = tiff.value(of: e) else { continue }
+            let unit = [2, 3, 4, 5, 8, 9, 10, 11, 12, 13].contains(e.type)
+                ? [2: 1, 3: 2, 4: 4, 5: 4, 8: 2, 9: 4, 10: 4, 11: 4, 12: 8, 13: 4][e.type]! : 1
+            if !tiff.bigEndian && unit > 1 {
+                value = stride(from: 0, to: value.count, by: unit).flatMap { value[$0..<min($0 + unit, value.count)].reversed() }
+            }
+            result["\(name):\(e.tag)"] = [UInt8(e.type & 0xFF)] + value
+        }
+    }
+    let ifd0 = tiff.ifd0
+    collect(ifd0, "IFD0")
+    let exif = ifd0.flatMap { tiff.find($0, tag: 0x8769) }.flatMap { tiff.u32($0.offset) }
+    collect(exif, "ExifIFD")
+    collect(ifd0.flatMap { tiff.find($0, tag: 0x8825) }.flatMap { tiff.u32($0.offset) }, "GPS")
+    collect(exif.flatMap { tiff.find($0, tag: 0xA005) }.flatMap { tiff.u32($0.offset) }, "Interop")
+    return result
 }
 
 // MARK: - APP13 里的 Photoshop 资源

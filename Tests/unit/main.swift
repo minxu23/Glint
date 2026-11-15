@@ -790,6 +790,47 @@ let segmentCuts = (mpfStart + 4 + 4 + 1..<mpfEnd).filter { cut in
 }
 check("MPF 段截短到任何长度，附加图像都照报", segmentCuts, [])
 
+print("多份 EXIF：第二份里有第一份之外的信息才报，列出字段")
+func twoExif(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+    let id = Array("Exif".utf8) + [0, 0]
+    return [0xFF, 0xD8] + jpegSegment(0xE1, id + a) + jpegSegment(0xE1, id + b) + [0xFF, 0xD9]
+}
+let modelA = tiffLE([(0x0110, 2, 2, [0x41, 0, 0, 0]), (0x0112, 3, 1, le16(6) + [0, 0])])
+let modelB = tiffLE([(0x0110, 2, 2, [0x42, 0, 0, 0]), (0x0112, 3, 1, le16(6) + [0, 0])])
+let onlyOrientation = tiffLE([(0x0112, 3, 1, le16(6) + [0, 0])])
+// 同样的方向（6），大端写法：按值比，不算不同。
+let orientationBE: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]
+func extra(_ copy: [UInt8], _ rest: String) -> String {
+    "丢失 第 2 份 EXIF（APP1，\(copy.count + 6) 字节）：产物只带第 1 份" + rest
+}
+check("两份一样：不报", extraExifIssues(in: twoExif(modelA, modelA), JPEGLayout(twoExif(modelA, modelA))!), [])
+check("第二份是第一份的子集、值相同：不报",
+      extraExifIssues(in: twoExif(modelA, onlyOrientation), JPEGLayout(twoExif(modelA, onlyOrientation))!), [])
+check("字节序不同、值相同：不报",
+      extraExifIssues(in: twoExif(modelA, orientationBE), JPEGLayout(twoExif(modelA, orientationBE))!), [])
+check("第二份的 Model 不同：报出字段",
+      extraExifIssues(in: twoExif(modelA, modelB), JPEGLayout(twoExif(modelA, modelB))!),
+      [extra(modelB, "，这份里 1 个字段与第 1 份不同或第 1 份没有：{TIFF}/Model（0x0110）")])
+check("第一份没有的字段：报",
+      extraExifIssues(in: twoExif(onlyOrientation, modelA), JPEGLayout(twoExif(onlyOrientation, modelA))!),
+      [extra(modelA, "，这份里 1 个字段与第 1 份不同或第 1 份没有：{TIFF}/Model（0x0110）")])
+let garbage: [UInt8] = Array("not a tiff".utf8)
+check("第二份读不出结构：整份报", extraExifIssues(in: twoExif(modelA, garbage), JPEGLayout(twoExif(modelA, garbage))!),
+      [extra(garbage, "，这份读不出结构")])
+let many = tiffLE((0..<10).map { (0x0300 + $0, 3, 1, le16($0) + [0, 0]) })
+let manyIssue = extraExifIssues(in: twoExif(onlyOrientation, many), JPEGLayout(twoExif(onlyOrientation, many))!)
+check("超过 8 个字段：列 8 个加「等」，按标签号排",
+      manyIssue.map { [$0.contains("10 个字段"), $0.hasSuffix(" 等"), $0.contains("0x0300"), !$0.contains("0x0308")] },
+      [[true, true, true, true]])
+// 标签 9 与 0x0110（272）：按文本排「272」在前，按标签号 9 在前。
+let ordered = tiffLE([(0x0009, 3, 1, le16(1) + [0, 0]), (0x0110, 2, 2, [0x43, 0, 0, 0])])
+check("字段按标签号排，不按文本",
+      extraExifIssues(in: twoExif(onlyOrientation, ordered), JPEGLayout(twoExif(onlyOrientation, ordered))!)
+        .map { $0.range(of: "0x0009")!.lowerBound < $0.range(of: "0x0110")!.lowerBound }, [true])
+check("只有一份：不报", extraExifIssues(in: jpegWithExif(modelA), JPEGLayout(jpegWithExif(modelA))!), [])
+check("unportableSegments 带上多份 EXIF 那一条",
+      unportableSegments(in: twoExif(modelA, modelB), carriedAuxiliary: []).contains { $0.hasPrefix("丢失 第 2 份 EXIF") }, true)
+
 print("尾部记账：MPF 登记的大尺寸预览图不报，前后的数据照报")
 let preview = tinyJPEG(160, 120)
 let xyz = Array("xyz".utf8)
