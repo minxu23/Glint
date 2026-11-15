@@ -565,17 +565,24 @@ func drawnPixels(_ image: CGImage, colorSpace: CGColorSpace, into memory: Unsafe
 /// 不让 ImageIO 缓存解码结果：这边用完那块像素就丢掉。
 private let uncachedDecode = [kCGImageSourceShouldCache: false, kCGImageSourceShouldCacheImmediately: false] as CFDictionary
 
-/// 产物一次解的行数（16 的倍数）。ImageIO 解从 HEIC 里裁出的一段时只解那一段，产物于是同一时刻只有
-/// 一条带的像素在内存里。
+/// 产物分几条带解。
+let qualityStripCount = 4
+
+/// 高 `height` 的产物一次解的行数：整幅的四分之一，补到 16 的倍数（至少 16）。ImageIO 解从 HEIC 里
+/// 裁出的一段时只解那一段，产物于是同一时刻只有一条带的像素在内存里。
 ///
-/// 为什么是 768：每解一段，ImageIO 都要另开、另关一次硬件的像素转换，解码也是整块整块（HEIC 的图块
-/// 512 行）地解，上下余量又多碰一两排图块，所以条带越矮系统态越高；条带越高，解码器同时占的内存越多。
-/// 在 18 核的 M5 Pro 上按默认并发量过（两组夹具 18 张 6000×4000、36 张 4032×3024，相机样那种 4:2:2 和
-/// ImageIO 编的 4:2:0 各一套）：512 行系统态最高；1024 行在 4032×3024 那组上峰值内存比改之前高一成上下；
-/// 2048 行、整幅解（或整幅画进复用的缓冲）系统态再低一些，峰值内存高出一到四成。768 行是峰值内存与
-/// 改之前持平（差在几次量的起伏以内）的几种里系统态最低的。画进复用的缓冲对产物没用：
-/// ImageIO 解 HEIC 照样先解进自己的一块再拷过来，系统态反而略高。数见 README「转完核对画质」。
-let qualityStripRows = 768
+/// 为什么按高度分四条：每解一段，ImageIO 都要另开、另关一次硬件的像素转换，解码也是整块整块（HEIC
+/// 的图块 512 行）地解，上下余量又多碰一两排图块，所以段越多系统态越高；段越高，解码器同时占的内存
+/// 越多。在 18 核的 M5 Pro 上按默认并发量过（两组夹具 18 张 6000×4000、36 张 4032×3024，相机样那种
+/// 4:2:2 和 ImageIO 编的 4:2:0 各一套），固定 512 行（6000×4000 分 8 段）系统态最高；4032×3024 分 3 段
+/// （1024 行）峰值内存比改之前高一成上下；2048 行、整幅解（或整幅画进复用的缓冲）系统态再低一些，峰值
+/// 内存高出一到四成。分 4 段在两种尺寸上都是峰值内存与改之前持平（差在几次量的起伏以内）的几种里系统态
+/// 最低的；段内的像素占整幅的比例不变，峰值内存跟着图的大小走。画进复用的缓冲对产物没用：ImageIO 解
+/// HEIC 照样先解进自己的一块再拷过来，系统态反而略高。数见 README「转完核对画质」。
+func qualityStripRows(height: Int) -> Int {
+    let rows = (height + qualityStripCount - 1) / qualityStripCount
+    return max(ssimBlockSide, (rows + ssimBlockSide - 1) / ssimBlockSide * ssimBlockSide)
+}
 
 /// 裁产物时上下各多带的行数。裁出的一段在边上那一两行的色度插值缺了邻行，与整幅解码差 1 个色阶；
 /// 多带几行、只用中间那段，解出的像素就与整幅解码逐字节相同（单测「按条带解产物」守着）。
@@ -590,11 +597,11 @@ let qualityStripMargin = 16
 /// 整幅解码差出几个色阶（实测到 7），会把两套解码器之间的差算到编码器头上。画进去而不取
 /// `dataProvider`：相机 JPEG（4:2:2）取 `dataProvider` 要另做一遍颜色转换、每张新分配整幅的内存，系统态
 /// 是画进去的四倍多；ImageIO 编的 4:2:0 反过来是画进去略贵（单线程每张多十毫秒上下的系统态，见 README）。
-/// 产物按 `stripRows` 一条一条地解、算完就丢。同时做核对的张数由 `buffers` 的槽数限住。
-/// `stripRows`、`buffers` 只供单测替换。
-func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualityStripRows,
+/// 产物按 `stripRows` 行（默认 qualityStripRows）一条一条地解、算完就丢。同时做核对的张数由 `buffers`
+/// 的槽数限住。`stripRows`、`buffers` 只供单测替换。
+func qualityReading(source: CGImageSource, product: URL, stripRows: Int? = nil,
                     buffers: QualityBuffers = .shared) -> QualityReading {
-    precondition(stripRows > 0 && stripRows % ssimBlockSide == 0, "条带行数要是 16 的倍数")
+    precondition(stripRows.map { $0 > 0 && $0 % ssimBlockSide == 0 } ?? true, "条带行数要是 16 的倍数")
     let slot = buffers.acquire()
     defer { buffers.release(slot) }
     guard let sourceImage = CGImageSourceCreateImageAtIndex(source, 0, uncachedDecode) else {
@@ -616,7 +623,7 @@ func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualit
     }
     let tally = QualityTally(width: w, height: h)
     // 整张图当一块时只能一次喂完（这时图很窄或很矮，整幅也不大）。
-    let step = w < ssimBlockSide || h < ssimBlockSide ? h : stripRows
+    let step = w < ssimBlockSide || h < ssimBlockSide ? h : (stripRows ?? qualityStripRows(height: h))
     var y = 0
     while y < h {
         let rows = min(step, h - y)

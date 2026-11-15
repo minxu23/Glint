@@ -3838,9 +3838,10 @@ if let src = CGImageSourceCreateWithURL(qcPhotoJPEG as CFURL, nil),
     // 产物按条带解（上下多带几行）与整幅解码逐字节相同，所以量出的数也相同。
     let qcWhole = qualityReading(source: src, product: qcPhotoHEIC, stripRows: 1104)
     check(qcWhole.measurement != nil, "前提：整幅解码量出了数（\(qcWhole)）")
-    for rows in [16, 512, qualityStripRows] {
+    for rows in [16, 512] {
         check("按条带解产物（每条 \(rows) 行）与整幅解码量出的数相同", qualityReading(source: src, product: qcPhotoHEIC, stripRows: rows), qcWhole)
     }
+    check("按条带解产物（默认每条 \(qualityStripRows(height: 1100)) 行）与整幅解码量出的数相同", qualityReading(source: src, product: qcPhotoHEIC), qcWhole)
     check("源与自己比：PSNR 无穷大、SSIM 1", qualityReading(source: src, product: qcPhotoJPEG),
           .measured(QualityMeasurement(psnr: .infinity, worstSSIM: 1)))
     let qcShortJPEG = qcQualityRoot.appendingPathComponent("矮.jpg")
@@ -3853,6 +3854,8 @@ if let src = CGImageSourceCreateWithURL(qcPhotoJPEG as CFURL, nil),
 } else {
     for _ in 0..<8 { fail("编不出 HEIC 产物，从文件量的那几条没法测") }
 }
+
+check("产物的条带：整幅高的四分之一，补到 16 的倍数", [4000, 3024, 1100, 64, 10].map { qualityStripRows(height: $0) }, [1008, 768, 288, 16, 16])
 
 print("画质核对：源图画进复用的内存")
 /// 不经缓存地取第 0 张：每次都重新解码，两次取到的像素互不沾边。
