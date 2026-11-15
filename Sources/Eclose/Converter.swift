@@ -44,6 +44,14 @@ public struct ConversionOptions: Equatable {
     /// 命令行 jpeg2heif --allow-cmyk、界面转换面板「高级」里的「也转 CMYK 的 JPEG」打开。
     /// 强制转换时校验照样报出 ColorModel、ProfileName 两条变化，--delete-original 不删源。
     public var convertCMYK = false
+    /// 转完核对画质（只对 JPEG，见 QualityCheck.swift）：产物交出之前与源比 PSNR 和最差 1% 局部 SSIM，
+    /// 不达标按 `onQualityDrop` 处理。命令行 jpeg2heif --no-quality-check 关掉；界面转换面板「高级」里
+    /// 的「转完核对画质」。
+    public var qualityCheck = true
+    /// 画质核对的两个门槛。命令行 --min-ssim / --min-psnr。
+    public var qualityThresholds = QualityThresholds(minSSIM: 0.90, minPSNR: 33)
+    /// 不达标时怎么办。命令行 --on-quality-drop skip|retry。
+    public var onQualityDrop = QualityDropAction.skip
     public var jobs = ProcessInfo.processInfo.activeProcessorCount
     public var inputs: [String] = []
     /// 收哪几种源：jpeg2heif 是 [.jpeg]，raw2heif 是 [.raw]。界面每批开始时设成两种都收（ConversionTargets.apply）。
@@ -279,8 +287,10 @@ public struct ConversionReport {
     public let reencode: Reencode?
     /// 「照片」的说明写进文件了没有；没开 --embed-caption 或预演时是 nil。只在 -v 时显示。
     public let caption: CaptionOutcome?
+    /// 画质核对的结果；没核对（RAW、预演、关掉了画质核对）是 nil。-v 时显示；重编过的另在 note 里留一句。
+    public let quality: QualityOutcome?
 
-    /// 与元数据差异无关的状态说明：产物比原图大，以及请求了删除源文件却没删的原因
+    /// 与元数据差异无关的状态说明：画质不达标而用更高的质量重编过、产物比原图大，以及请求了删除源文件却没删的原因
     /// （校验未通过、产物比原图大、源是符号链接、删的时候出错）。几句用「；」连成一行。没有要说的就是 nil。
     public let note: String?
     /// 源文件确实被删掉了。界面据此把源从图库里拿掉：删不删的规则只在 convert 里，删的时候还可能出错，
@@ -343,6 +353,8 @@ public enum ConvertResult {
     case converted(ConversionReport)
     case skipped(String)
     case failed(String)
+    /// 画质核对不达标，没有转换：没有产物，源原样留着（不删、目标位置上原有的文件也没动）。
+    case qualityDropped(QualityDrop)
 }
 
 /// 转换单张。`dest` 由 assignDestinations 预先定好且保证全局唯一——不要在这里
@@ -363,6 +375,13 @@ public enum ConvertResult {
 /// 一遍写到另一个临时文件，第二份更小就用第二份，否则（一样大、更大、第二遍编码失败）
 /// 用第一份，没用上的那份删掉。只重编这一次。硬件编码器偶尔会把一张图按高得多的质量
 /// 编出来，这一遍能把它换回正常大小的产物。
+///
+/// 画质核对（只对 JPEG，`opts.qualityCheck`，预演不做）在上面那一步之后、产物挪到目标位置之前：
+/// 留下的那份与编码用的源比（qualityReading），按 `opts.qualityThresholds` 判。不达标时：
+/// - 处理方式是「不转」，或用户设的质量已不低于 qualityRetryLevel：删掉产物，返回 qualityDropped；
+/// - 处理方式是「提高质量再试」：按 qualityRetryLevel 把「编码 + 照搬」再做一遍，再核对一次。
+///   达标就用这一份（之后照常走变大、校验、删源的规则）；编码失败或仍不达标，删掉产物，返回 qualityDropped。
+/// 返回 qualityDropped 时目标位置一个字节都没动，源也不删。
 ///
 /// 公开的入口，编码一律用 encodeHEIF。批量转换请用 runConversions：它先统一分配目标路径。
 public func convert(_ input: URL, opts: ConversionOptions, dest: URL) -> ConvertResult {
@@ -420,7 +439,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: 0,
                                           tagCount: tagCount, xattrCount: 0,
                                           verification: .notVerified, rawExif: nil, reencode: nil,
-                                          caption: nil, note: nil, sourceDeleted: false))
+                                          caption: nil, quality: nil, note: nil, sourceDeleted: false))
     }
 
     // 要写说明时，要合并进产物的 XMP 换成带说明的那份（源里没有 XMP 时是只有说明的一份）。
@@ -492,6 +511,30 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
             try? fm.removeItem(at: second.url)
         }
     }
+    var quality: QualityOutcome?
+    if kind == .jpeg, opts.qualityCheck {
+        let thresholds = opts.qualityThresholds
+        let first = qualityReading(source: pixels, product: product.url)
+        if case .measured(let m) = first, thresholds.accepts(m) {
+            quality = .passed(m)
+        } else {
+            try? fm.removeItem(at: product.url)
+            func dropped(_ retry: QualityDrop.Retry?) -> ConvertResult {
+                .qualityDropped(QualityDrop(first: first, firstQuality: opts.quality, thresholds: thresholds, retry: retry))
+            }
+            guard opts.onQualityDrop == .retry else { return dropped(nil) }
+            guard opts.quality < qualityRetryLevel else { return dropped(.notNeeded) }
+            destProps[kCGImageDestinationLossyCompressionQuality] = qualityRetryLevel
+            guard let again = encodeAndCarry() else { return dropped(.encodeFailed) }
+            let second = qualityReading(source: pixels, product: again.url)
+            guard case .measured(let m) = second, thresholds.accepts(m) else {
+                try? fm.removeItem(at: again.url)
+                return dropped(.stillBelow(second))
+            }
+            product = again
+            quality = .passedAfterRetry(first: first, firstQuality: opts.quality, retried: m)
+        }
+    }
     let tmp = product.url
     let rawExif = product.rawExif
 
@@ -525,6 +568,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     var notes: [String] = []
     var sourceDeleted = false
     let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
+    if let qualityNote = quality?.note { notes.append(qualityNote) }
     if let growth { notes.append("HEIF 比原图大 \(growth)") }
     // 没校验时差异列表不存在，去掉坏 ICC、说明没写成这些放进状态说明，不让它们静默。
     if !opts.verifyEnabled { notes += conversionIssues }
@@ -553,7 +597,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     return .converted(ConversionReport(dest: dest, inBytes: inBytes, outBytes: outBytes,
                                       tagCount: tagCount, xattrCount: xattrs,
                                       verification: verification, rawExif: rawExif,
-                                      reencode: reencode, caption: captionOutcome,
+                                      reencode: reencode, caption: captionOutcome, quality: quality,
                                       note: notes.isEmpty ? nil : notes.joined(separator: "；"),
                                       sourceDeleted: sourceDeleted))
 }

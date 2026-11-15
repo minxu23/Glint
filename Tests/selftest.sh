@@ -19,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=700
-EXPECTED_UNIT=1221
+EXPECTED_ASSERTIONS=729
+EXPECTED_UNIT=1335
 EXPECTED_GUI=319
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -960,9 +960,10 @@ grep -q "元数据校验通过" <<< "$out" \
 round "7i. 产物比原图大"
 # 噪声图按质量 0.2 存的 JPEG，转出来稳定地变大（--noise 夹具）。提示要出现；
 # --delete-original 下校验通过也不删源，并说明原因；批量汇总单列变大的个数。
-# 变大的产物重编一次，-v 说出来。
+# 变大的产物重编一次，-v 说出来。噪声图转出来的 PSNR 只有 30 dB 上下，默认会被画质核对拦下
+# （7u 测那一条），这一轮只看变大，关掉核对。
 ./Tests/fixture --noise "$WORK/变大.jpg" >/dev/null
-out=$("$BIN" -v --delete-original "$WORK/变大.jpg" 2>&1); st=$?
+out=$("$BIN" -v --delete-original --no-quality-check "$WORK/变大.jpg" 2>&1); st=$?
 grep -qE "^    产物比原图大，重编了一次：.+ → .+（(用了较小的一份|两次一样大)）$" <<< "$out" \
     && pass "变大时重编一次，-v 说了两次的大小" || { fail "-v 里没有重编那一行"; sed 's/^/     /' <<< "$out"; }
 grep -q "元数据校验通过" <<< "$out" \
@@ -1857,6 +1858,93 @@ out=$("$RAW_BIN" --verify --no-raw-exif "$V/无GPS-重写.dng" 2>&1); st=$?
 grep -qxF "    ✓ 元数据校验通过" <<< "$out" && [ "$st" -eq 0 ] \
     && pass "不带 GPS 的 RAW（--no-raw-exif）：校验通过（结构字段之外没有差异）" || { fail "不带 GPS 的 RAW（--no-raw-exif）：校验报了差异"; sed 's/^/     /' <<< "$out"; }
 check "不带 GPS 的 RAW（--no-raw-exif）：没有差异行" "$(grep -cE '^ {7}- ' <<< "$out")" "0"
+
+round "7u. 转完核对画质：不达标的不转，或提高质量重编一次再判"
+# 相机样本（像照片的图案）按质量 0.4 转：局部 SSIM 约 0.65，低于默认门槛 0.90；按 0.95 重编约 0.996。
+# 默认那张竖条纹图按默认质量转：PSNR 59 dB 上下，远高于门槛。
+Q="$WORK/画质"
+mkdir -p "$Q"
+measured='PSNR [0-9.]+ dB，局部 SSIM [0-9.]+'
+./Tests/fixture --camera panasonic "$Q/相机.jpg" >/dev/null
+cp "$WORK/照片.jpg" "$Q/正常.jpg"
+cp "$WORK/照片.jpg" "$Q/不核对.jpg"
+out=$("$BIN" -v --verify "$Q/正常.jpg" 2>&1); st=$?
+grep -qE "^    画质：$measured$" <<< "$out" && grep -qxF "    ✓ 元数据校验通过" <<< "$out" && [ "$st" -eq 0 ] \
+    && pass "默认设置转正常的图：达标，-v 有画质行" || { fail "默认设置转正常的图：没有画质行或没转成"; sed 's/^/     /' <<< "$out"; }
+[ -f "$Q/正常.heic" ] && pass "达标的产物在" || fail "达标的图没有产物"
+refute "达标时汇总没有画质不达标的计数" "$st" grep -qF "画质不达标" <<< "$out"
+out_off=$("$BIN" -v --verify --no-quality-check "$Q/不核对.jpg" 2>&1); st=$?
+refute "--no-quality-check：没有画质行" "$st" grep -qF "画质：" <<< "$out_off"
+check_same "--no-quality-check：其余输出与核对时逐行相同" "$(sed 's/不核对/正常/g' <<< "$out_off")" "$(grep -v '^    画质：' <<< "$out")"
+cmp -s "$Q/正常.heic" "$Q/不核对.heic" && [ -s "$Q/正常.heic" ] \
+    && pass "核对不改产物：与 --no-quality-check 的产物逐字节相同" || fail "核对开关改变了产物"
+
+# 不转：没有产物、源在，一行说明；--delete-original 也不删源；目标位置原有的同名文件（配 -f）不动。
+mkdir -p "$Q/不转"
+cp "$Q/相机.jpg" "$Q/不转/甲.jpg"
+cp "$Q/相机.jpg" "$Q/不转/乙.jpg"
+echo "原来就在的文件" > "$Q/不转/乙.heic"
+out=$("$BIN" -q 0.4 -f --delete-original "$Q/不转/甲.jpg" "$Q/不转/乙.jpg" 2>&1); st=$?
+check "不转：退出码与跳过一样是 0" "$st" "0"
+for name in 甲 乙; do
+    grep -qE "^$name\.jpg  画质下降明显（$measured，门槛 0\.90 / 33 dB），没有转换，保留原 JPEG$" <<< "$out" \
+        && pass "不转：$name.jpg 一行说明画质下降、没有转换" || { fail "不转：$name.jpg 没有那一行"; sed 's/^/     /' <<< "$out"; }
+done
+refute "不转：没有产物" "$st" test -e "$Q/不转/甲.heic"
+[ -f "$Q/不转/甲.jpg" ] && [ -f "$Q/不转/乙.jpg" ] && pass "不转：开着 --delete-original 源也在" || fail "不转的源被删了"
+check "不转：目标位置原有的同名文件没被覆盖（开着 -f）" "$(cat "$Q/不转/乙.heic")" "原来就在的文件"
+grep -qxF "完成 0 个，2 个画质不达标，保留原 JPEG" <<< "$out" \
+    && pass "不转：汇总单列画质不达标的个数" || { fail "不转：汇总里没有画质不达标的个数"; sed 's/^/     /' <<< "$out"; }
+
+# 提高质量再试，重编后达标：产物在，质量确实更高（比 0.4 那份大、核对的数更好），不带 -v 也留一句。
+mkdir -p "$Q/重编"
+cp "$Q/相机.jpg" "$Q/重编/重编.jpg"
+cp "$Q/相机.jpg" "$Q/重编/低质量.jpg"
+cp "$Q/相机.jpg" "$Q/重编/不带v.jpg"
+out=$("$BIN" -v -q 0.4 --on-quality-drop retry "$Q/重编/重编.jpg" 2>&1); st=$?
+line=$(grep -E "^    画质：质量 0\.4 不达标（$measured），用 0\.95 重编后 $measured$" <<< "$out")
+[ -n "$line" ] && [ "$st" -eq 0 ] && pass "重编后达标：-v 说明质量 0.4 不达标、用 0.95 重编" \
+    || { fail "重编后达标：没有重编那一行"; sed 's/^/     /' <<< "$out"; }
+"$BIN" -q 0.4 --no-quality-check "$Q/重编/低质量.jpg" >/dev/null 2>&1
+low=$(stat -f %z "$Q/重编/低质量.heic" 2>/dev/null || echo 0)
+high=$(stat -f %z "$Q/重编/重编.heic" 2>/dev/null || echo 0)
+[ "$low" -gt 0 ] && [ "$high" -gt "$low" ] && pass "重编后达标：产物在，比质量 0.4 的那份大（$high > $low 字节）" \
+    || fail "重编后达标：产物不在或不比 0.4 的大（$high / $low 字节）"
+psnr=($(grep -oE 'PSNR [0-9.]+' <<< "$line" | cut -d' ' -f2)); ssim=($(grep -oE 'SSIM [0-9.]+' <<< "$line" | cut -d' ' -f2))
+[ "${#psnr[@]}" -eq 2 ] && awk -v a="${psnr[0]}" -v b="${psnr[1]}" -v c="${ssim[0]}" -v d="${ssim[1]}" 'BEGIN { exit !(b > a && d > c) }' \
+    && pass "重编后达标：两个数都比第一遍好（PSNR ${psnr[*]}，SSIM ${ssim[*]}）" || fail "重编后的数没有变好（${psnr[*]} / ${ssim[*]}）"
+out=$("$BIN" -q 0.4 --on-quality-drop retry "$Q/重编/不带v.jpg" 2>&1)
+grep -qE "^    质量 0\.4 画质不达标，改用 0\.95 重编(；.+)?$" <<< "$out" \
+    && pass "重编后达标：不带 -v 也在状态说明里留一句" || { fail "不带 -v 时没说用了更高的质量"; sed 's/^/     /' <<< "$out"; }
+
+# 重编后仍不达标：没有产物；质量已不低于 0.95：不重编。
+cp "$Q/相机.jpg" "$Q/仍不达标.jpg"
+out=$("$BIN" -q 0.4 --on-quality-drop retry --min-psnr 60 "$Q/仍不达标.jpg" 2>&1); st=$?
+grep -qE "^仍不达标\.jpg  画质下降明显（$measured，门槛 0\.90 / 60 dB），用质量 0\.95 重编后仍不达标（$measured），没有转换，保留原 JPEG$" <<< "$out" \
+    && pass "重编后仍不达标：说明重编过、仍不达标" || { fail "重编后仍不达标：没有那一行"; sed 's/^/     /' <<< "$out"; }
+refute "重编后仍不达标：没有产物" "$st" test -e "$Q/仍不达标.heic"
+cp "$Q/相机.jpg" "$Q/质量高.jpg"
+out=$("$BIN" -q 0.95 --on-quality-drop retry --min-psnr 60 "$Q/质量高.jpg" 2>&1); st=$?
+grep -qE "^质量高\.jpg  画质下降明显（$measured，门槛 0\.90 / 60 dB），质量已不低于 0\.95，没有重编，没有转换，保留原 JPEG$" <<< "$out" \
+    && pass "质量已不低于 0.95：不重编，直接不转" || { fail "质量已不低于 0.95：没有那一行"; sed 's/^/     /' <<< "$out"; }
+
+# 预演不核对；参数非法报错；raw2heif 不收这四个参数。
+out=$("$BIN" -n -v -q 0.4 "$Q/相机.jpg" 2>&1); st=$?
+refute "预演不核对画质" "$st" grep -qF "画质" <<< "$out"
+for args in "--min-ssim 1.5|--min-ssim 必须是 0 到 1 之间的数字，收到: 1.5" \
+            "--min-psnr 很高|--min-psnr 必须是 0 到 100 之间的数字（单位 dB），收到: 很高" \
+            "--on-quality-drop keep|--on-quality-drop 只能是 skip（不转）或 retry（提高质量再试），收到: keep"; do
+    # shellcheck disable=SC2086
+    out=$("$BIN" ${args%%|*} "$Q/相机.jpg" 2>&1); st=$?
+    check "参数非法（${args%%|*}）：退出码 2 并说明" "$st:$out" "2:错误: ${args#*|}"
+done
+./Tests/fixture --dng "$Q/甲.dng" >/dev/null
+for flag in "--no-quality-check" "--min-ssim 0.9" "--min-psnr 30" "--on-quality-drop retry"; do
+    # shellcheck disable=SC2086
+    out=$("$RAW_BIN" $flag "$Q/甲.dng" 2>&1); st=$?
+    check "raw2heif 不接受 ${flag%% *}" "$st:$out" "2:错误: raw2heif 不核对画质（画质核对只对 JPEG），不接受 ${flag%% *}"
+done
+refute "raw2heif 报错时一张都不转" 0 test -e "$Q/甲.heic"
 
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，

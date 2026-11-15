@@ -2155,7 +2155,10 @@ func expectReencode(_ name: String, _ plan: [Int?], calls: Int, kept: Int?, grow
         return (try? Data(repeating: UInt8(called + 1), count: size).write(to: url)) != nil
     }
     let dest = folder.appendingPathComponent("产物.heic")
-    let result = convert(reencodeSource, opts: ConversionOptions(), dest: dest, encode: fake)
+    // 假产物不是图，画质核对会把它拦下；这一组只看重编，关掉核对。
+    var opts = ConversionOptions()
+    opts.qualityCheck = false
+    let result = convert(reencodeSource, opts: opts, dest: dest, encode: fake)
     check("\(name)：编码步骤调用 \(calls) 次", called, calls)
     if let kept, let size = plan[kept] {
         guard case .converted(let r) = result else {
@@ -3532,6 +3535,375 @@ do {
     try? FileManager.default.removeItem(at: existing)
 }
 
+print("画质核对：判据（合成的像素缓冲）")
+/// `width`×`height` 的 RGBX 缓冲，像素由 `pixel(x, y)` 给出（R、G、B）。
+func rgbx(_ width: Int, _ height: Int, _ pixel: (Int, Int) -> (Int, Int, Int)) -> [UInt8] {
+    var out = [UInt8](repeating: 255, count: width * height * 4)
+    for y in 0..<height {
+        for x in 0..<width {
+            let (r, g, b) = pixel(x, y)
+            let at = (y * width + x) * 4
+            (out[at], out[at + 1], out[at + 2]) = (UInt8(r), UInt8(g), UInt8(b))
+        }
+    }
+    return out
+}
+/// 有纹理的图案：每个 16×16 块里都有起伏，SSIM 不会因为块是平的而对噪声不敏感。
+func texture(_ x: Int, _ y: Int) -> (Int, Int, Int) {
+    (40 + (x * 7 + y * 3) % 160, 60 + (x * 5 + y * 11) % 150, 30 + (x * 13 + y * 2) % 170)
+}
+/// 固定种子的伪随机数（0–255）。
+func noiseByte(_ x: Int, _ y: Int, _ c: Int) -> Int { Int((UInt32(x &* 7_919 &+ y &* 104_729 &+ c &* 31) &* 2_654_435_761) >> 24) }
+func measure(_ a: [UInt8], _ b: [UInt8], _ width: Int, _ height: Int) -> QualityMeasurement {
+    a.withUnsafeBufferPointer { pa in
+        b.withUnsafeBufferPointer { pb in
+            qualityMeasurement(RGBPixels(base: pa.baseAddress!, width: width, height: height, rowBytes: width * 4),
+                               RGBPixels(base: pb.baseAddress!, width: width, height: height, rowBytes: width * 4))
+        }
+    }
+}
+let qcBase96 = rgbx(96, 96, texture)
+let qcSame = measure(qcBase96, qcBase96, 96, 96)
+check("完全相同：PSNR 是无穷大", qcSame.psnr, .infinity)
+check("完全相同：局部 SSIM 是 1", qcSame.worstSSIM, 1)
+// 每个像素的 R 加 3，G、B 不变：MSE = 9 / 3 = 3。
+let qcPlus3 = rgbx(96, 96) { x, y in let (r, g, b) = texture(x, y); return (r + 3, g, b) }
+check(abs(measure(qcBase96, qcPlus3, 96, 96).psnr - 10 * log10(255.0 * 255 / 3)) < 1e-9, "已知 MSE = 3：PSNR = 10·log10(255²/3)")
+// 隔行的像素换成另一套 RGB：MSE 按定义逐像素算出来，和函数给的比。
+let qcStriped = rgbx(40, 24) { x, y in y % 2 == 0 ? texture(x, y) : (noiseByte(x, y, 0), noiseByte(x, y, 1), noiseByte(x, y, 2)) }
+let qcPlain40 = rgbx(40, 24, texture)
+var qcStripedError = 0.0
+for i in 0..<(40 * 24) { for c in 0..<3 { let d = Double(qcStriped[i * 4 + c]) - Double(qcPlain40[i * 4 + c]); qcStripedError += d * d } }
+check(abs(measure(qcPlain40, qcStriped, 40, 24).psnr - 10 * log10(255.0 * 255 / (qcStripedError / Double(40 * 24 * 3)))) < 1e-9,
+      "逐像素算出的 MSE 与函数给的 PSNR 一致")
+// 36 块里只坏一块（换成噪声）：最差 1% 是那一块本身（⌊36/100⌋ = 0），远低于 36 块的平均。
+func corrupted(_ base: @escaping (Int, Int) -> (Int, Int, Int), blocks: [(Int, Int, Int)]) -> (Int, Int) -> (Int, Int, Int) {
+    { x, y in
+        for (bx, by, strength) in blocks where x / 16 == bx && y / 16 == by {
+            let (r, g, b) = base(x, y)
+            func mix(_ v: Int, _ c: Int) -> Int { min(255, max(0, v + (noiseByte(x, y, c) - 128) * strength / 100)) }
+            return (mix(r, 0), mix(g, 1), mix(b, 2))
+        }
+        return base(x, y)
+    }
+}
+let qcOneBad = rgbx(96, 96, corrupted(texture, blocks: [(2, 3, 100)]))
+let qcOneBadWorst = measure(qcBase96, qcOneBad, 96, 96).worstSSIM
+// 那一块单独量（16×16 正好一块）。
+let qcBadBlockA = rgbx(16, 16) { x, y in texture(x + 32, y + 48) }
+let qcBadBlockB = rgbx(16, 16) { x, y in corrupted(texture, blocks: [(2, 3, 100)])(x + 32, y + 48) }
+let qcBadBlockSSIM = measure(qcBadBlockA, qcBadBlockB, 16, 16).worstSSIM
+check(qcBadBlockSSIM < 0.5, "前提：坏掉的那一块 SSIM 很低（\(qcBadBlockSSIM)）")
+check(abs(qcOneBadWorst - qcBadBlockSSIM) < 1e-9, "坏一块：最差 1% 就是那一块（\(qcOneBadWorst)），不是 36 块的平均（约 \((35 + qcBadBlockSSIM) / 36)）")
+// 100 块里坏两块，一重一轻：⌊100/100⌋ = 1，取的是轻的那块（第二差），不是最差的那块。
+let qcBase160 = rgbx(160, 160, texture)
+let qcTwoBad = rgbx(160, 160, corrupted(texture, blocks: [(1, 1, 100), (7, 8, 30)]))
+let qcMildA = rgbx(16, 16) { x, y in texture(x + 112, y + 128) }
+let qcMildB = rgbx(16, 16) { x, y in corrupted(texture, blocks: [(7, 8, 30)])(x + 112, y + 128) }
+let qcSevereA = rgbx(16, 16) { x, y in texture(x + 16, y + 16) }
+let qcSevereB = rgbx(16, 16) { x, y in corrupted(texture, blocks: [(1, 1, 100)])(x + 16, y + 16) }
+let qcMildSSIM = measure(qcMildA, qcMildB, 16, 16).worstSSIM, qcSevereSSIM = measure(qcSevereA, qcSevereB, 16, 16).worstSSIM
+check(qcSevereSSIM < qcMildSSIM && qcMildSSIM < 1, "前提：重的那块比轻的那块更差（\(qcSevereSSIM) < \(qcMildSSIM)）")
+check(abs(measure(qcBase160, qcTwoBad, 160, 160).worstSSIM - qcMildSSIM) < 1e-9, "100 块取下标 1：是第二差的那块")
+// 右边、下边凑不满 16 的部分不进 SSIM，但进 PSNR。
+let qcEdgeOnly = rgbx(40, 40) { x, y in x >= 32 || y >= 32 ? (noiseByte(x, y, 0), noiseByte(x, y, 1), noiseByte(x, y, 2)) : texture(x, y) }
+let qcEdgeResult = measure(rgbx(40, 40, texture), qcEdgeOnly, 40, 40)
+check("只改了凑不满 16 的边：局部 SSIM 仍是 1", qcEdgeResult.worstSSIM, 1)
+check(qcEdgeResult.psnr < 30, "只改了凑不满 16 的边：PSNR 照样算进去（\(qcEdgeResult.psnr)）")
+// 不到 16 的小图整张当一块：每个通道都加 5，亮度整体加 5，方差、协方差不变。
+let qcSmallA = rgbx(10, 20, texture)
+let qcSmallB = rgbx(10, 20) { x, y in let (r, g, b) = texture(x, y); return (r + 5, g + 5, b + 5) }
+var qcLumas: [Double] = []
+for y in 0..<20 { for x in 0..<10 { let (r, g, b) = texture(x, y); qcLumas.append(0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)) } }
+let qcMu = qcLumas.reduce(0, +) / 200
+let qcVariance = qcLumas.map { ($0 - qcMu) * ($0 - qcMu) }.reduce(0, +) / 199
+let qcC1 = 6.5025, qcC2 = 58.5225
+let qcWantSmall = ((2 * qcMu * (qcMu + 5) + qcC1) * (2 * qcVariance + qcC2)) / ((qcMu * qcMu + (qcMu + 5) * (qcMu + 5) + qcC1) * (2 * qcVariance + qcC2))
+check(abs(measure(qcSmallA, qcSmallB, 10, 20).worstSSIM - qcWantSmall) < 1e-9, "宽不到 16：整张图当一块，按公式（n−1）算")
+check(abs(measure(rgbx(20, 10, texture), rgbx(20, 10) { x, y in let (r, g, b) = texture(x, y); return (r + 5, g + 5, b + 5) }, 20, 10)
+      .worstSSIM - measure(qcSmallA, qcSmallB, 10, 20).worstSSIM) < 0.05, "高不到 16：同样整张当一块（量出一个数，不崩）")
+check("1×1 的图：块里只有一个像素，方差取 0", measure(rgbx(1, 1) { _, _ in (10, 20, 30) }, rgbx(1, 1) { _, _ in (10, 20, 30) }, 1, 1).worstSSIM, 1)
+// 按条带喂与一次喂完结果相同（16 行、32 行一条，最后一条凑不满）。
+let qcTall = rgbx(48, 100, texture), qcTallBad = rgbx(48, 100, corrupted(texture, blocks: [(1, 2, 60), (0, 5, 20)]))
+let qcWholeTall = measure(qcTall, qcTallBad, 48, 100)
+for stripRows in [16, 32] {
+    let qcTally = QualityTally(width: 48, height: 100)
+    qcTall.withUnsafeBufferPointer { pa in
+        qcTallBad.withUnsafeBufferPointer { pb in
+            let a = RGBPixels(base: pa.baseAddress!, width: 48, height: 100, rowBytes: 48 * 4)
+            let b = RGBPixels(base: pb.baseAddress!, width: 48, height: 100, rowBytes: 48 * 4)
+            var y = 0
+            while y < 100 { let n = min(stripRows, 100 - y); qcTally.add(a.rows(y, n), b.rows(y, n)); y += n }
+        }
+    }
+    check("每条 \(stripRows) 行地喂，与一次喂完相同", qcTally.result(), qcWholeTall)
+}
+// 像素里 R、G、B 的位置：XRGB 排布的同一幅图量出同样的数。
+func xrgb(_ v: [UInt8]) -> [UInt8] { var o = v; for i in stride(from: 0, to: v.count, by: 4) { (o[i], o[i + 1], o[i + 2], o[i + 3]) = (0, v[i], v[i + 1], v[i + 2]) }; return o }
+let qcXa = xrgb(qcTall), qcXb = xrgb(qcTallBad)
+let qcXResult = qcXa.withUnsafeBufferPointer { pa in
+    qcXb.withUnsafeBufferPointer { pb in
+        qualityMeasurement(RGBPixels(base: pa.baseAddress!, width: 48, height: 100, rowBytes: 48 * 4, offsets: (1, 2, 3)),
+                           RGBPixels(base: pb.baseAddress!, width: 48, height: 100, rowBytes: 48 * 4, offsets: (1, 2, 3)))
+    }
+}
+check("XRGB 排布：按通道位置读，量出同样的数", qcXResult, qcWholeTall)
+
+print("画质核对：门槛")
+let qcGate = QualityThresholds(minSSIM: 0.90, minPSNR: 33)
+check(qcGate.accepts(QualityMeasurement(psnr: 33, worstSSIM: 0.90)), "两项恰好等于门槛：达标")
+check(!qcGate.accepts(QualityMeasurement(psnr: 33, worstSSIM: 0.8999999)), "SSIM 低一丁点：不达标")
+check(!qcGate.accepts(QualityMeasurement(psnr: 32.9999999, worstSSIM: 0.90)), "PSNR 低一丁点：不达标")
+check(!qcGate.accepts(QualityMeasurement(psnr: 50, worstSSIM: 0.5)), "PSNR 很高、SSIM 不够：不达标（要比 SSIM）")
+check(!qcGate.accepts(QualityMeasurement(psnr: 20, worstSSIM: 0.99)), "SSIM 很高、PSNR 不够：不达标（要比 PSNR）")
+check(qcGate.accepts(QualityMeasurement(psnr: .infinity, worstSSIM: 1)), "完全相同：达标")
+check(qcGate.accepts(QualityMeasurement(psnr: 40, worstSSIM: 0.95)), "两项都高于门槛：达标")
+check(!QualityReading.sizeChanged(source: PixelSize(width: 2, height: 2), product: PixelSize(width: 2, height: 1)).accepted(by: qcGate),
+      "尺寸变了：不达标")
+check(!QualityReading.undecodable("解不出产物的像素").accepted(by: QualityThresholds(minSSIM: 0, minPSNR: 0)),
+      "解不出像素：门槛再低也不达标")
+checkRule("0.9", QualityThresholds.parseSSIM("0.9"), 0.9, "SSIM 门槛：0.9")
+checkRule(" 1 ", QualityThresholds.parseSSIM(" 1 "), 1, "SSIM 门槛：1（去掉首尾空白）")
+checkRule("0", QualityThresholds.parseSSIM("0"), 0, "SSIM 门槛：0")
+for bad in ["1.01", "-0.1", "abc", "", "nan", "inf", "0,9"] {
+    checkRule(bad, QualityThresholds.parseSSIM(bad), nil, "SSIM 门槛：不收")
+}
+checkRule("33", QualityThresholds.parsePSNR("33"), 33, "PSNR 门槛：33")
+checkRule("100", QualityThresholds.parsePSNR("100"), 100, "PSNR 门槛：100")
+for bad in ["100.5", "-1", "x", "", "nan", "inf"] {
+    checkRule(bad, QualityThresholds.parsePSNR(bad), nil, "PSNR 门槛：不收")
+}
+
+print("画质核对：文案")
+check("两个数：PSNR 1 位、SSIM 3 位，向下截断", QualityMeasurement(psnr: 32.99, worstSSIM: 0.8996).description,
+      "PSNR 32.9 dB，局部 SSIM 0.899")
+check("PSNR 无穷大写 ∞", QualityMeasurement(psnr: .infinity, worstSSIM: 1).description, "PSNR ∞ dB，局部 SSIM 1.000")
+check("门槛的写法", qcGate.description, "门槛 0.90 / 33 dB")
+check("门槛带更多小数时照写", QualityThresholds(minSSIM: 0.925, minPSNR: 33.5).description, "门槛 0.925 / 33.5 dB")
+let qcLowReading = QualityReading.measured(QualityMeasurement(psnr: 31.25, worstSSIM: 0.8625))
+check("不转", QualityDrop(first: qcLowReading, firstQuality: 0.8, thresholds: qcGate, retry: nil).description,
+      "画质下降明显（PSNR 31.2 dB，局部 SSIM 0.862，门槛 0.90 / 33 dB），没有转换，保留原 JPEG")
+check("重编后仍不达标",
+      QualityDrop(first: qcLowReading, firstQuality: 0.8, thresholds: qcGate,
+                  retry: .stillBelow(.measured(QualityMeasurement(psnr: 32.5, worstSSIM: 0.95)))).description,
+      "画质下降明显（PSNR 31.2 dB，局部 SSIM 0.862，门槛 0.90 / 33 dB），用质量 0.95 重编后仍不达标（PSNR 32.5 dB，局部 SSIM 0.950），没有转换，保留原 JPEG")
+check("质量已不低于 0.95", QualityDrop(first: qcLowReading, firstQuality: 0.95, thresholds: qcGate, retry: .notNeeded).description,
+      "画质下降明显（PSNR 31.2 dB，局部 SSIM 0.862，门槛 0.90 / 33 dB），质量已不低于 0.95，没有重编，没有转换，保留原 JPEG")
+check("尺寸变了", QualityDrop(first: .sizeChanged(source: PixelSize(width: 4, height: 3), product: PixelSize(width: 2, height: 1)),
+                          firstQuality: 0.8, thresholds: qcGate, retry: nil).description,
+      "画质核对不通过（尺寸变了（4×3 → 2×1），门槛 0.90 / 33 dB），没有转换，保留原 JPEG")
+check("-v 的画质行", QualityOutcome.passed(QualityMeasurement(psnr: 43.56, worstSSIM: 0.9791)).description,
+      "画质：PSNR 43.5 dB，局部 SSIM 0.979")
+let qcRetried = QualityOutcome.passedAfterRetry(first: qcLowReading, firstQuality: 0.8,
+                                              retried: QualityMeasurement(psnr: 45, worstSSIM: 0.97))
+check("重编后达标的 -v 行", qcRetried.description,
+      "画质：质量 0.8 不达标（PSNR 31.2 dB，局部 SSIM 0.862），用 0.95 重编后 PSNR 45.0 dB，局部 SSIM 0.970")
+check("重编后达标的状态说明", qcRetried.note, "质量 0.8 画质不达标，改用 0.95 重编")
+check("一次达标的没有状态说明", QualityOutcome.passed(QualityMeasurement(psnr: 45, worstSSIM: 0.97)).note, nil)
+
+print("画质核对：从文件量")
+let qcQualityRoot = FileManager.default.temporaryDirectory.appendingPathComponent("glint-quality-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: qcQualityRoot, withIntermediateDirectories: true)
+/// 把像素写成文件（JPEG 或 HEIC）。
+func writeImage(_ pixels: [UInt8], _ width: Int, _ height: Int, to url: URL, type: String, quality: Double = 0.95) -> Bool {
+    let data = NSMutableData(bytes: pixels, length: pixels.count)
+    guard let provider = CGDataProvider(data: data),
+          let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                              provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+          let out = CGImageDestinationCreateWithURL(url as CFURL, type as CFString, 1, nil) else { return false }
+    CGImageDestinationAddImage(out, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+    return CGImageDestinationFinalize(out)
+}
+/// 像照片的图案：平滑的渐变加细噪声，色度上下左右都在变。
+func photoLike(_ x: Int, _ y: Int) -> (Int, Int, Int) {
+    let fx = Double(x) / 640, fy = Double(y) / 1100
+    let wave = sin(fx * 9) * cos(fy * 7) * 40
+    let n = noiseByte(x, y, 0) % 17 - 8
+    func clamp(_ v: Double) -> Int { min(255, max(0, Int(v) + n)) }
+    return (clamp(70 + 130 * fx + wave), clamp(90 + 90 * (1 - fy) + wave * 0.6), clamp(150 + 80 * fy - wave * 0.5))
+}
+let qcPhotoJPEG = qcQualityRoot.appendingPathComponent("源.jpg"), qcPhotoHEIC = qcQualityRoot.appendingPathComponent("产物.heic")
+let qcPhotoPixels = rgbx(640, 1100, photoLike)
+check(writeImage(qcPhotoPixels, 640, 1100, to: qcPhotoJPEG, type: "public.jpeg"), "前提：写出了源 JPEG")
+if let src = CGImageSourceCreateWithURL(qcPhotoJPEG as CFURL, nil),
+   encodeHEIF(src, properties: [kCGImageDestinationLossyCompressionQuality: 0.6], xmp: nil, to: qcPhotoHEIC) {
+    // 产物按条带解（上下多带几行）与整幅解码逐字节相同，所以量出的数也相同。
+    let qcWhole = qualityReading(source: src, product: qcPhotoHEIC, stripRows: 1104)
+    check(qcWhole.measurement != nil, "前提：整幅解码量出了数（\(qcWhole)）")
+    for rows in [16, 512] {
+        check("按条带解产物（每条 \(rows) 行）与整幅解码量出的数相同", qualityReading(source: src, product: qcPhotoHEIC, stripRows: rows), qcWhole)
+    }
+    check("源与自己比：PSNR 无穷大、SSIM 1", qualityReading(source: src, product: qcPhotoJPEG),
+          .measured(QualityMeasurement(psnr: .infinity, worstSSIM: 1)))
+    let qcShortJPEG = qcQualityRoot.appendingPathComponent("矮.jpg")
+    check(writeImage(rgbx(640, 1000, photoLike), 640, 1000, to: qcShortJPEG, type: "public.jpeg"), "前提：写出了矮一截的图")
+    check("宽高不同：量不了，原因是尺寸变了", qualityReading(source: src, product: qcShortJPEG),
+          .sizeChanged(source: PixelSize(width: 640, height: 1100), product: PixelSize(width: 640, height: 1000)))
+    let qcGarbage = qcQualityRoot.appendingPathComponent("坏.heic")
+    try? Data([0, 1, 2, 3]).write(to: qcGarbage)
+    check("产物不是图：量不了", qualityReading(source: src, product: qcGarbage), .undecodable("解不出产物的像素"))
+} else {
+    for _ in 0..<7 { fail("编不出 HEIC 产物，从文件量的那几条没法测") }
+}
+
+print("画质核对：转换流程（注入编码步骤）")
+/// 一张把图画坏的编码：编码前把源的像素换成一张平的灰图（同样大小），照常写 HEIC。
+func blurring(_ src: CGImageSource, _ props: [CFString: Any], _ xmp: CGImageMetadata?, _ url: URL) -> Bool {
+    guard let image = CGImageSourceCreateImageAtIndex(src, 0, nil),
+          let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { return false }
+    ctx.setFillColor(gray: 0.5, alpha: 1)
+    ctx.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    let jpeg = NSMutableData()
+    guard let flat = ctx.makeImage(), let out = CGImageDestinationCreateWithData(jpeg, "public.jpeg" as CFString, 1, nil) else { return false }
+    CGImageDestinationAddImage(out, flat, nil)
+    guard CGImageDestinationFinalize(out), let gray = CGImageSourceCreateWithData(jpeg, nil) else { return false }
+    return encodeHEIF(gray, properties: props, xmp: xmp, to: url)
+}
+/// 记下每次编码用的质量；`goodAt` 里的质量照常编码，别的质量把图画坏。
+final class QualityRecorder {
+    var qualities: [Double] = []
+    let goodAt: Set<Double>
+    let failAt: Set<Double>
+    init(goodAt: Set<Double>, failAt: Set<Double> = []) { self.goodAt = goodAt; self.failAt = failAt }
+    func encode(_ src: CGImageSource, _ props: [CFString: Any], _ xmp: CGImageMetadata?, _ url: URL) -> Bool {
+        let q = props[kCGImageDestinationLossyCompressionQuality] as? Double ?? -1
+        qualities.append(q)
+        if failAt.contains(q) { return false }
+        return goodAt.contains(q) ? encodeHEIF(src, properties: props, xmp: xmp, to: url) : blurring(src, props, xmp, url)
+    }
+}
+let qcFlowSource = qcQualityRoot.appendingPathComponent("流程源.jpg")
+check(writeImage(rgbx(320, 240, photoLike), 320, 240, to: qcFlowSource, type: "public.jpeg"), "前提：写出了流程用的源 JPEG")
+func leftovers(_ folder: URL) -> [String] {
+    ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasPrefix(".glint-") }
+}
+/// 在一个新目录里拷一份源，按 `opts` 和 `recorder` 转一次。
+func runFlow(_ name: String, _ opts: ConversionOptions, _ recorder: QualityRecorder, existing: Data? = nil)
+    -> (result: ConvertResult, source: URL, dest: URL, folder: URL) {
+    let folder = qcQualityRoot.appendingPathComponent(name)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let source = folder.appendingPathComponent("源.jpg"), dest = folder.appendingPathComponent("源.heic")
+    try? FileManager.default.copyItem(at: qcFlowSource, to: source)
+    if let existing { try? existing.write(to: dest) }
+    return (convert(source, opts: opts, dest: dest, encode: recorder.encode), source, dest, folder)
+}
+var qcFlowOpts = ConversionOptions()
+check("默认开着画质核对", qcFlowOpts.qualityCheck, true)
+check("默认门槛 0.90 / 33 dB", qcFlowOpts.qualityThresholds, QualityThresholds(minSSIM: 0.90, minPSNR: 33))
+check("默认不达标就不转", qcFlowOpts.onQualityDrop, .skip)
+
+let qcGood = runFlow("正常", qcFlowOpts, QualityRecorder(goodAt: [0.8]))
+if case .converted(let r) = qcGood.result, case .passed(let m)? = r.quality {
+    check(qcGate.accepts(m), "正常编码：达标（\(m.description)）")
+    check("正常编码：没有状态说明", r.note, nil)
+} else {
+    fail("正常编码没有达标（\(qcGood.result)）"); fail("正常编码：状态说明")
+}
+
+var qcDeletingFlow = qcFlowOpts
+qcDeletingFlow.deleteOriginal = true
+qcDeletingFlow.overwrite = true
+let qcPrevious = Data("原来就在的文件".utf8)
+let qcDropped = runFlow("不转", qcDeletingFlow, QualityRecorder(goodAt: []), existing: qcPrevious)
+if case .qualityDropped(let drop) = qcDropped.result {
+    check(drop.first.measurement.map { !qcGate.accepts($0) } == true, "画坏的图：不达标（\(drop.first.description)）")
+    check("「不转」不重试", drop.retry, nil)
+} else {
+    fail("画坏的图没有判成不达标（\(qcDropped.result)）"); fail("「不转」不重试")
+}
+check("不转：源还在（开着 --delete-original）", FileManager.default.fileExists(atPath: qcDropped.source.path), true)
+check("不转：目标位置原来的文件没被覆盖（开着 -f）", try? Data(contentsOf: qcDropped.dest), qcPrevious)
+check("不转：不留临时文件", leftovers(qcDropped.folder), [])
+let qcDroppedNoFile = runFlow("不转-没有旧文件", qcFlowOpts, QualityRecorder(goodAt: []))
+check("不转：没有产物", FileManager.default.fileExists(atPath: qcDroppedNoFile.dest.path), false)
+
+var qcRetryOpts = qcFlowOpts
+qcRetryOpts.onQualityDrop = .retry
+let qcRetryGood = QualityRecorder(goodAt: [qualityRetryLevel])
+let qcRetriedFlow = runFlow("重编后达标", qcRetryOpts, qcRetryGood)
+check("重编：第二遍用质量 0.95", qcRetryGood.qualities, [0.8, qualityRetryLevel])
+if case .converted(let r) = qcRetriedFlow.result, case .passedAfterRetry(let first, let q, let m)? = r.quality {
+    check(first.measurement.map { !qcGate.accepts($0) } == true, "重编后达标：记下了第一遍不达标")
+    check("重编后达标：记下了第一遍的质量", q, 0.8)
+    check(qcGate.accepts(m), "重编后达标：第二遍达标")
+    check(r.note?.contains("质量 0.8 画质不达标，改用 0.95 重编") == true, "重编后达标：状态说明里留一句（\(r.note ?? "")）")
+    check(FileManager.default.fileExists(atPath: qcRetriedFlow.dest.path), "重编后达标：产物在")
+} else {
+    fail("重编后没有达标（\(qcRetriedFlow.result)）")
+    for _ in 0..<4 { fail("重编后达标的那几条") }
+}
+check("重编后达标：不留临时文件", leftovers(qcRetriedFlow.folder), [])
+
+let qcRetryBad = QualityRecorder(goodAt: [])
+let qcStillBad = runFlow("重编后仍不达标", qcRetryOpts, qcRetryBad)
+check("重编后仍不达标：编了两遍", qcRetryBad.qualities, [0.8, qualityRetryLevel])
+if case .qualityDropped(let drop) = qcStillBad.result, case .stillBelow(let again)? = drop.retry {
+    check(again.measurement.map { !qcGate.accepts($0) } == true, "重编后仍不达标：第二遍也核对了（\(again.description)）")
+} else {
+    fail("重编后仍不达标却没有判成不达标（\(qcStillBad.result)）")
+}
+check("重编后仍不达标：没有产物", FileManager.default.fileExists(atPath: qcStillBad.dest.path), false)
+check("重编后仍不达标：不留临时文件", leftovers(qcStillBad.folder), [])
+
+var qcHighOpts = qcRetryOpts
+qcHighOpts.quality = qualityRetryLevel
+let qcHigh = QualityRecorder(goodAt: [])
+let qcHighResult = runFlow("质量已经够高", qcHighOpts, qcHigh)
+check("质量已不低于 0.95：只编一遍", qcHigh.qualities, [qualityRetryLevel])
+if case .qualityDropped(let drop) = qcHighResult.result {
+    check("质量已不低于 0.95：不重试", drop.retry, .notNeeded)
+} else {
+    fail("质量已不低于 0.95 时没有判成不达标（\(qcHighResult.result)）")
+}
+
+let qcRetryFails = QualityRecorder(goodAt: [], failAt: [qualityRetryLevel])
+let qcFailedRetry = runFlow("重编失败", qcRetryOpts, qcRetryFails)
+if case .qualityDropped(let drop) = qcFailedRetry.result {
+    check("重编那一遍编码失败：按不转处理", drop.retry, .encodeFailed)
+} else {
+    fail("重编失败时没有判成不达标（\(qcFailedRetry.result)）")
+}
+check("重编失败：不留临时文件", leftovers(qcFailedRetry.folder), [])
+
+var qcOffOpts = qcFlowOpts
+qcOffOpts.qualityCheck = false
+let qcOff = runFlow("关掉核对", qcOffOpts, QualityRecorder(goodAt: []))
+if case .converted(let r) = qcOff.result {
+    check("关掉核对：画坏的图照样交出，没有画质结果", r.quality, nil)
+} else {
+    fail("关掉核对时没有转成（\(qcOff.result)）")
+}
+
+var qcDryOpts = qcFlowOpts
+qcDryOpts.dryRun = true
+if case .converted(let r) = runFlow("预演", qcDryOpts, QualityRecorder(goodAt: [])).result {
+    check("预演不核对", r.quality, nil)
+} else {
+    fail("预演没有走通")
+}
+
+// 界面混批（两种源都收）里的 RAW 不核对：门槛设到不可能达到，RAW 照样转成。
+let qcMixedDNG = qcQualityRoot.appendingPathComponent("混批.dng")
+try? makeDNG(DNGSpec()).write(to: qcMixedDNG)
+var qcMixedOpts = ConversionOptions()
+qcMixedOpts.sources = [.jpeg, .raw]
+qcMixedOpts.qualityThresholds = QualityThresholds(minSSIM: 1, minPSNR: 100)
+if case .converted(let r) = convert(qcMixedDNG, opts: qcMixedOpts, dest: qcQualityRoot.appendingPathComponent("混批.heic")) {
+    check("混批里的 RAW 不核对画质", r.quality, nil)
+} else {
+    fail("混批里的 RAW 没有转成")
+}
+var qcTally = BatchTally()
+qcTally.record(qcDropped.result)
+qcTally.record(qcGood.result)
+check("批量汇总单列画质不达标的个数，不算失败", [qcTally.qualityDropped, qcTally.failed, qcTally.converted], [1, 0, 1])
+check(qcTally.summary(unit: "个").contains("1 个画质不达标，保留原 JPEG"), "汇总里的那一句（\(qcTally.summary(unit: "个"))）")
+try? FileManager.default.removeItem(at: qcQualityRoot)
+
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {
     guard case .run(let o)? = try? parseArguments(args, command: .jpeg2heif) else { return nil }
@@ -3568,6 +3940,23 @@ expectRejected(["-q"], "选项缺少参数")
 check("jpeg2heif 只收 JPEG", parsed(["a.jpg"])?.sources, [.jpeg])
 check("jpeg2heif 默认并发数是核数", parsed(["a.jpg"])?.jobs, ProcessInfo.processInfo.activeProcessorCount)
 check("jpeg2heif 接受 --delete-original", parsed(["--delete-original", "a.jpg"])?.deleteOriginal, true)
+check("默认核对画质", parsed(["a.jpg"])?.qualityCheck, true)
+check("--no-quality-check 关掉画质核对", parsed(["--no-quality-check", "a.jpg"])?.qualityCheck, false)
+check("--min-ssim、--min-psnr 设门槛", parsed(["--min-ssim", "0.95", "--min-psnr", "40.5", "a.jpg"])?.qualityThresholds,
+      QualityThresholds(minSSIM: 0.95, minPSNR: 40.5))
+check("默认不达标就不转", parsed(["a.jpg"])?.onQualityDrop, .skip)
+check("--on-quality-drop retry", parsed(["--on-quality-drop", "retry", "a.jpg"])?.onQualityDrop, .retry)
+check("--on-quality-drop skip", parsed(["--on-quality-drop", "skip", "--on-quality-drop", "skip", "a.jpg"])?.onQualityDrop, .skip)
+func rejection(_ args: [String], _ command: Command = .jpeg2heif) -> String {
+    do { _ = try parseArguments(args, command: command); return "接受了" } catch { return error.localizedDescription }
+}
+check("--min-ssim 越界", rejection(["--min-ssim", "1.5", "a.jpg"]), "--min-ssim 必须是 0 到 1 之间的数字，收到: 1.5")
+check("--min-ssim 不是数字", rejection(["--min-ssim", "高", "a.jpg"]), "--min-ssim 必须是 0 到 1 之间的数字，收到: 高")
+check("--min-psnr 越界", rejection(["--min-psnr", "-3", "a.jpg"]), "--min-psnr 必须是 0 到 100 之间的数字（单位 dB），收到: -3")
+check("--min-psnr 不是数字", rejection(["--min-psnr", "33dB", "a.jpg"]), "--min-psnr 必须是 0 到 100 之间的数字（单位 dB），收到: 33dB")
+check("--on-quality-drop 写错", rejection(["--on-quality-drop", "keep", "a.jpg"]),
+      "--on-quality-drop 只能是 skip（不转）或 retry（提高质量再试），收到: keep")
+check("--min-ssim 缺参数", rejection(["--min-ssim"]), "选项 --min-ssim 缺少参数")
 
 print("raw2heif 的参数：只收 RAW、默认并发数保守、不接受 --delete-original")
 func parsedRAW(_ args: [String]) -> ConversionOptions? {
@@ -3601,6 +3990,11 @@ do {
     check("raw2heif 不认 --allow-cmyk", error.localizedDescription, "未知选项: --allow-cmyk（用 --help 查看用法）")
 }
 check("raw2heif --help 退出码 0", try? parseArguments(["--help"], command: .raw2heif), .showUsage(exitCode: 0))
+for args in [["--no-quality-check", "a.CR3"], ["a.CR3", "--min-ssim", "0.9"], ["--min-psnr", "30", "a.CR3"],
+             ["--on-quality-drop", "retry", "a.CR3"]] {
+    let flag = args.first { $0.hasPrefix("--") }!
+    check("raw2heif 不接受 \(flag)", rejection(args, .raw2heif), "raw2heif 不核对画质（画质核对只对 JPEG），不接受 \(flag)")
+}
 
 print("命令行与界面的默认值")
 // 两端都取自 ConversionOptions.default，这组断言守住它们不各自漂移。
@@ -3621,6 +4015,9 @@ expectSame(gui.options.rawExif, cli.rawExif, "整块照搬 EXIF")
 expectSame(gui.options.convertCMYK, cli.convertCMYK, "转 CMYK 的 JPEG")
 expectSame(gui.options.sources, cli.sources, "收的源（模型的默认值；界面每批开始时由 ConversionTargets.apply 设成两种都收）")
 expectSame(gui.options.jobs, cli.jobs, "并发数")
+expectSame(gui.options.qualityCheck, cli.qualityCheck, "画质核对")
+expectSame(gui.options.qualityThresholds, cli.qualityThresholds, "画质核对的门槛")
+expectSame(gui.options.onQualityDrop, cli.onQualityDrop, "画质不达标时的处理")
 
 // verify 是有意分叉：界面结果直接给人看，默认校验；命令行按需开关。
 // 若哪天两端被"统一"成一样，这条会失败，提醒连同 Model.swift 的注释一起改。

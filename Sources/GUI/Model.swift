@@ -332,6 +332,8 @@ final class ConversionModel {
             rows[i].status = .skipped(why)
         case .failed(let why):
             rows[i].status = .failed(why)
+        case .qualityDropped(let drop):
+            rows[i].status = .skipped(drop.description)
         }
         recount()
         onRowChange?(rows[i])

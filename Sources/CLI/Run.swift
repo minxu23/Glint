@@ -30,10 +30,19 @@ func usage(for command: Command) -> String {
                                    文件里已有说明时不写（不覆盖、不追加）
               --allow-cmyk         CMYK 的 JPEG 也转。默认跳过：HEIF 只能存 RGB，转了颜色会变
                                    （校验照样报出色彩模型和色彩描述文件的变化，不删源）
+              --no-quality-check   转完不核对画质。默认核对：产物交出之前与源比 PSNR 和最差 1% 的
+                                   局部 SSIM，任一项低于门槛就算画质下降明显
+              --min-ssim <0-1>     局部 SSIM 的门槛，默认 \(thresholdText(ConversionOptions.default.qualityThresholds.minSSIM, minimumFraction: 2))（16×16 小块亮度的结构相似度，
+                                   取最差的那 1% 的块；1 是完全相同）
+              --min-psnr <dB>      PSNR 的门槛，默认 \(thresholdText(ConversionOptions.default.qualityThresholds.minPSNR, minimumFraction: 0))（0–100，越高越接近原图）
+              --on-quality-drop <skip|retry>
+                                   画质不达标时：skip 不转、保留原 JPEG（默认）；retry 用质量 \(thresholdText(qualityRetryLevel, minimumFraction: 1))
+                                   重编一次再判，仍不达标才不转。不转的不算失败
           -n, --dry-run            只打印将要做什么，不实际写文件
           -j, --jobs <n>           并发任务数，默认 \(ConversionOptions.default.jobs)
           -v, --verbose            输出每张图保留的元数据条目数，以及 EXIF 整块照搬了没有；
                                    产物比原图大而重编过一次的，再说明两次的大小；
+                                   核对了画质的，再给出 PSNR 和局部 SSIM；
                                    开了 --embed-caption 的，再说明说明写了没有
           -h, --help               显示本帮助
 
@@ -168,6 +177,7 @@ func runCommandLine(_ command: Command) -> Never {
                 print("    元数据条目 \(r.tagCount) 项，扩展属性 \(r.xattrCount) 项")
                 if let rawExif = r.rawExif { print("    \(rawExif.description)") }
                 if let reencode = r.reencode { print("    \(reencode.description)") }
+                if let quality = r.quality { print("    \(quality.description)") }
                 if let caption = r.caption { print("    \(caption.description)") }
             }
             switch r.verification {
@@ -191,6 +201,8 @@ func runCommandLine(_ command: Command) -> Never {
             print("跳过 \(input.lastPathComponent): \(why)\(hint)")
         case .failed(let why):
             FileHandle.standardError.write(Data("失败 \(input.lastPathComponent): \(why)\n".utf8))
+        case .qualityDropped(let drop):
+            print("\(input.lastPathComponent)  \(drop.description)")
         }
     }
 

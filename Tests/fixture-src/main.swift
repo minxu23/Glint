@@ -63,6 +63,10 @@
 //            缩略图）、4:2:2 主图，panasonic 还在 EOI 之后放一张 MPF 登记的预览图和两段相机数据，
 //            canon 带 Windows 写的作者（Artist、XPAuthor、XMP dc:creator）。结构与各自的用途见
 //            Tests/CameraJPEG.swift。替代原来入库的两张真实照片，值全是编的；产物逐字节确定。
+//   --size <宽>x<高>
+//            改尺寸（默认 1200×900）。量画质核对的开销时造 6000×4000 那样的大图用。
+//   --photo  像素换成相机样本那种像照片的图案（cameraPattern：渐变、起伏加细噪声），按质量 0.95 编码。
+//            默认的竖条纹压得太小，量不出真实照片的解码与核对开销。
 //   --unique-id <值>
 //            EXIF ImageUniqueID（ExifIFD 0xA420）写成 <值>。ImageIO 的写入器什么长度都照写
 //            （值的 UTF-8 加一个 NUL），读的时候却只认恰好 33 字节的写法，所以给别的长度的值
@@ -143,15 +147,26 @@ let noText = args.contains("--no-text")
 let thumbnail = args.contains("--thumbnail")
 let noise = args.contains("--noise")
 let isoGainMap = args.contains("--iso-gainmap")
+let photo = args.contains("--photo")
 args.removeAll {
     ["--lossy", "--no-exif-offset", "--cmyk", "--rich-xmp", "--extended-xmp", "--ms-rating", "--no-text",
-     "--thumbnail", "--noise", "--iso-gainmap"].contains($0)
+     "--thumbnail", "--noise", "--iso-gainmap", "--photo"].contains($0)
 }
 let usage = "用法: fixture [--lossy] [--no-exif-offset] [--cmyk] [--rich-xmp] [--extended-xmp] [--ms-rating]"
     + " [--no-text] [--aux depth|disparity|matte|skin|gainmap]... [--thumbnail] [--noise] [--iso-gainmap]"
-    + " [--unique-id <值>] [--caption-only tiff|iptc|xmp] <输出.jpg>"
+    + " [--size <宽>x<高>] [--photo] [--unique-id <值>] [--caption-only tiff|iptc|xmp] <输出.jpg>"
     + "\n      fixture --camera panasonic|canon <输出.jpg>"
     + "\n      fixture --dng [--orientation <n>] [--size <宽>x<高>] [--no-gps] [--gps-version-only] [--no-description] <输出.dng>"
+var w = 1200, h = 900
+if let at = args.firstIndex(of: "--size") {
+    let parts = (at + 1 < args.count ? args[at + 1] : "").split(separator: "x").compactMap { Int($0) }
+    guard parts.count == 2, parts.allSatisfy({ $0 >= 1 }) else {
+        FileHandle.standardError.write(Data("\(usage)\n".utf8))
+        exit(2)
+    }
+    (w, h) = (parts[0], parts[1])
+    args.removeSubrange(at...(at + 1))
+}
 var uniqueID: String?
 if let at = args.firstIndex(of: "--unique-id") {
     guard at + 1 < args.count else {
@@ -183,7 +198,6 @@ guard let path = args.first else {
     FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
 }
-let w = 1200, h = 900
 let cs = CGColorSpace(name: cmyk ? CGColorSpace.genericCMYK : CGColorSpace.sRGB)!
 let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: cs,
                     bitmapInfo: (cmyk ? CGImageAlphaInfo.none : .noneSkipLast).rawValue)!
@@ -195,6 +209,16 @@ for i in 0..<30 {
         ctx.setFillColor(red: t, green: 0.45, blue: 1 - t, alpha: 1)
     }
     ctx.fill(CGRect(x: i * (w / 30), y: 0, width: w / 30, height: h))
+}
+if photo, !cmyk, let pixels = ctx.data?.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * h) {
+    let pattern = cameraPattern(width: w, height: h, variant: 0)
+    for y in 0..<h {
+        for x in 0..<w {
+            let (r, g, b) = pattern(x, y)
+            let at = y * ctx.bytesPerRow + x * 4
+            (pixels[at], pixels[at + 1], pixels[at + 2]) = (UInt8(r.rounded()), UInt8(g.rounded()), UInt8(b.rounded()))
+        }
+    }
 }
 if noise, let pixels = ctx.data?.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * h) {
     // 线性同余发生器，种子固定：每次生成的字节一样，体积也一样。

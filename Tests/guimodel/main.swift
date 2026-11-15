@@ -253,12 +253,13 @@ if unverified.count == 1 {
 // MARK: - 8. 产物比原图大
 
 // 一张转出来必然变大的图（--noise 夹具），勾着「校验无损后删除源文件」：校验通过，
-// 副标题要说出变大了、没删源，源文件要还在，汇总里单列变大的张数。
+// 副标题要说出变大了、没删源，源文件要还在，汇总里单列变大的张数。噪声图的 PSNR 只有 30 dB 上下，
+// 默认会被画质核对拦下，这一组只看变大，关掉核对。
 print("界面模型：产物比原图大")
 let growing = files(in: work.appendingPathComponent("变大"), ext: "jpg")
 if growing.count == 1 {
     let m8 = ConversionModel()
-    m8.updateOptions { $0.deleteOriginal = true }
+    m8.updateOptions { $0.deleteOriginal = true; $0.qualityCheck = false }
     m8.add(urls: growing)
     m8.start()
     check(wait(until: { !m8.isRunning }), "变大的那一张走完了流程")

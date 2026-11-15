@@ -352,6 +352,7 @@ public struct BatchTally {
     public var failed = 0
     public var flagged = 0          // 转换成功但元数据有差异
     public var grew = 0             // 转换成功但产物比原图大（判据见 growthPercent）
+    public var qualityDropped = 0   // 画质核对不达标、没有转换（ConvertResult.qualityDropped），不算失败
     public var inBytes = 0
     public var outBytes = 0
 
@@ -366,6 +367,8 @@ public struct BatchTally {
             skipped += 1
         case .failed:
             failed += 1
+        case .qualityDropped:
+            qualityDropped += 1
         }
     }
 
@@ -385,6 +388,7 @@ public struct BatchTally {
         if failed > 0 { parts.append("失败 \(failed) \(unit)") }
         if flagged > 0 { parts.append("\(flagged) \(unit)有元数据差异") }
         if grew > 0 { parts.append("\(grew) \(unit)比原图大") }
+        if qualityDropped > 0 { parts.append("\(qualityDropped) \(unit)画质不达标，保留原 JPEG") }
         if let pct = percentSaved(inBytes: inBytes, outBytes: outBytes) {
             parts.append("总计 \(humanSize(inBytes)) → \(humanSize(outBytes))，" + (pct >= 0 ? "节省 \(pct)%" : "增大 \(-pct)%"))
         }

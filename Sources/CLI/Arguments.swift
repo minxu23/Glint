@@ -6,9 +6,10 @@
 import Eclose
 import Foundation
 
-/// 两个命令：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。选项完全相同，只差四处：收的源、
-/// 默认并发数（RAW 用 ConversionOptions.defaultRAWJobs），以及 raw2heif 不接受 --delete-original
-/// 和 --allow-cmyk（RAW 没有 CMYK 一说，当未知选项报错）。
+/// 两个命令：jpeg2heif 转 JPEG，raw2heif 转相机 RAW。选项大体相同，差在：收的源、
+/// 默认并发数（RAW 用 ConversionOptions.defaultRAWJobs）、raw2heif 不接受 --delete-original
+/// 和 --allow-cmyk（RAW 没有 CMYK 一说，当未知选项报错），以及画质核对的四个选项只有 jpeg2heif 有
+/// （raw2heif 给了就报错，RAW 不核对画质）。
 enum Command {
     case jpeg2heif, raw2heif
 
@@ -33,6 +34,10 @@ enum ArgumentError: Error, LocalizedError {
     case badJobs(String)
     case unknownOption(String)
     case keepsRAW(flag: String)
+    case badMinSSIM(String)
+    case badMinPSNR(String)
+    case badQualityDrop(String)
+    case noQualityCheckForRAW(flag: String)
 
     var errorDescription: String? {
         switch self {
@@ -41,9 +46,16 @@ enum ArgumentError: Error, LocalizedError {
         case .badJobs(let raw): return "并发数必须是正整数，收到: \(raw)"
         case .unknownOption(let opt): return "未知选项: \(opt)（用 --help 查看用法）"
         case .keepsRAW(let flag): return "raw2heif 不删除 RAW 原片，不接受 \(flag)"
+        case .badMinSSIM(let raw): return "--min-ssim 必须是 0 到 1 之间的数字，收到: \(raw)"
+        case .badMinPSNR(let raw): return "--min-psnr 必须是 0 到 100 之间的数字（单位 dB），收到: \(raw)"
+        case .badQualityDrop(let raw): return "--on-quality-drop 只能是 skip（不转）或 retry（提高质量再试），收到: \(raw)"
+        case .noQualityCheckForRAW(let flag): return "raw2heif 不核对画质（画质核对只对 JPEG），不接受 \(flag)"
         }
     }
 }
+
+/// 画质核对的四个选项。只有 jpeg2heif 认；raw2heif 遇到任何一个都报错。
+let qualityCheckFlags: Set<String> = ["--no-quality-check", "--min-ssim", "--min-psnr", "--on-quality-drop"]
 
 enum ParsedArguments: Equatable {
     case run(ConversionOptions)
@@ -66,6 +78,7 @@ func parseArguments(_ arguments: [String], command: Command) throws -> ParsedArg
     while !args.isEmpty {
         let a = args.removeFirst()
         if sawSeparator { o.inputs.append(a); continue }
+        if command == .raw2heif, qualityCheckFlags.contains(a) { throw ArgumentError.noQualityCheckForRAW(flag: a) }
         switch a {
         case "-h", "--help": return .showUsage(exitCode: 0)
         case "--": sawSeparator = true
@@ -85,6 +98,19 @@ func parseArguments(_ arguments: [String], command: Command) throws -> ParsedArg
         case "--no-raw-exif": o.rawExif = false
         case "--embed-caption": o.embedCaption = true
         case "--allow-cmyk" where command == .jpeg2heif: o.convertCMYK = true
+        case "--no-quality-check": o.qualityCheck = false
+        case "--min-ssim":
+            let raw = try next(a)
+            guard let v = QualityThresholds.parseSSIM(raw) else { throw ArgumentError.badMinSSIM(raw) }
+            o.qualityThresholds.minSSIM = v
+        case "--min-psnr":
+            let raw = try next(a)
+            guard let v = QualityThresholds.parsePSNR(raw) else { throw ArgumentError.badMinPSNR(raw) }
+            o.qualityThresholds.minPSNR = v
+        case "--on-quality-drop":
+            let raw = try next(a)
+            guard let v = QualityDropAction(rawValue: raw) else { throw ArgumentError.badQualityDrop(raw) }
+            o.onQualityDrop = v
         case "-n", "--dry-run": o.dryRun = true
         case "-v", "--verbose": o.verbose = true
         case "-j", "--jobs":
