@@ -194,7 +194,9 @@ while let at = args.firstIndex(of: "--aux") {
     auxKinds.append(args[at + 1])
     args.removeSubrange(at...(at + 1))
 }
-guard let path = args.first else {
+// 认得的选项都已拿掉，剩下的应当恰好是输出路径。以 - 开头的是不认识的选项（例如 --help），
+// 不能当成文件名写出一张图来。
+guard args.count == 1, let path = args.first, !path.hasPrefix("-") else {
     FileHandle.standardError.write(Data("\(usage)\n".utf8))
     exit(2)
 }
