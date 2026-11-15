@@ -1,6 +1,6 @@
 # 交接稿：画质上限改成 0.95，选 1.0（或高于 0.95）时提示
 
-Status: ready-for-agent
+Status: resolved
 
 工作规则沿用 [`../verify-hardening/round-12-handoff.md`](../verify-hardening/round-12-handoff.md) 第 0 节和根目录
 `HANDOVER.md` 的「质量原则」「隐私规则」「工作方式」。变异后 `cp` 还原要 `touch` 并确认 swiftc 行；计时、逐字节比较前
