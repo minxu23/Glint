@@ -1,0 +1,138 @@
+diff --git a/Sources/Eclose/JPEGLayout.swift b/Sources/Eclose/JPEGLayout.swift
+index 73a245b..502c9b3 100644
+--- a/Sources/Eclose/JPEGLayout.swift
++++ b/Sources/Eclose/JPEGLayout.swift
+@@ -157,9 +157,27 @@ struct MPFImage: Equatable {
+ 
+ /// 读 APP2 `MPF\0` 段里的 MP 索引，返回第二个条目起的附加图像（第一个条目是主图
+ /// 自己）。偏移、长度、条目数都来自源文件，一律不信：段内结构越界或自相矛盾就整个
+-/// 返回空数组；单个条目的范围越出文件或长度为 0 就不收这一条。
++/// 返回空数组；单个条目的范围越出文件或长度为 0 就不收这一条（越出文件的见 mpfMissingImages）。
+ /// 只读文件里第一个 MPF 段，偏移按 MP 规范从段内 TIFF 头的起点算。
+ func mpfImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [MPFImage] {
++    mpfEntries(in: bytes, layout).compactMap { e in
++        guard e.start + e.size <= bytes.count else { return nil }
++        return MPFImage(typeCode: e.typeCode, range: e.start..<(e.start + e.size))
++    }
++}
++
++/// MPF 索引登记了、范围却越出文件末尾的附加图像：文件截短了，或者编辑软件重存主图时把旧索引原样留着
++/// （主图变小了，附加图像没带上）。源里本来就没有这张图，产物里也不会有。
++/// 大尺寸预览图（0x010001/0x010002）不算：它是主图的派生物，在文件里也不带（previewTrailerRanges），
++/// 不在了也没少什么。去掉尾部的工具常把预览图连同索引里的登记一起留成这样。
++func mpfMissingImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [(typeCode: Int, size: Int)] {
++    mpfEntries(in: bytes, layout)
++        .filter { $0.start + $0.size > bytes.count && !previewMPFTypes.contains($0.typeCode) }
++        .map { ($0.typeCode, $0.size) }
++}
++
++/// MP 索引里第二个条目起的原始登记：类型码、在文件里的绝对起点、长度。偏移或长度为 0 的不收。
++private func mpfEntries(in bytes: [UInt8], _ layout: JPEGLayout) -> [(typeCode: Int, start: Int, size: Int)] {
+     guard let segment = layout.segments.first(where: { $0.marker == 0xE2 && $0.begins(with: mpfID, in: bytes) })
+     else { return [] }
+     let base = segment.payload.lowerBound + mpfID.count
+@@ -194,13 +212,12 @@ func mpfImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [MPFImage] {
+         break
+     }
+     guard let entries, entries.count >= 1 else { return [] }
+-    var images: [MPFImage] = []
++    var images: [(typeCode: Int, start: Int, size: Int)] = []
+     for k in 1..<entries.count {
+         let at = entries.offset + k * 16
+         guard let attribute = u32(at), let size = u32(at + 4), let offset = u32(at + 8) else { return [] }
+-        let start = base + offset
+-        guard offset > 0, size > 0, start + size <= bytes.count else { continue }
+-        images.append(MPFImage(typeCode: attribute & 0xFF_FFFF, range: start..<(start + size)))
++        guard offset > 0, size > 0 else { continue }
++        images.append((attribute & 0xFF_FFFF, base + offset, size))
+     }
+     return images
+ }
+@@ -301,6 +318,10 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
+         issues.append(truncatedSourceNotice)
+     }
+     issues += extraExifIssues(in: bytes, layout)
++    for missing in mpfMissingImages(in: bytes, layout) {
++        issues.append("源文件不完整：MPF 索引登记的附加图像（类型码 " + String(format: "0x%06X", missing.typeCode)
++                      + "，\(missing.size) 字节）不在文件里，可能是截短了或编辑后留下的旧索引；产物里没有这张图")
++    }
+     if let eoi = layout.eoi {
+         let trailer = (eoi + 2)..<bytes.count
+         let carried = carriedTrailerRanges(in: bytes, layout, carried: carriedAuxiliary)
+diff --git a/Tests/selftest.sh b/Tests/selftest.sh
+index 49748ec..c07f77e 100755
+--- a/Tests/selftest.sh
++++ b/Tests/selftest.sh
+@@ -20,7 +20,7 @@ ROUNDS=0
+ # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
+ # 同时静默少了几条」。
+ EXPECTED_ASSERTIONS=730
+-EXPECTED_UNIT=1355
++EXPECTED_UNIT=1359
+ EXPECTED_GUI=363
+ 
+ # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
+@@ -875,15 +875,16 @@ for what in 彩色 单通道; do
+     fi
+ done
+ # 版本标记段只有版本号，一律不报。截掉增益图（EOI 之后），只剩主图里孤立的标记段——
+-# 编辑软件重存时扔了增益图的真实照片就是这样：源里本来就没有增益图，转换什么也没丢，
+-# 校验通过。增益图本身在源里而产物里没有时，由尾部记账和辅助图的键比对报（7e）。
++# 编辑软件重存时扔了增益图的真实照片就是这样。标记段不报；MPF 索引还登记着那张增益图，
++# 它不在文件里，报一条源文件不完整（不删源，与太和测试集 10 号的预期一致）。增益图本身在源里而
++# 产物里没有时，由尾部记账和辅助图的键比对报（7e）。
+ cp "$WORK/ISO增益图/源副本/单通道.jpg" "$WORK/ISO增益图/只有标记段.jpg"
+ make_sample ./Tests/mangle-tool --strip-trailer "$WORK/ISO增益图/只有标记段.jpg"
+ check "前提：截掉之后源里没有增益图" "$(./Tests/probe --aux "$WORK/ISO增益图/只有标记段.jpg" ISOGainMap)" "<无>"
+ out=$("$BIN" -v --verify "$WORK/ISO增益图/只有标记段.jpg" 2>&1)
+-grep -q "元数据校验通过" <<< "$out" \
+-    && pass "只有 ISO 21496 标记段、没有增益图：标记段不报，校验通过" \
+-    || { fail "只有 ISO 21496 标记段、没有增益图：校验报了差异"; sed 's/^/     /' <<< "$out"; }
++grep -q "元数据校验发现 1 处差异" <<< "$out" && grep -qF "MPF 索引登记的附加图像（类型码 0x000000" <<< "$out" \
++    && pass "只有 ISO 21496 标记段、没有增益图：标记段不报，只报登记的增益图不在文件里" \
++    || { fail "只有 ISO 21496 标记段、没有增益图：报的不是恰好那一条"; sed 's/^/     /' <<< "$out"; }
+ # 新版 MPF 给增益图的类型码 0x050000（华为的 HDR 照片用它）：搬进产物了就不计入尾部的丢失。
+ # 0x040000（编辑前的原图）不是辅助图，照报。
+ for code in 050000 040000; do
+diff --git a/Tests/unit/main.swift b/Tests/unit/main.swift
+index d4adb31..c7b5ee4 100644
+--- a/Tests/unit/main.swift
++++ b/Tests/unit/main.swift
+@@ -754,10 +754,15 @@ expectTrailer(mpfJPEG([(0, gainMap), (0, gainMap)]), carried: [(40, 30)],
+               ["丢失 EOI 之后的 \(oneTrailer) 字节（尾部共 \(2 * oneTrailer) 字节，其中 \(oneTrailer) 字节是已搬进产物的辅助图像）"],
+               "一张辅助图只能认领一个条目")
+ // 索引说谎时条目不收，尾部的字节不落在任何登记的范围里，所以也不注明是 MPF 的附加图像。
++// 登记的范围越出文件末尾：那张图不在文件里，另报一条源文件不完整（见 mpfMissingImages）。
++func missingMPF(_ type: Int, _ size: Int) -> String {
++    "源文件不完整：MPF 索引登记的附加图像（类型码 " + String(format: "0x%06X", type)
++        + "，\(size) 字节）不在文件里，可能是截短了或编辑后留下的旧索引；产物里没有这张图"
++}
+ expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].offset = 0x7FFF_FFF0 }, carried: [(40, 30)],
+-              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "条目偏移指到文件外：照报，不崩")
++              [missingMPF(0, oneTrailer), "丢失 EOI 之后的 \(oneTrailer) 字节"], "条目偏移指到文件外：照报，不崩，另报登记的图不在文件里")
+ expectTrailer(mpfJPEG([(0, gainMap)]) { $0[1].size += 1 }, carried: [(40, 30)],
+-              ["丢失 EOI 之后的 \(oneTrailer) 字节"], "条目长度越过文件末尾：照报")
++              [missingMPF(0, oneTrailer + 1), "丢失 EOI 之后的 \(oneTrailer) 字节"], "条目长度越过文件末尾：照报，另报登记的图不在文件里")
+ expectTrailer(mpfJPEG([(0, gainMap)], tail: [1]) { $0[1].size += 1 }, carried: [(40, 30)],
+               ["丢失 EOI 之后的 \(oneTrailer + 1) 字节\(mpfNote)"], "条目范围里不只一张 JPEG：照报")
+ expectTrailer(mpfJPEG([(0, Array(gainMap.dropLast(2)) + [0x12, 0x34])]), carried: [(40, 30)],
+@@ -790,6 +795,19 @@ let segmentCuts = (mpfStart + 4 + 4 + 1..<mpfEnd).filter { cut in
+ }
+ check("MPF 段截短到任何长度，附加图像都照报", segmentCuts, [])
+ 
++print("MPF 登记的图不在文件里（编辑后留下的旧索引）：报源文件不完整")
++// 实例：编辑软件重存了主图，增益图没带上，MP 索引原样留着，增益图的偏移指到文件末尾之后。
++let staleMPF = mpfJPEG([(0x050000, gainMap)]) { $0[1].offset = 0x10_0000 }
++check("登记到文件末尾之后的增益图：列出类型码与长度",
++      mpfMissingImages(in: staleMPF, JPEGLayout(staleMPF)!).map { "\($0.typeCode) \($0.size)" }, ["\(0x050000) \(oneTrailer)"])
++check("登记的图都在文件里：不列", mpfMissingImages(in: one, JPEGLayout(one)!).count, 0)
++let stalePreview = mpfJPEG([(0x010002, gainMap)]) { $0[1].offset = 0x10_0000 }
++check("不在文件里的是大尺寸预览图：不列（派生物，在也不带）",
++      mpfMissingImages(in: stalePreview, JPEGLayout(stalePreview)!).count, 0)
++check("增益图本来就不在：只报源文件不完整（尾部是空的）",
++      unportableSegments(in: Array(staleMPF.prefix(staleMPF.count - oneTrailer)), carriedAuxiliary: []),
++      [missingMPF(0x050000, oneTrailer)])
++
+ print("多份 EXIF：第二份里有第一份之外的信息才报，列出字段")
+ func twoExif(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+     let id = Array("Exif".utf8) + [0, 0]
