@@ -1,6 +1,6 @@
 # 交接稿：每张源 JPEG 只读一次、只解析一次
 
-Status: ready-for-agent
+Status: resolved
 
 工作规则沿用 [`../verify-hardening/round-12-handoff.md`](../verify-hardening/round-12-handoff.md) 第 0 节和根目录
 `HANDOVER.md` 的「质量原则」「隐私规则」「工作方式」。另加：
