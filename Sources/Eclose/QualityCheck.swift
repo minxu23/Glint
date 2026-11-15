@@ -453,6 +453,11 @@ let qualityStripRows = 512
 /// 多带几行、只用中间那段，解出的像素就与整幅解码逐字节相同（单测「按条带解产物」守着）。
 let qualityStripMargin = 16
 
+/// 同时在做核对的张数上限：核数的三分之一，至少 2。整幅解一张 JPEG 时解码器自己要多占约一倍于
+/// 像素的内存（2400 万像素约 200 MB），批量按核数并发时全都同时解就是几个 GB；限住它，峰值内存减半，
+/// 墙钟不变甚至略快（解码、编码共用硬件，挤在一起反而互相等）。量法与数见 README「转完核对画质」。
+let qualityCheckSlots = DispatchSemaphore(value: max(2, ProcessInfo.processInfo.activeProcessorCount / 3))
+
 /// 核对 `product`（刚写好的 HEIC）相对 `source`（编码用的那个图像源）的画质。
 ///
 /// 两边各取第 0 张真解码：源图的色彩空间是 RGB 的就都以它解释，否则 sRGB；不应用方向（两边方向标签
@@ -460,9 +465,12 @@ let qualityStripMargin = 16
 ///
 /// 源整幅解一次：从 JPEG 里裁一段来解走的是另一套解码，像素和整幅解码（编码器读到的就是它）差出
 /// 几个色阶（实测到 7），会把两套解码器之间的差算到编码器头上。产物按 `stripRows` 一条一条地解、算完就丢。
-/// 同一时刻在内存里的是源的一幅和产物的一条。`stripRows` 只供单测换条带高度。
+/// 同一时刻在内存里的是源的一幅和产物的一条；同时做核对的张数由 qualityCheckSlots 限住。
+/// `stripRows` 只供单测换条带高度。
 func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualityStripRows) -> QualityReading {
     precondition(stripRows > 0 && stripRows % ssimBlockSide == 0, "条带行数要是 16 的倍数")
+    qualityCheckSlots.wait()
+    defer { qualityCheckSlots.signal() }
     guard let sourceImage = CGImageSourceCreateImageAtIndex(source, 0, uncachedDecode) else {
         return .undecodable("解不出源图的像素")
     }
