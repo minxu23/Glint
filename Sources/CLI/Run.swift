@@ -104,6 +104,14 @@ func warn(_ msg: String) {
 /// 信号源要一直留着，否则被释放就不再响应。
 private var interruptSources: [DispatchSourceSignal] = []
 
+/// 谁来让进程退出：信号处理（打断）和主流程（一批转完）只能有一个。信号处理一进来就拿走、不再放回
+/// （它最后 exit）；主流程在一批转完、打印汇总之前拿。
+///
+/// 没有这把锁时两边抢着 exit：打断后信号处理要等正在写的那几张收手（最多 3 秒），这期间主流程手里
+/// 剩下的源一登记临时文件就失败、不计进汇总，很快转完，按「没有失败」用 0 退出——比信号处理先退，
+/// 「已中断」没说，退出码是 0，脚本以为成功了。实测 300 张、8 路并发，kill 之后一半是这样。
+private let exitLock = NSLock()
+
 /// Ctrl-C（SIGINT）、kill（SIGTERM）、关掉终端（SIGHUP）时：删掉还没写完的临时产物
 /// （输出目录里以点开头、看不见的 `.glint-*.heic`），说一句，再按惯例的退出码（128 + 信号）退出。
 /// 已经转完的那些照常（产物在，开了删源的、合乎条件的源已删）；没转完的源文件没有动——删源只在
@@ -116,6 +124,7 @@ func installInterruptCleanup() {
         guard unsafeBitCast(previous, to: Int.self) != unsafeBitCast(SIG_IGN, to: Int.self) else { continue }
         let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
         source.setEventHandler {
+            exitLock.lock()   // 主流程已经拿走：一批已经转完，它会照常退出，这边就等着
             let removed = removeInFlightTemporaries()
             let note = removed > 0 ? "，删掉了 \(removed) 个没写完的临时文件" : ""
             FileHandle.standardError.write(Data("\n已中断\(note)；已经转完的照常保留，没转完的源文件没有动\n".utf8))
@@ -208,6 +217,9 @@ func runCommandLine(_ command: Command) -> Never {
             print("\(input.lastPathComponent)  \(drop.description)")
         }
     }
+
+    // 打断了的话信号处理已经拿着锁，在等正在写的收手，这里停住，由它说「已中断」、按 128 + 信号退出。
+    exitLock.lock()
 
     for notice in renameNotices { warn(notice) }
 

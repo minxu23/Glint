@@ -387,17 +387,26 @@ grep -qF "源是符号链接，没有删除（它指向的文件也没删）" <<
 # 说一句已中断，退出码 128 + 15。等第一张产物出来再打断，保证是转到一半。
 # 打断的那一刻多半没有写到一半的文件（ImageIO 收尾时才建文件），所以「没剩下」这条拦不住清理被
 # 去掉；拦得住的是「说已中断」那条（没装信号处理就没有这句）。清理本身的逻辑在单测里按确定的时序验。
+# 打断 5 次，每次都要对：信号处理和主流程原来抢着退出，主流程先退时退出码是 0、不说已中断，实测
+# 一半的打断是这样（只打断一次时这条一半的机会碰巧通过）。
 I="$WORK/中断"
 mkdir -p "$I/源"
 make_sample ./Tests/fixture --camera panasonic "$I/源/0.jpg"
 for i in $(seq 1 299); do cp "$I/源/0.jpg" "$I/源/$i.jpg"; done
-"$BIN" -o "$I/出" -j 8 "$I/源" >/dev/null 2>"$I/err.txt" & pid=$!
-for _ in $(seq 1 1000); do ls "$I/出" 2>/dev/null | grep -q '\.heic$' && break; sleep 0.01; done
-kill -TERM "$pid"; wait "$pid"; st=$?
-done_count=$(ls "$I/出" | grep -c '\.heic$')
-[ "$done_count" -gt 0 ] && [ "$done_count" -lt 300 ] && pass "前提：打断时转到一半（$done_count / 300）" || fail "前提：打断时不是转到一半（$done_count / 300）"
-check "打断后输出目录里没有剩下的临时产物" "$(ls -A "$I/出" | grep -c '^\.glint-')" "0"
-[ "$st" -eq 143 ] && grep -qF "已中断" "$I/err.txt" && pass "打断时说已中断，退出码 143" || { fail "打断时退出码 $st 或没说已中断"; sed 's/^/     /' "$I/err.txt"; }
+halfway=0 leftover=0 wrong=""
+for round in 1 2 3 4 5; do
+    rm -rf "${I:?}/出"
+    "$BIN" -o "$I/出" -j 8 "$I/源" >/dev/null 2>"$I/err.txt" & pid=$!
+    for _ in $(seq 1 1000); do ls "$I/出" 2>/dev/null | grep -q '\.heic$' && break; sleep 0.01; done
+    kill -TERM "$pid"; wait "$pid"; st=$?
+    done_count=$(ls "$I/出" | grep -c '\.heic$')
+    [ "$done_count" -gt 0 ] && [ "$done_count" -lt 300 ] && halfway=$((halfway + 1))
+    leftover=$((leftover + $(ls -A "$I/出" | grep -c '^\.glint-')))
+    { [ "$st" -eq 143 ] && grep -qF "已中断" "$I/err.txt"; } || wrong+="第 $round 次退出码 $st$(grep -qF "已中断" "$I/err.txt" || echo "、没说已中断")；"
+done
+check "前提：5 次打断都是转到一半" "$halfway" "5"
+check "打断后输出目录里没有剩下的临时产物（5 次合计）" "$leftover" "0"
+[ -z "$wrong" ] && pass "5 次打断都说已中断，退出码 143" || fail "打断时：$wrong"
 
 # 输出目录所在的卷满了：产物写到一半失败。要说「磁盘空间不够」而不是「HEIC 编码失败」，写了一半的临时文件
 # 也得删掉（去掉这一步的清理，这里会剩下一个）。建一个 1 MB 的磁盘映像，先填到只剩 100 KB，转一张
