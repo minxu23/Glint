@@ -1,6 +1,6 @@
 # MPF 索引登记的附加图像不在文件里时，要不要报
 
-Status: needs-triage
+Status: resolved
 
 ## 现象
 
@@ -28,3 +28,16 @@ Status: needs-triage
 
 应用：`git apply .scratch/mpf-stale-index/issues/01-report-stale-mpf.patch`，再 `make test`，
 README 的「截断的文件照样转得出来」一条补一句。
+
+## Comments
+
+2026-11-15 用户定了：**报出来，并让用户选择是否保留 JPEG；默认可以删**——原图修改之后增益图已经没有了，
+转换没丢东西。
+
+按这个做的（不是上面那个补丁原样）：
+- 不算校验差异，写进状态说明（`staleMPFNotice`）：`原图的 MPF 索引登记的附加图像（增益图，类型码 0x050000，
+  … 字节）不在文件里：原图被编辑或截短过，这张图转换前就没了，HEIF 里也没有`。不校验时也写。
+- `ConversionOptions.keepStaleMPF`（默认 false）：开了就在 `--delete-original` 时保留这样的源，说明里加
+  `按设置，原图缺了 MPF 登记的附加图像时保留源文件`。命令行 `jpeg2heif --keep-stale-mpf`（raw2heif 报未知选项）；
+  界面在「校验无差异后删除源文件」下面，勾了删除才显示，记住。
+- 大尺寸预览图不在不说（同补丁）。补丁文件留着作记录，不要再应用。
