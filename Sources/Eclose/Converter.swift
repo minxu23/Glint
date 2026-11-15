@@ -554,7 +554,13 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         captionOutcome = embeddedCaption(at: dest) == text ? .written(characters: text.count) : .failed
     }
     // 去掉了坏的 ICC：颜色按 sRGB 解释，可能和原图有偏差。算一条差异，--delete-original 因此不删源。
+    // RAW 截短了而解码器照样显影出来（缺的部分是它补的）：同样算一条差异，见 RawCompleteness.swift。
+    let rawShortfall = kind == .raw
+        ? (try? Data(contentsOf: input, options: .mappedIfSafe)).flatMap {
+            rawDataShortfall([UInt8]($0), type: CGImageSourceGetType(src) as String?)
+        } : nil
     let conversionIssues = (droppedICC ? [damagedICCNotice] : [])
+        + (rawShortfall.map { [rawTruncatedNotice($0)] } ?? [])
         + (captionOutcome == .failed ? [CaptionOutcome.failureIssue] : [])
     // ICC 没原样搬过去（坏掉的描述文件 ImageIO 当作没有）。去掉坏 ICC 的那条已经说了，不重复。
     let iccIssues = opts.verifyEnabled && kind == .jpeg && !droppedICC

@@ -2547,6 +2547,71 @@ if case .converted(let r) = grownResult {
     fail("撑大的 RAW 产物没转成（\(grownResult)）"); fail("RAW 的产物比源大：变大说明")
 }
 
+print("截短的 RAW（rawDataShortfall）")
+do {
+    // 夹具 DNG：主图的条带在 SubIFD 里（IFD0 里只有缩略图），终点就是文件末尾。
+    let whole = [UInt8](makeDNG(DNGSpec(width: 600, height: 400)))
+    let dngType = "com.adobe.raw-image"
+    check("完整的 DNG：不缺", rawDataShortfall(whole, type: dngType), nil)
+    check("截掉 1000 字节：缺口按 SubIFD 里的条带算", rawDataShortfall(Array(whole.dropLast(1000)), type: dngType),
+          RawShortfall(needed: whole.count, have: whole.count - 1000))
+    check("截到只剩一半：照样算出应有的长度", rawDataShortfall(Array(whole.prefix(whole.count / 2)), type: dngType)?.needed,
+          whole.count)
+    check("CR3、类型不明：不判断", [rawDataShortfall(whole, type: "com.canon.cr3-raw-image") == nil,
+                              rawDataShortfall(whole, type: nil) == nil], [true, true])
+
+    // 手搭的 RW2 头：IFD0 里只有尺寸、RawFormat、RawDataOffset，松下那样 StripOffsets 写 0xFFFFFFFF、
+    // StripByteCounts 写 0。28×10 个像素，每 14 个装 16 字节是 320 字节，按 0x4000 对齐成 16384。
+    func rw2(format: Int, rawStart: Int = 128, next: Int = 0) -> [UInt8] {
+        func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8(v >> 8 & 0xFF)] }
+        func le32(_ v: Int) -> [UInt8] { le16(v & 0xFFFF) + le16(v >> 16 & 0xFFFF) }
+        let entries: [(Int, Int, Int)] = [(0x0002, 3, 28), (0x0003, 3, 10), (0x002D, 3, format),
+                                          (0x0111, 4, 0xFFFF_FFFF), (0x0117, 4, 0), (0x0118, 4, rawStart)]
+        var b: [UInt8] = Array("IIU".utf8) + [0] + le32(8) + le16(entries.count)
+        for (tag, type, v) in entries { b += le16(tag) + le16(type) + le32(1) + (type == 3 ? le16(v) + [0, 0] : le32(v)) }
+        b += le32(next)
+        return b + [UInt8](repeating: 0, count: rawStart - b.count)
+    }
+    let rw2Type = "com.panasonic.rw2-raw-image"
+    let rw2Whole = rw2(format: 4) + [UInt8](repeating: 0x5A, count: 16384)
+    check("RW2 完整：不缺", rawDataShortfall(rw2Whole, type: rw2Type), nil)
+    check("RW2 截掉 384 字节：按 RawFormat 4 算出应有的长度", rawDataShortfall(Array(rw2Whole.dropLast(384)), type: rw2Type),
+          RawShortfall(needed: 128 + 16384, have: 128 + 16000))
+    check("RW2 的 RawFormat 不是核对过的 4：不判断",
+          rawDataShortfall(Array((rw2(format: 7) + [UInt8](repeating: 0, count: 16384)).dropLast(384)), type: rw2Type), nil)
+
+    // IFD 链指回自己（坏文件里会有）：走一遍就停，不卡住。DNG 的魔数 42 换上，按 TIFF 系走。
+    var loop = rw2(format: 4, next: 8)
+    loop[2] = 42
+    check("IFD 链成环：照样返回", rawDataShortfall(loop, type: dngType), nil)
+
+    // 走转换：截短的 DNG（ImageIO 显影不了它，用一个拿完整 DNG 编码的编码器顶替），
+    // 校验时缺口是一条差异，不校验时写在状态说明里。
+    let cutRoot = rawRoot.appendingPathComponent("截短")
+    try? FileManager.default.createDirectory(at: cutRoot, withIntermediateDirectories: true)
+    let cutDNG = cutRoot.appendingPathComponent("截短.dng")
+    try? Data(whole.dropLast(1000)).write(to: cutDNG)
+    let wholeSource = CGImageSourceCreateWithData(Data(whole) as CFData, nil)
+    let fromWhole: HEIFEncoder = { _, props, xmp, url in
+        guard let wholeSource else { return false }
+        return encodeHEIF(wholeSource, properties: props, xmp: xmp, to: url)
+    }
+    let notice = rawTruncatedNotice(RawShortfall(needed: whole.count, have: whole.count - 1000))
+    var verifying = rawOpts
+    verifying.verify = true
+    if case .converted(let r) = convert(cutDNG, opts: verifying, dest: cutRoot.appendingPathComponent("校验.heic"), encode: fromWhole),
+       case .differences(let issues) = r.verification {
+        check("截短的 RAW 转出来：校验报源文件不完整", issues.contains(notice), true)
+    } else {
+        fail("截短的 RAW 转出来：校验报源文件不完整（没转成或校验没报差异）")
+    }
+    if case .converted(let r) = convert(cutDNG, opts: rawOpts, dest: cutRoot.appendingPathComponent("不校验.heic"), encode: fromWhole) {
+        check("截短的 RAW 转出来：不校验时写在状态说明里", r.note?.contains(notice) ?? false, true)
+    } else {
+        fail("截短的 RAW 转出来：不校验时写在状态说明里（没转成）")
+    }
+}
+
 var deleting = rawOpts
 deleting.deleteOriginal = true
 let keptDest = rawRoot.appendingPathComponent("不删.heic")
