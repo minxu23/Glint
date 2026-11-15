@@ -1983,19 +1983,22 @@ refute "raw2heif 报错时一张都不转" 0 test -e "$Q/甲.heic"
 round "7v. 画质上限：-q 高于 0.95 按 0.95 转，整批提示一次"
 # 质量 1.0 时编码器改用 4:4:4，产物翻倍、画质反降（README「画质上限」），所以 -q 高于 0.95 时按 0.95 转：
 # 产物与 -q 0.95 的逐字节相同、标准输出逐行相同；标准错误里只有那一句说明，一批两张也只说一次；退出码 0。
-# 不高于上限的不提示。逐字节比较要求这时机器上没有别的编码在跑（HANDOVER.md「注意事项」）。
+# 不高于上限的不提示。
 C="$WORK/上限"
 notice="警告: 画质上限是 0.95，更高的设置按 0.95 转换：再高编码器会改用 4:4:4，文件是原图的两倍多，画质反而略降，部分照片还会编码失败"
-# 用法：cap_run 命令 质量 源文件 扩展名；在 $C/<命令>-<质量>/ 里转甲、乙两张，标准输出、标准错误各存一份。
+# 用法：cap_run 命令 质量 源文件 扩展名；结果放在 $C/<命令>-<质量>/ 里，转两次：
+#   比产物字节和标准输出的那次，一个进程只转甲这一张——一个进程转多张、别的进程同时也在编码时，其中一些
+#   会改走软件编码器，字节就变了；只转一张时一直拿到硬件编码器。
+#   比标准错误和退出码的那次，一批转「批/」里的甲、乙两张（说明整批只能出现一次），不比产物。
 cap_run() {
     local d="$C/$1-$2"
-    mkdir -p "$d"
-    cp "$3" "$d/甲.$4"; cp "$3" "$d/乙.$4"
-    "./$1" -j 1 -q "$2" "$d/甲.$4" "$d/乙.$4" > "$d.out" 2> "$d.err"
+    mkdir -p "$d/批"
+    cp "$3" "$d/甲.$4"; cp "$3" "$d/批/甲.$4"; cp "$3" "$d/批/乙.$4"
+    "./$1" -q "$2" "$d/甲.$4" > "$d.out" 2>/dev/null
+    "./$1" -j 1 -q "$2" "$d/批/甲.$4" "$d/批/乙.$4" > /dev/null 2> "$d.err"
     echo "$?" > "$d.status"
 }
-same_products() { cmp -s "$C/$1-$2/甲.heic" "$C/$1-0.95/甲.heic" && cmp -s "$C/$1-$2/乙.heic" "$C/$1-0.95/乙.heic" \
-    && [ -s "$C/$1-0.95/甲.heic" ]; }
+same_products() { cmp -s "$C/$1-$2/甲.heic" "$C/$1-0.95/甲.heic" && [ -s "$C/$1-0.95/甲.heic" ]; }
 ./Tests/fixture --dng "$C-源.dng" >/dev/null || fail "造不出 DNG"
 for q in 0.95 1.0 0.97 0.8; do cap_run jpeg2heif "$q" "$WORK/照片.jpg" jpg; done
 for q in 0.95 1.0; do cap_run raw2heif "$q" "$C-源.dng" dng; done
@@ -2003,8 +2006,8 @@ for cmd_q in jpeg2heif-1.0 jpeg2heif-0.97 raw2heif-1.0; do
     cmd=${cmd_q%-*} q=${cmd_q##*-}
     check "$cmd -q $q：退出码 0，标准错误里只有那句说明、一批两张只说一次" \
         "$(cat "$C/$cmd_q.status")|$(cat "$C/$cmd_q.err")" "0|$notice"
-    same_products "$cmd" "$q" && pass "$cmd -q $q：两张产物与 -q 0.95 的逐字节相同" || fail "$cmd -q $q：产物与 -q 0.95 的不同"
-    check_same "$cmd -q $q：标准输出与 -q 0.95 的逐行相同" "$(sed "s/$cmd_q/$cmd-0.95/g" "$C/$cmd_q.out")" "$(cat "$C/$cmd-0.95.out")"
+    same_products "$cmd" "$q" && pass "$cmd -q $q：产物与 -q 0.95 的逐字节相同（一个进程只转这一张）" || fail "$cmd -q $q：产物与 -q 0.95 的不同"
+    check_same "$cmd -q $q：标准输出与 -q 0.95 的逐行相同（同上，一张）" "$(sed "s/$cmd_q/$cmd-0.95/g" "$C/$cmd_q.out")" "$(cat "$C/$cmd-0.95.out")"
 done
 for cmd_q in jpeg2heif-0.95 jpeg2heif-0.8 raw2heif-0.95; do
     check "${cmd_q%-*} -q ${cmd_q##*-}：不提示，退出码 0" "$(cat "$C/$cmd_q.status")|$(cat "$C/$cmd_q.err")" "0|"
