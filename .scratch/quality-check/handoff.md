@@ -1,6 +1,6 @@
 # 交接稿：转换后画质核对，不达标的不转（JPEG）
 
-Status: ready-for-agent
+Status: resolved
 
 工作规则、长期要求、变异与 mtime 陷阱的注意事项，沿用
 [`../verify-hardening/round-12-handoff.md`](../verify-hardening/round-12-handoff.md) 的第 0 节，先读那一节；
