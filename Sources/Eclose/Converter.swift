@@ -445,17 +445,30 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     /// 临时文件登记在 TemporaryFiles 里，进程被打断时由命令行或应用删掉；convert 返回时注销。
     var temporaries: [URL] = []
     defer { TemporaryFiles.shared.forget(temporaries) }
+    // 编码用的源。源里的 ICC 色彩描述文件坏了、ImageIO 因此解不出图像时，换成去掉 ICC 的那份。
+    var pixels = src
+    var droppedICC = false
     func encodeAndCarry() -> (url: URL, rawExif: RawExifOutcome?)? {
         let tmp = folder.appendingPathComponent(".glint-\(UUID().uuidString).heic")
         guard TemporaryFiles.shared.register(tmp) else { return nil }   // 已经在收尾
         temporaries.append(tmp)
-        guard encode(src, destProps, xmp, tmp) else {
+        guard encode(pixels, destProps, xmp, tmp) else {
             _ = TemporaryFiles.remove(tmp)
             return nil
         }
         return (tmp, opts.rawExif ? carryExif(kind, source: input, product: tmp) : nil)
     }
-    guard var product = encodeAndCarry() else {
+    /// 编码失败、源解不出图像，而去掉 ICC 后解得出：按去掉 ICC 的那份再编一次。
+    func encodeWithoutDamagedICC() -> (url: URL, rawExif: RawExifOutcome?)? {
+        guard kind == .jpeg, !TemporaryFiles.shared.isShuttingDown, !imageDecodes(src),
+              let stripped = jpegWithoutICC(input),
+              let repaired = CGImageSourceCreateWithData(stripped as CFData, nil),
+              imageDecodes(repaired) else { return nil }
+        pixels = repaired
+        droppedICC = true
+        return encodeAndCarry()
+    }
+    guard var product = encodeAndCarry() ?? encodeWithoutDamagedICC() else {
         return .failed(encodeFailureReason(src, kind: kind, folder: folder, sourceBytes: inBytes))
     }
     if kind == .raw, let problem = rawProductDepthProblem(product.url) {
@@ -493,9 +506,14 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     if case .write(let text)? = caption, captionOutcome == nil {
         captionOutcome = embeddedCaption(at: dest) == text ? .written(characters: text.count) : .failed
     }
-    let captionIssues = captionOutcome == .failed ? [CaptionOutcome.failureIssue] : []
+    // 去掉了坏的 ICC：颜色按 sRGB 解释，可能和原图有偏差。算一条差异，--delete-original 因此不删源。
+    let conversionIssues = (droppedICC ? [damagedICCNotice] : [])
+        + (captionOutcome == .failed ? [CaptionOutcome.failureIssue] : [])
+    // ICC 没原样搬过去（坏掉的描述文件 ImageIO 当作没有）。去掉坏 ICC 的那条已经说了，不重复。
+    let iccIssues = opts.verifyEnabled && kind == .jpeg && !droppedICC
+        ? [iccCarryIssue(source: input, dest: dest)].compactMap { $0 } : []
     let verification = opts.verifyEnabled
-        ? Verification(comparing: metadataDiff(source: input, dest: dest) + captionIssues) : .notVerified
+        ? Verification(comparing: metadataDiff(source: input, dest: dest) + iccIssues + conversionIssues) : .notVerified
     let outBytes = fileSize(dest)
 
     // 删源文件的前提是逐条比对确认无损，而且产物不比原图大——换成更大的文件不是
@@ -504,8 +522,8 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     var sourceDeleted = false
     let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
     if let growth { notes.append("HEIF 比原图大 \(growth)") }
-    // 没校验时差异列表不存在，没写成的说明放进状态说明，不让它静默。
-    if !opts.verifyEnabled, let issue = captionIssues.first { notes.append(issue) }
+    // 没校验时差异列表不存在，去掉坏 ICC、说明没写成这些放进状态说明，不让它们静默。
+    if !opts.verifyEnabled { notes += conversionIssues }
     if opts.deleteOriginal {
         if kind == .raw {
             notes.append("RAW 原片永远保留，没有删除")
@@ -937,6 +955,79 @@ func encodeHEIF(_ src: CGImageSource, properties: [CFString: Any],
     return CGImageDestinationCopyImageSource(out, firstPass, options, nil)
 }
 
+/// 源图第 0 张真解得出像素。CGImageSourceCreateImageAtIndex 拿到图不算：它先不解码，量化表
+/// 损坏、ICC 损坏的 JPEG 也照样给一张图，画出来是空的、交给编码器则收尾失败。取一次像素数据
+/// 才真解码，解不出时是 nil。整幅解一遍，只在编码已经失败时用。
+func imageDecodes(_ src: CGImageSource) -> Bool {
+    guard let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return false }
+    return image.dataProvider?.data != nil
+}
+
+/// 去掉 ICC 后转换时加的那条差异（没校验时是状态说明）。
+let damagedICCNotice = "源文件里的 ICC 色彩描述文件损坏，按它解不出图像；去掉它转换，颜色按 sRGB 解释，可能和原图有偏差"
+
+private let iccSegmentID: [UInt8] = Array("ICC_PROFILE".utf8) + [0]
+
+/// JPEG 里的 APP2 `ICC_PROFILE` 段，只看第一个 SOS 之前的：图像数据里不会有 ICC。
+func iccSegments(_ bytes: [UInt8], _ layout: JPEGLayout) -> [JPEGSegment] {
+    layout.segments.prefix { $0.marker != 0xDA }.filter { $0.marker == 0xE2 && $0.begins(with: iccSegmentID, in: bytes) }
+}
+
+/// JPEG 里嵌的 ICC 色彩描述文件本身：各段 `ICC_PROFILE\0`、序号、总数之后的内容，按序号接起来。没有是 nil。
+func embeddedICC(_ bytes: [UInt8]) -> [UInt8]? {
+    guard let layout = JPEGLayout(bytes) else { return nil }
+    let header = iccSegmentID.count + 2
+    let chunks = iccSegments(bytes, layout).filter { $0.payload.count > header }
+    guard !chunks.isEmpty else { return nil }
+    return chunks.sorted { bytes[$0.payload.lowerBound + iccSegmentID.count] < bytes[$1.payload.lowerBound + iccSegmentID.count] }
+        .flatMap { bytes[($0.payload.lowerBound + header)..<$0.payload.upperBound] }
+}
+
+/// 源 JPEG 里嵌的 ICC 色彩描述文件没有原样到产物里时的那条差异；原样到了、源里没有都是 nil。
+///
+/// 好的描述文件 ImageIO 逐字节搬过去（测试集里带 ICC 的每一张都是），只把 Profile ID 清零。搬不过去的是它读不懂的：
+/// 坏掉的描述文件它当作没有，按 sRGB 解码，产物里写的是系统的 sRGB。这时源和产物的色彩描述名
+/// 都读成 sRGB，键比对看不出来，得比描述文件的字节。描述名本身变了（如 CMYK 的转成 RGB）时
+/// 键比对已经报了 ProfileName 的变化，这里不再重复。
+func iccCarryIssue(source: URL, dest: URL) -> String? {
+    guard let data = try? Data(contentsOf: source), let embedded = embeddedICC([UInt8](data)),
+          let product = CGImageSourceCreateWithURL(dest as CFURL, nil),
+          let original = CGImageSourceCreateWithURL(source as CFURL, nil) else { return nil }
+    let carried = CGImageSourceCreateImageAtIndex(product, 0, nil)?.colorSpace?.copyICCData().map { [UInt8]($0 as Data) }
+    guard carried.map(withoutProfileID) != withoutProfileID(embedded) else { return nil }
+    func profileName(_ src: CGImageSource) -> String? {
+        (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any])?[kCGImagePropertyProfileName] as? String
+    }
+    let name = profileName(product)
+    guard profileName(original) == name else { return nil }
+    let replacement = [name, carried.map { "\($0.count) 字节" }].compactMap { $0 }.joined(separator: "，")
+    return "源里嵌的 ICC 色彩描述文件（\(embedded.count) 字节）没有原样搬过去，产物里是另一份"
+        + (replacement.isEmpty ? "" : "（\(replacement)）") + "，颜色可能和原图有偏差"
+}
+
+/// 描述文件头里的 Profile ID（第 84–99 字节，整个文件的 MD5）抹成 0。ImageIO 写 HEIF 时把它清零，
+/// 别的字节原样：iPhone 照片的描述文件带着它，不抹掉的话每一张都会误报。它只是校验和，全 0
+/// 按 ICC 规范就是「没算」。
+func withoutProfileID(_ profile: [UInt8]) -> [UInt8] {
+    guard profile.count >= 100 else { return profile }
+    var out = profile
+    out.replaceSubrange(84..<100, with: [UInt8](repeating: 0, count: 16))
+    return out
+}
+
+/// 去掉 APP2 `ICC_PROFILE` 段之后的 JPEG 字节。没有这种段、读不了文件都是 nil。
+func jpegWithoutICC(_ url: URL) -> Data? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    let bytes = [UInt8](data)
+    guard let layout = JPEGLayout(bytes) else { return nil }
+    let icc = iccSegments(bytes, layout)
+    guard !icc.isEmpty else { return nil }
+    var out = bytes
+    // 从后往前删，前面的偏移不变。段从标记 FF xx 和两字节长度开始，在内容之前 4 字节。
+    for s in icc.reversed() { out.removeSubrange((s.payload.lowerBound - 4)..<s.payload.upperBound) }
+    return Data(out)
+}
+
 /// 编码失败时说清是哪一头的问题。源本身解不出图像（截断、损坏的文件）时，「HEIC 编码失败」
 /// 会让人去怀疑编码器；这里先试着解一次源图。只在失败时才解：RAW 解一次就是整幅显影，平时不该多花这一遍。
 /// 输出目录写不进去（没有写权限、建不出来）、所在的卷满了，也都表现为编码失败，先查这两条。
@@ -950,7 +1041,7 @@ func encodeFailureReason(_ src: CGImageSource, kind: SourceKind, folder: URL, so
        free < sourceBytes {
         return "磁盘空间不够：输出目录所在的卷只剩 \(humanSize(free))"
     }
-    guard CGImageSourceCreateImageAtIndex(src, 0, nil) == nil else { return "HEIC 编码失败" }
+    guard !imageDecodes(src) else { return "HEIC 编码失败" }
     switch kind {
     case .raw: return "显影失败：读不出 RAW 的图像数据，文件可能不完整或已损坏"
     case .jpeg: return "读不出图像数据，文件可能不完整或已损坏"

@@ -19,8 +19,8 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=685
-EXPECTED_UNIT=1210
+EXPECTED_ASSERTIONS=694
+EXPECTED_UNIT=1212
 EXPECTED_GUI=319
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
@@ -562,6 +562,43 @@ expect_reported "只改过 IIM 时间" "$WORK/只改IIM.jpg" \
 half=$(( $(stat -f %z "$WORK/照片.jpg") / 2 ))
 head -c "$half" "$WORK/照片.jpg" > "$WORK/截断.jpg"
 expect_reported "截断的 JPEG" "$WORK/截断.jpg" "源文件不完整：没有找到 JPEG 的结束标记（EOI）"
+
+# ICC 色彩描述文件坏了的 iPhone 照片：ImageIO 照样给一张图，可一解码就失败，原来报「HEIC 编码失败」。
+# 去掉 ICC 再转转得出来，颜色按 sRGB 解释：必须报出来，--delete-original 不能删源；不校验时写在状态说明里。
+# 样本得配上 iPhone 的 JFIF 段，普通 JFIF 的 JPEG ImageIO 不理会坏掉的 ICC（见 mangle --apple-jfif）。
+make_sample ./Tests/fixture "$WORK/坏ICC.jpg"
+make_sample ./Tests/mangle-tool --break-icc "$WORK/坏ICC.jpg"
+make_sample ./Tests/mangle-tool --apple-jfif "$WORK/坏ICC.jpg"
+cp "$WORK/坏ICC.jpg" "$WORK/坏ICC不校验.jpg"
+expect_reported "ICC 损坏的照片" "$WORK/坏ICC.jpg" "源文件里的 ICC 色彩描述文件损坏，按它解不出图像；去掉它转换"
+check "ICC 损坏的照片：产物的色彩描述是 sRGB" "$(./Tests/probe "$WORK/坏ICC.heic" ProfileName)" "sRGB IEC61966-2.1"
+out=$("$BIN" "$WORK/坏ICC不校验.jpg" 2>&1); st=$?
+check "ICC 损坏的照片：不校验也转得出来" "$st" 0
+grep -qF "源文件里的 ICC 色彩描述文件损坏" <<< "$out" \
+    && pass "ICC 损坏的照片：不校验时写在状态说明里" \
+    || { fail "ICC 损坏的照片：不校验时没说"; sed 's/^/     /' <<< "$out"; }
+
+# 同样坏掉的 ICC，换成普通 JFIF 的 JPEG：ImageIO 不理会它、按 sRGB 解码，转换和键比对都「成功」
+# （两边的色彩描述名都读成 sRGB）。描述文件没原样搬过去必须报，--delete-original 不能删源。
+make_sample ./Tests/fixture "$WORK/悄悄换ICC.jpg"
+make_sample ./Tests/mangle-tool --break-icc "$WORK/悄悄换ICC.jpg"
+expect_reported "ICC 被悄悄换成 sRGB" "$WORK/悄悄换ICC.jpg" "源里嵌的 ICC 色彩描述文件（536 字节）没有原样搬过去，产物里是另一份（sRGB IEC61966-2.1，3144 字节），颜色可能和原图有偏差"
+# 好的描述文件带着 Profile ID（iPhone 照片都带）：ImageIO 写 HEIF 时把它清零，别的字节原样。这不算没搬过去，
+# 不然每一张 iPhone 照片都误报。
+make_sample ./Tests/fixture "$WORK/带ProfileID.jpg"
+make_sample ./Tests/mangle-tool --icc-profile-id "$WORK/带ProfileID.jpg"
+out=$("$BIN" -v --verify "$WORK/带ProfileID.jpg" 2>&1)
+grep -q "元数据校验通过" <<< "$out" \
+    && pass "描述文件带 Profile ID：只差 Profile ID 不报" \
+    || { fail "描述文件带 Profile ID：报了差异"; sed 's/^/     /' <<< "$out"; }
+
+# 量化表坏了的（同样配 iPhone 的 JFIF 段）：ImageIO 照样给一张图，到解码才失败。说清是源解不出来，
+# 不怪编码器——判断要真解一次，光看拿不拿得到图会被它骗过去。
+make_sample ./Tests/fixture "$WORK/坏量化表.jpg"
+make_sample ./Tests/mangle-tool --apple-jfif "$WORK/坏量化表.jpg"
+make_sample ./Tests/mangle-tool --dqt-clobber "$WORK/坏量化表.jpg"
+check "量化表坏了：说清是读不出图像" "$("$BIN" "$WORK/坏量化表.jpg" 2>&1 | head -1)" \
+    "失败 坏量化表.jpg: 读不出图像数据，文件可能不完整或已损坏"
 
 # ImageIO 不读的段：COM 注释、不认识的 APPn（APP11 是 C2PA 用的）、EOI 之后的数据。
 cp "$WORK/照片.jpg" "$WORK/注释段.jpg"

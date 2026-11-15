@@ -56,8 +56,20 @@
 //       数据和它自己的 MPF 段，插入提供方的 MPF 段，接上提供方 EOI 之后的附加图像，改写
 //       MP 条目里的主图长度和附加图像偏移。ImageIO 重新编码 JPEG 时色度抽样只会是 4:2:0
 //       或 4:4:4，要「4:2:2 且带辅助图」的样本只能拿 4:2:2 的照片这样接。
+//   mangle --break-icc <文件.jpg>
+//       把 ICC 描述文件头里的签名 `acsp` 改成 0（没有 ICC 段就先插一份 Display P3）。普通 JFIF 的
+//       JPEG ImageIO 不理会它、按 sRGB 解码；配上 --apple-jfif 就一张图都解不出来。
+//   mangle --icc-profile-id <文件.jpg>
+//       给 ICC 描述文件填上算对的 Profile ID（没有 ICC 段就先插一份 Display P3）。iPhone 照片带着它，
+//       ImageIO 写 HEIF 时清零。
+//   mangle --apple-jfif <文件.jpg>
+//       把 JFIF 段换成 iPhone 写的那种（300 dpi，末尾多 `AMPF`）。ImageIO 见到它换一条更严的解码路子。
+//   mangle --dqt-clobber <文件.jpg>
+//       把第二张量化表的编号改成 0，色度那张就没了定义。配上 --apple-jfif 时 ImageIO 照样给一张图、
+//       到解码才失败。
 
 import CoreGraphics
+import CryptoKit
 @testable import Eclose
 import Foundation
 import ImageIO
@@ -78,6 +90,10 @@ let usage = """
       mangle --graft-aux <文件.jpg> <提供辅助图的.jpg>
       mangle --mpf-type <文件.jpg> <条目号> <类型码十六进制>
       mangle --pad-trailer <文件.jpg>
+      mangle --break-icc <文件.jpg>
+      mangle --icc-profile-id <文件.jpg>
+      mangle --apple-jfif <文件.jpg>
+      mangle --dqt-clobber <文件.jpg>
 """
 
 func die(_ message: String, _ code: Int32 = 1) -> Never {
@@ -90,7 +106,8 @@ guard let first = args.first else { die(usage, 2) }
 let mode = first.hasPrefix("--") ? first : ""
 let rest = mode.isEmpty ? args : Array(args.dropFirst())
 let expected = ["": 2, "--replace": 3, "--segment": 3, "--append": 2, "--unicode-comment": 2, "--strip-trailer": 1, "--8bim": 3,
-                "--color-gainmap": 1, "--graft-aux": 2, "--mpf-type": 3, "--pad-trailer": 1]
+                "--color-gainmap": 1, "--graft-aux": 2, "--mpf-type": 3, "--pad-trailer": 1,
+                "--break-icc": 1, "--icc-profile-id": 1, "--apple-jfif": 1, "--dqt-clobber": 1]
 if mode == "--ifd0" || mode == "--tags" || mode == "--iim" {
     guard rest.count >= 2 else { die(usage, 2) }
 } else {
@@ -500,6 +517,23 @@ func padTrailer() {
     print("尾部 \(count) 字节改成了 0xFF")
 }
 
+let iccID: [UInt8] = Array("ICC_PROFILE".utf8) + [0]
+
+/// 第一个 ICC 段。没有就先插一份 Display P3 的（v4，手机照片里常见的就是它），插在最后一个 APPn 之后。
+/// 段内容是 `ICC_PROFILE\0`、序号、总数，再是描述文件本身。
+func iccSegmentAddingDisplayP3() -> JPEGSegment {
+    guard var layout = JPEGLayout(bytes) else { die("不是 JPEG") }
+    if !layout.segments.contains(where: { $0.marker == 0xE2 && $0.begins(with: iccID, in: bytes) }) {
+        guard let profile = CGColorSpace(name: CGColorSpace.displayP3)?.copyICCData() as Data? else { die("取不到 Display P3 描述文件") }
+        let content = iccID + [1, 1] + [UInt8](profile)
+        let at = layout.segments.prefix { (0xE0...0xEF).contains($0.marker) }.last?.payload.upperBound ?? 2
+        let length = content.count + 2
+        bytes.insert(contentsOf: [0xFF, 0xE2, UInt8(length >> 8), UInt8(length & 0xFF)] + content, at: at)
+        layout = JPEGLayout(bytes)!
+    }
+    return layout.segments.first { $0.marker == 0xE2 && $0.begins(with: iccID, in: bytes) }!
+}
+
 switch mode {
 case "--mpf-type":
     guard let entry = Int(rest[1]), let type = Int(rest[2], radix: 16), (0...0xFF_FFFF).contains(type) else {
@@ -508,6 +542,47 @@ case "--mpf-type":
     setMPFType(entry: entry, to: type)
 case "--pad-trailer":
     padTrailer()
+case "--break-icc":
+    // 弄坏 ICC 色彩描述文件的签名（描述文件第 36–39 字节，本该是 `acsp`）。ImageIO 照样给一张图，
+    // 可要再配上 --apple-jfif 才会一解码就失败；普通 JFIF 的 JPEG 它不理会坏掉的 ICC。而且只对 v4 的
+    // 描述文件：系统给的 sRGB 是 v2，签名、版本号改坏了照样解得出。
+    let icc = iccSegmentAddingDisplayP3()
+    let signature = icc.payload.lowerBound + iccID.count + 2 + 36
+    guard bytes[signature..<(signature + 4)].elementsEqual(Array("acsp".utf8)) else { die("ICC 描述文件的签名不是 acsp") }
+    bytes.replaceSubrange(signature..<(signature + 4), with: [0, 0, 0, 0])
+    print("ICC 描述文件的签名改成了 0")
+case "--icc-profile-id":
+    // 在描述文件头里填上算对了的 Profile ID（第 84–99 字节）：按 ICC 规范，是把标志（44–47）、
+    // 再现意图（64–67）和 Profile ID 本身抹成 0 之后整个描述文件的 MD5。iPhone 照片的描述文件带着它，
+    // 系统给的描述文件这里是 0。没有 ICC 段就先插一份 Display P3 的。
+    let icc = iccSegmentAddingDisplayP3()
+    let start = icc.payload.lowerBound + iccID.count + 2
+    guard bytes[icc.payload.lowerBound + iccID.count + 1] == 1 else { die("描述文件分在几段里，不处理") }
+    var profile = Array(bytes[start..<icc.payload.upperBound])
+    var hashed = profile
+    for r in [44..<48, 64..<68, 84..<100] { hashed.replaceSubrange(r, with: [UInt8](repeating: 0, count: r.count)) }
+    profile.replaceSubrange(84..<100, with: Array(Insecure.MD5.hash(data: hashed)))
+    bytes.replaceSubrange(start..<icc.payload.upperBound, with: profile)
+    print("ICC 描述文件填上了 Profile ID")
+case "--apple-jfif":
+    // 把 JFIF 段换成 iPhone 写的那种：密度 300 dpi，末尾多 4 字节 `AMPF`。ImageIO 见到它解码
+    // 时换了一条路：ICC 坏了它就解不出来（普通 JFIF 的它不理会）；量化表缺了它照样给一张图，
+    // 到解码时才失败（普通 JFIF 的连图都不给）。没有 JFIF 段就插在 SOI 后面。
+    let jfif: [UInt8] = Array("JFIF".utf8) + [0, 1, 1, 1, 0x01, 0x2C, 0x01, 0x2C, 0, 0] + Array("AMPF".utf8)
+    guard let layout = JPEGLayout(bytes) else { die("不是 JPEG") }
+    if let old = layout.segments.first(where: { $0.marker == 0xE0 && $0.begins(with: Array("JFIF".utf8) + [0], in: bytes) }) {
+        replacePayload(of: old, with: jfif)
+    } else {
+        bytes.insert(contentsOf: [0xFF, 0xE0, 0, UInt8(jfif.count + 2)] + jfif, at: 2)
+    }
+    print("JFIF 段换成了 iPhone 的")
+case "--dqt-clobber":
+    // 把第二张量化表的编号改成 0：它盖掉第一张，色度用的那张就没了定义。配上 --apple-jfif 时
+    // ImageIO 照样给一张图、一解码就失败；不配的话连图都不给。
+    let tables: [JPEGSegment] = JPEGLayout(bytes)?.segments.filter({ $0.marker == 0xDB }) ?? []
+    guard tables.count >= 2, bytes[tables[1].payload.lowerBound] & 0x0F != 0 else { die("没有分开存的第二张量化表") }
+    bytes[tables[1].payload.lowerBound] &= 0xF0
+    print("第二张量化表的编号改成了 0")
 case "--color-gainmap":
     colorizeGainMap()
 case "--graft-aux":

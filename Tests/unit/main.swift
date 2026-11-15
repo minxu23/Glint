@@ -3450,6 +3450,26 @@ do {
     try? fm.removeItem(at: dir)
 }
 
+print("去掉坏掉的 ICC（jpegWithoutICC）")
+do {
+    // 一个描述文件可以分在几个 APP2 段里（每段 ICC_PROFILE\0、序号、总数）。全部去掉，别的段原样。
+    func segment(_ marker: UInt8, _ content: [UInt8]) -> [UInt8] {
+        [0xFF, marker, UInt8((content.count + 2) >> 8), UInt8((content.count + 2) & 0xFF)] + content
+    }
+    let icc: [UInt8] = Array("ICC_PROFILE".utf8) + [0]
+    let exif = segment(0xE1, Array("Exif".utf8) + [0, 0, 1, 2])
+    let mpf = segment(0xE2, Array("MPF".utf8) + [0, 9])
+    let scan = segment(0xDA, [1, 2, 3]) + [0x11, 0x22, 0xFF, 0xD9]
+    let withICC = [0xFF, 0xD8] + exif + segment(0xE2, icc + [1, 2, 0xAA]) + mpf + segment(0xE2, icc + [2, 2, 0xBB]) + scan
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("glint-icc-\(UUID().uuidString).jpg")
+    try? Data(withICC).write(to: url)
+    check("分成两段的 ICC 都去掉，别的段与图像数据原样", jpegWithoutICC(url).map { [UInt8]($0) },
+          [0xFF, 0xD8] + exif + mpf + scan)
+    try? Data([0xFF, 0xD8] + exif + mpf + scan).write(to: url)
+    check("没有 ICC：nil（没有可去掉的，不再编一次）", jpegWithoutICC(url) == nil, true)
+    try? FileManager.default.removeItem(at: url)
+}
+
 print("-o 的解读（OutputPlan.resolve）")
 do {
     func plan(_ path: String, _ count: Int) -> String {
