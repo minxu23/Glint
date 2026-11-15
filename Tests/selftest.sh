@@ -19,7 +19,7 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=729
+EXPECTED_ASSERTIONS=730
 EXPECTED_UNIT=1335
 EXPECTED_GUI=363
 
@@ -1884,6 +1884,7 @@ mkdir -p "$Q/不转"
 cp "$Q/相机.jpg" "$Q/不转/甲.jpg"
 cp "$Q/相机.jpg" "$Q/不转/乙.jpg"
 echo "原来就在的文件" > "$Q/不转/乙.heic"
+cp "$Q/不转/乙.heic" "$Q/原来的乙.heic"
 out=$("$BIN" -q 0.4 -f --delete-original "$Q/不转/甲.jpg" "$Q/不转/乙.jpg" 2>&1); st=$?
 check "不转：退出码与跳过一样是 0" "$st" "0"
 for name in 甲 乙; do
@@ -1892,7 +1893,9 @@ for name in 甲 乙; do
 done
 refute "不转：没有产物" "$st" test -e "$Q/不转/甲.heic"
 [ -f "$Q/不转/甲.jpg" ] && [ -f "$Q/不转/乙.jpg" ] && pass "不转：开着 --delete-original 源也在" || fail "不转的源被删了"
-check "不转：目标位置原有的同名文件没被覆盖（开着 -f）" "$(cat "$Q/不转/乙.heic")" "原来就在的文件"
+# 比文件而不是把内容读出来：被覆盖时那是一份 HEIC，打印出来全是乱码。
+cmp -s "$Q/不转/乙.heic" "$Q/原来的乙.heic" \
+    && pass "不转：目标位置原有的同名文件没被覆盖（开着 -f）" || fail "不转：目标位置原有的同名文件被改了"
 grep -qxF "完成 0 个，2 个画质不达标，保留原 JPEG" <<< "$out" \
     && pass "不转：汇总单列画质不达标的个数" || { fail "不转：汇总里没有画质不达标的个数"; sed 's/^/     /' <<< "$out"; }
 
@@ -1910,9 +1913,12 @@ low=$(stat -f %z "$Q/重编/低质量.heic" 2>/dev/null || echo 0)
 high=$(stat -f %z "$Q/重编/重编.heic" 2>/dev/null || echo 0)
 [ "$low" -gt 0 ] && [ "$high" -gt "$low" ] && pass "重编后达标：产物在，比质量 0.4 的那份大（$high > $low 字节）" \
     || fail "重编后达标：产物不在或不比 0.4 的大（$high / $low 字节）"
-psnr=($(grep -oE 'PSNR [0-9.]+' <<< "$line" | cut -d' ' -f2)); ssim=($(grep -oE 'SSIM [0-9.]+' <<< "$line" | cut -d' ' -f2))
-[ "${#psnr[@]}" -eq 2 ] && awk -v a="${psnr[0]}" -v b="${psnr[1]}" -v c="${ssim[0]}" -v d="${ssim[1]}" 'BEGIN { exit !(b > a && d > c) }' \
-    && pass "重编后达标：两个数都比第一遍好（PSNR ${psnr[*]}，SSIM ${ssim[*]}）" || fail "重编后的数没有变好（${psnr[*]} / ${ssim[*]}）"
+# 数组在 set -u 下为空会让脚本中止，所以逐个取。没有那一行时四个都是空的，判失败。
+nums() { grep -oE "$1 [0-9.]+" <<< "$line" | cut -d' ' -f2 | sed -n "${2}p"; }
+p1=$(nums PSNR 1) p2=$(nums PSNR 2) s1=$(nums SSIM 1) s2=$(nums SSIM 2)
+[ -n "$p1" ] && [ -n "$p2" ] && [ -n "$s1" ] && [ -n "$s2" ] \
+    && awk -v a="$p1" -v b="$p2" -v c="$s1" -v d="$s2" 'BEGIN { exit !(b > a && d > c) }' \
+    && pass "重编后达标：两个数都比第一遍好（PSNR $p1 → $p2，SSIM $s1 → $s2）" || fail "重编后的数没有变好（PSNR $p1 → $p2，SSIM $s1 → $s2）"
 out=$("$BIN" -q 0.4 --on-quality-drop retry "$Q/重编/不带v.jpg" 2>&1)
 grep -qE "^    质量 0\.4 画质不达标，改用 0\.95 重编(；.+)?$" <<< "$out" \
     && pass "重编后达标：不带 -v 也在状态说明里留一句" || { fail "不带 -v 时没说用了更高的质量"; sed 's/^/     /' <<< "$out"; }
@@ -1923,6 +1929,7 @@ out=$("$BIN" -q 0.4 --on-quality-drop retry --min-psnr 60 "$Q/仍不达标.jpg" 
 grep -qE "^仍不达标\.jpg  画质下降明显（$measured，门槛 0\.90 / 60 dB），用质量 0\.95 重编后仍不达标（$measured），没有转换，保留原 JPEG$" <<< "$out" \
     && pass "重编后仍不达标：说明重编过、仍不达标" || { fail "重编后仍不达标：没有那一行"; sed 's/^/     /' <<< "$out"; }
 refute "重编后仍不达标：没有产物" "$st" test -e "$Q/仍不达标.heic"
+refute "不转、重编后仍不达标：都不留临时文件" 0 grep -q '^\.glint-' < <(ls -A "$Q" "$Q/不转")
 cp "$Q/相机.jpg" "$Q/质量高.jpg"
 out=$("$BIN" -q 0.95 --on-quality-drop retry --min-psnr 60 "$Q/质量高.jpg" 2>&1); st=$?
 grep -qE "^质量高\.jpg  画质下降明显（$measured，门槛 0\.90 / 60 dB），质量已不低于 0\.95，没有重编，没有转换，保留原 JPEG$" <<< "$out" \

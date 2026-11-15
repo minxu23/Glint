@@ -240,8 +240,8 @@ func qualityMeasurement(_ a: RGBPixels, _ b: RGBPixels) -> QualityMeasurement {
 /// 每条带的行数除最后一条外都得是 16 的倍数（块不跨条带）；整张图当一块时（宽或高不到 16）只能一次喂完。
 ///
 /// 块里的像素一次读 16 个（一行 64 字节），用 SIMD 一遍算完平方误差与五个和（Σa、Σb、Σa²、Σb²、Σab）：
-/// 平方误差是整数，精确；亮度先减 128 再累加（Float，每个通道只加 16 行），块的五个和换成 Double 再算
-/// SSIM。块以外的像素（右边、下边凑不满 16 的）只进平方误差，逐个算。除了喂进来的那一条，只多占每块一个数。
+/// 平方误差是整数，精确；亮度先减 128 再累加（Float，每条 SIMD 通道只累加一列的 16 个数），块的五个和
+/// 换成 Double 再算 SSIM。块以外的像素（右边、下边凑不满 16 的）只进平方误差，逐个算。除了喂进来的那一条，只多占每块一个数。
 final class QualityTally {
     let width: Int
     let height: Int
