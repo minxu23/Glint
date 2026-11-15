@@ -133,8 +133,8 @@ func rawProductDepthProblem(_ url: URL) -> String? {
 func rawMetadataDiff(source: URL, dest: URL, sourceImage: CGImageSource, destImage: CGImageSource) -> [String] {
     let sourceProps = CGImageSourceCopyPropertiesAtIndex(sourceImage, 0, nil) as? [CFString: Any] ?? [:]
     let productProps = CGImageSourceCopyPropertiesAtIndex(destImage, 0, nil) as? [CFString: Any] ?? [:]
-    let before = metadataKeySpace(of: sourceImage, url: source, repairing: false)
-    let after = metadataKeySpace(of: destImage, url: dest, repairing: false)
+    let before = metadataKeySpace(of: sourceImage, userComment: .absent)
+    let after = metadataKeySpace(of: destImage, userComment: .absent)
     let keySpace: [String]
     if let carried = carriedRawExif(source: source, dest: dest, type: CGImageSourceGetType(sourceImage) as String?) {
         keySpace = rawCarriedKeySpaceDiff(before: before, after: after, packets: carried.packets) + carried.issues

@@ -1112,7 +1112,7 @@ let sourceWithLightSource = jpegWithExif(tiffLE([(0x8769, 4, 1, le32(afterOneEnt
 check("前提：手搭的源里读得出 Exif 子 IFD 的 LightSource",
       TIFFStructure(jpeg: sourceWithLightSource).map { rawExifEntries($0).map(\.tag) }, [0x8769, 0x9208])
 check("产物不是读得通的 HEIF：报无法核对",
-      rawExifDiff(source: sourceWithLightSource, dest: Array("garbage".utf8), viewLosses: [], makerNoteReported: false,
+      rawExifDiff(source: SourceJPEG(sourceWithLightSource), dest: Array("garbage".utf8), viewLosses: [], makerNoteReported: false,
                   sourceViewHasImageUniqueID: false).issues,
       ["无法核对原始 EXIF 标签：产物里的 EXIF 读不出，源里有 1 个标签没法确认带过去了"])
 
@@ -1177,7 +1177,7 @@ try? FileManager.default.createDirectory(at: uidDir, withIntermediateDirectories
 func writtenUniqueID(_ jpeg: [UInt8], props: [CFString: Any] = [:]) -> String? {
     let url = uidDir.appendingPathComponent("\(UUID().uuidString).jpg")
     guard (try? Data(jpeg).write(to: url)) != nil else { return "<写不出样本>" }
-    let exif = propertiesToWrite(props, source: url)[kCGImagePropertyExifDictionary] as? [CFString: Any]
+    let exif = propertiesToWrite(props, source: SourceJPEG(contentsOf: url))[kCGImagePropertyExifDictionary] as? [CFString: Any]
     return exif?[kCGImagePropertyExifImageUniqueID] as? String
 }
 check("前提：手搭的 JPEG 里读得出 Exif 子 IFD 的 0xA420",
@@ -1542,20 +1542,20 @@ if let jpegSource = tinyJPEGSource() {
 
 print("照搬过的产物：Exif 项结束在文件末尾，TIFF 必须与源逐字节相同")
 let carriedSample = try! carryingExif(carryTIFF, into: buildHEIF(HEIFSpec()).bytes).get()
-check("照搬过、与源相同：不报", carriedExifIssues(source: jpegWithExif(carryTIFF), dest: carriedSample, comment: noComment), [])
+check("照搬过、与源相同：不报", carriedExifIssues(source: SourceJPEG(jpegWithExif(carryTIFF)), dest: carriedSample, comment: noComment), [])
 var alteredTIFF = carryTIFF
 alteredTIFF[alteredTIFF.count - 1] ^= 0x01
 check("照搬过、最后一个字节不同：报出长度与位置",
-      carriedExifIssues(source: jpegWithExif(alteredTIFF), dest: carriedSample, comment: noComment),
+      carriedExifIssues(source: SourceJPEG(jpegWithExif(alteredTIFF)), dest: carriedSample, comment: noComment),
       ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(carryTIFF.count) 字节 → \(carryTIFF.count) 字节，第 \(carryTIFF.count) 个字节起不同）"])
 check("照搬过、源比产物多几个字节：从产物结束处算起不同",
-      carriedExifIssues(source: jpegWithExif(carryTIFF + [1, 2, 3]), dest: carriedSample, comment: noComment),
+      carriedExifIssues(source: SourceJPEG(jpegWithExif(carryTIFF + [1, 2, 3])), dest: carriedSample, comment: noComment),
       ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（\(carryTIFF.count + 3) 字节 → \(carryTIFF.count) 字节，第 \(carryTIFF.count + 1) 个字节起不同）"])
 check("照搬过、源里没有 EXIF 段：按 0 字节比，照报",
-      carriedExifIssues(source: [0xFF, 0xD8, 0xFF, 0xD9], dest: carriedSample, comment: noComment),
+      carriedExifIssues(source: SourceJPEG([0xFF, 0xD8, 0xFF, 0xD9]), dest: carriedSample, comment: noComment),
       ["变化 EXIF 数据块：照搬过来的 EXIF 与源不一致（0 字节 → \(carryTIFF.count) 字节，第 1 个字节起不同）"])
 check("ImageIO 那种布局（Exif 项在 mdat 靠前）：不管与源同不同都不报",
-      carriedExifIssues(source: jpegWithExif(carryTIFF), dest: buildHEIF(HEIFSpec()).bytes, comment: noComment), [])
+      carriedExifIssues(source: SourceJPEG(jpegWithExif(carryTIFF)), dest: buildHEIF(HEIFSpec()).bytes, comment: noComment), [])
 check("Exif 项结束在文件末尾的判定：照搬过的是，ImageIO 那种布局不是",
       [heifExifEndsAtFileEnd(carriedSample), heifExifEndsAtFileEnd(buildHEIF(HEIFSpec()).bytes)], [true, false])
 
@@ -1775,10 +1775,10 @@ check("报出：type 不是 7", rejected(notUndefined), true)
 check("报出：源里两个 0x9286 时不认改写",
       rejected(expectedRewrite(dupSource, bigEndian: true, value: asciiHead + [0x78]), source: dupSource, text: "x"), true)
 check("carriedExifIssues 接上这条规则：改写过的不报，源侧备注读得出时照报",
-      [carriedExifIssues(source: jpegWithExif(mmSource),
+      [carriedExifIssues(source: SourceJPEG(jpegWithExif(mmSource)),
                          dest: try! carryingExif(mmRewrite, into: buildHEIF(HEIFSpec()).bytes).get(),
                          comment: unread(emojiText)).count,
-       carriedExifIssues(source: jpegWithExif(mmSource),
+       carriedExifIssues(source: SourceJPEG(jpegWithExif(mmSource)),
                          dest: try! carryingExif(mmRewrite, into: buildHEIF(HEIFSpec()).bytes).get(),
                          comment: noComment).count], [0, 1])
 
@@ -2339,14 +2339,14 @@ if case .converted = convert(xattrJPEG, opts: ConversionOptions(), dest: xattrHE
 } else {
     fail("前提：转换成功")
 }
-let xattrBaseline = metadataDiff(source: xattrJPEG, dest: xattrHEIC)
+let xattrBaseline = metadataDiff(source: xattrJPEG, jpeg: SourceJPEG(contentsOf: xattrJPEG), dest: xattrHEIC)
 check("转换后不报扩展属性（被跳过的两个产物上没有）", xattrBaseline.filter { $0.contains("扩展属性") }, [])
 /// 产物上的属性还原成源上会被拷的那些，再做 `edit`，返回 metadataDiff 比转换后多出来的行。
 func xattrIssuesAfter(_ edit: (String) -> Void) -> [String] {
     for name in extendedAttributeNames(xattrHEIC.path) ?? [] { _ = removexattr(xattrHEIC.path, name, XATTR_NOFOLLOW) }
     _ = copyExtendedAttributes(from: xattrJPEG.path, to: xattrHEIC.path)
     edit(xattrHEIC.path)
-    return metadataDiff(source: xattrJPEG, dest: xattrHEIC).filter { !xattrBaseline.contains($0) }
+    return metadataDiff(source: xattrJPEG, jpeg: SourceJPEG(contentsOf: xattrJPEG), dest: xattrHEIC).filter { !xattrBaseline.contains($0) }
 }
 func setX(_ path: String, _ name: String, _ value: [UInt8]) {
     _ = setxattr(path, name, value, value.count, 0, XATTR_NOFOLLOW)
@@ -3099,7 +3099,7 @@ if let heic = try? [UInt8](Data(contentsOf: systemHEIC)), !cr3Block.isEmpty {
         check("MakerNote 不在", entries["ExifIFD 927C"], nil)
         let url = carryRoot.appendingPathComponent("照搬.heic")
         try? Data(carried).write(to: url)
-        let view = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { metadataKeySpace(of: $0, url: url, repairing: false) } ?? [:]
+        let view = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { metadataKeySpace(of: $0, userComment: .absent) } ?? [:]
         check("ImageIO 读得出照搬后的相机与镜头", [view["{TIFF}/Model"], view["{Exif}/LensModel"]], ["Canon EOS R5", "RF24-105mm F4 L IS USM"])
     } else { fail("CR3 拼出来的块放不进 HEIC"); for _ in 0..<4 { fail("（同上）") } }
     // 佳能 CR3 关着定位时 GPS 字典里只有 GPSVersion：ImageIO 重写时整个丢掉；照搬后 GPS IFD 原样在产物里。
@@ -3114,7 +3114,7 @@ if let heic = try? [UInt8](Data(contentsOf: systemHEIC)), !cr3Block.isEmpty {
         if case .success(let carried) = carryingExif(versionBlock, into: heic) {
             let url = carryRoot.appendingPathComponent("\(what).heic")
             try? Data(carried).write(to: url)
-            let view = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { metadataKeySpace(of: $0, url: url, repairing: false) } ?? [:]
+            let view = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { metadataKeySpace(of: $0, userComment: .absent) } ?? [:]
             check("\(what)：照搬后 GPS IFD 原样在产物里", heicEntries(carried)["GPS 0000"], "02030000")
             check("\(what)：ImageIO 读 HEIC 时\(shown ? "" : "不")显示 GPSVersion",
                   collapsingVersions(view)["{GPS}/GPSVersion"], shown ? "2.3.0.0" : nil)
@@ -3270,7 +3270,7 @@ if case .success(let parts) = cameraRawExifParts(realCR3, type: cr3Type), let bl
     let carried = try! carryingExif(block, into: systemBytes).get()
     let carriedURL = carryRoot.appendingPathComponent("真CR3结构.heic")
     try? Data(carried).write(to: carriedURL)
-    let productView = CGImageSourceCreateWithURL(carriedURL as CFURL, nil).map { metadataKeySpace(of: $0, url: carriedURL, repairing: false) } ?? [:]
+    let productView = CGImageSourceCreateWithURL(carriedURL as CFURL, nil).map { metadataKeySpace(of: $0, userComment: .absent) } ?? [:]
     check("前提：产物视图里 ISO 叫 ISOSpeedRatings、显示 OffsetTime、海拔读成 7.650000095368341",
           [productView["{Exif}/ISOSpeedRatings[0]"], productView["{Exif}/OffsetTime"], productView["{GPS}/Altitude"]],
           ["100", "+02:00", "7.650000095368341"])
@@ -3588,10 +3588,10 @@ do {
     let withICC = [0xFF, 0xD8] + exif + segment(0xE2, icc + [1, 2, 0xAA]) + mpf + segment(0xE2, icc + [2, 2, 0xBB]) + scan
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("glint-icc-\(UUID().uuidString).jpg")
     try? Data(withICC).write(to: url)
-    check("分成两段的 ICC 都去掉，别的段与图像数据原样", jpegWithoutICC(url).map { [UInt8]($0) },
+    check("分成两段的 ICC 都去掉，别的段与图像数据原样", SourceJPEG(contentsOf: url).flatMap(jpegWithoutICC).map { [UInt8]($0) },
           [0xFF, 0xD8] + exif + mpf + scan)
     try? Data([0xFF, 0xD8] + exif + mpf + scan).write(to: url)
-    check("没有 ICC：nil（没有可去掉的，不再编一次）", jpegWithoutICC(url) == nil, true)
+    check("没有 ICC：nil（没有可去掉的，不再编一次）", SourceJPEG(contentsOf: url).flatMap(jpegWithoutICC) == nil, true)
     try? FileManager.default.removeItem(at: url)
 }
 
@@ -4199,6 +4199,164 @@ check(qcBatchSeen.count == 4 && qcBatchSeen.allSatisfy(\.passed), "前提：一�
 check(qcBatchSeen.allSatisfy { $0.retained > 0 }, "批量进行中：核对用的缓冲留着（\(qcBatchSeen.map(\.retained))）")
 check("一批转完：核对用的缓冲全部还掉", QualityBuffers.shared.retainedBytes, 0)
 try? FileManager.default.removeItem(at: qcQualityRoot)
+
+print("一次转换里源 JPEG 只读一次文件、只解析一次段结构")
+// 数两样，都靠测试版库里的钩子（-D ECLOSE_TESTING，交付的库里没有）：
+//   解析：JPEGLayout.init 的输入与源文件的全部字节逐字节相同的次数（parseObserver）。HEIC 产物、
+//         MPF 登记的内嵌 JPEG、包着一块 EXIF 的小 JPEG 之类字节不同，不计。
+//   读：  SourceJPEG 从源文件的路径读文件的次数（readObserver）。
+// convert 里任何一处改回自己读源、自己解析（TIFFStructure(jpeg:)、JPEGLayout(...)、带字节的薄包装），
+// 解析数就不是 1。样本带 EXIF（含 UserComment）、GPS、IPTC 和 ICC，照搬、照搬的自检、--verify 各项都走得到。
+let onceRoot = FileManager.default.temporaryDirectory.appendingPathComponent("glint-once-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: onceRoot, withIntermediateDirectories: true)
+/// 造一张样本写到 `name`.jpg，扩展属性里带「照片」的说明（--embed-caption 用）。
+/// 像素按 `space` 解释，ImageIO 把它的 ICC 写进 JPEG（默认 Display P3：系统的 sRGB 它不写）。
+func onceSource(_ name: String, space: CFString = CGColorSpace.displayP3) -> URL {
+    let url = onceRoot.appendingPathComponent("\(name).jpg")
+    let props: [CFString: Any] = [
+        kCGImageDestinationLossyCompressionQuality: 0.9,
+        kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Glint", kCGImagePropertyTIFFModel: "样本",
+                                         kCGImagePropertyTIFFDateTime: "2024:09:15 18:42:07"],
+        kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2024:09:15 18:42:07",
+                                         kCGImagePropertyExifUserComment: "备注"],
+        kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 30.25, kCGImagePropertyGPSLatitudeRef: "N",
+                                        kCGImagePropertyGPSLongitude: 120.15, kCGImagePropertyGPSLongitudeRef: "E"],
+        kCGImagePropertyIPTCDictionary: [kCGImagePropertyIPTCCity: "杭州", kCGImagePropertyIPTCKeywords: ["西湖"]],
+    ]
+    let pixels = rgbx(160, 120, photoLike)
+    guard let colorSpace = CGColorSpace(name: space),
+          let provider = CGDataProvider(data: Data(pixels) as CFData),
+          let image = CGImage(width: 160, height: 120, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 160 * 4,
+                              space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                              provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+          let out = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return url }
+    CGImageDestinationAddImage(out, image, props as CFDictionary)
+    _ = CGImageDestinationFinalize(out)
+    let caption = Array("湖边".utf8)
+    _ = setxattr(url.path, photosCaptionXattr, caption, caption.count, 0, XATTR_NOFOLLOW)
+    return url
+}
+/// 在 `source` 上转一次，数源的解析和读文件次数。
+func countingParsesAndReads(_ source: URL, _ opts: ConversionOptions, encode: @escaping HEIFEncoder = encodeHEIF)
+    -> (result: ConvertResult, parses: Int, reads: Int) {
+    let whole = [UInt8]((try? Data(contentsOf: source)) ?? Data())
+    let path = source.resolvingSymlinksInPath().path
+    var parses = 0, reads = 0
+    JPEGLayout.parseObserver = { if $0 == whole { parses += 1 } }
+    SourceJPEG.readObserver = { if $0.resolvingSymlinksInPath().path == path { reads += 1 } }
+    defer { JPEGLayout.parseObserver = nil; SourceJPEG.readObserver = nil }
+    let dest = source.deletingPathExtension().appendingPathExtension("heic")
+    let result = convert(source, opts: opts, dest: dest, encode: encode)
+    return (result, parses, reads)
+}
+/// 跑一种选项组合：转换成功（`converted` 另外判），源解析 1 次、读 1 次。
+func expectOnce(_ name: String, _ opts: ConversionOptions, encode: @escaping HEIFEncoder = encodeHEIF,
+                converted: (ConversionReport) -> Bool = { _ in true }) {
+    let source = onceSource(name)
+    let run = countingParsesAndReads(source, opts, encode: encode)
+    guard case .converted(let r) = run.result else {
+        fail("\(name)：转换没有成功（\(run.result)）"); fail("\(name)：源解析 1 次"); fail("\(name)：源读 1 次")
+        return
+    }
+    check(converted(r), "\(name)：转换成功，走到了这一组要走的路")
+    check("\(name)：源 JPEG 只解析 1 次", run.parses, 1)
+    check("\(name)：源文件只读 1 次", run.reads, 1)
+}
+let onceProbe = SourceJPEG(contentsOf: onceSource("前提"))
+check(onceProbe?.exif != nil && onceProbe?.layout?.segments.contains { $0.marker == 0xE2 } == true,
+      "前提：样本有 EXIF 段和 ICC 段")
+var onceDefault = ConversionOptions()
+onceDefault.jobs = 1
+expectOnce("默认（照搬 EXIF、核对画质、不校验）", onceDefault, converted: {
+    if case .carried = $0.rawExif, case .passed = $0.quality { return $0.verification == .notVerified }
+    return false
+})
+var onceVerify = onceDefault
+onceVerify.verify = true
+expectOnce("--verify", onceVerify, converted: {
+    if case .carried = $0.rawExif { return $0.verification != .notVerified }
+    return false
+})
+var onceCaption = onceVerify
+onceCaption.embedCaption = true
+expectOnce("--verify --embed-caption", onceCaption, converted: { $0.caption == .written(characters: 2) })
+var onceNoRaw = onceVerify
+onceNoRaw.rawExif = false
+expectOnce("--verify --no-raw-exif", onceNoRaw, converted: { $0.rawExif == nil && $0.verification != .notVerified })
+var onceNoQuality = onceVerify
+onceNoQuality.qualityCheck = false
+expectOnce("--verify --no-quality-check", onceNoQuality, converted: { $0.quality == nil })
+var onceDelete = onceDefault
+onceDelete.deleteOriginal = true
+expectOnce("--delete-original", onceDelete, converted: { $0.verification != .notVerified })
+var onceDry = onceDefault
+onceDry.dryRun = true
+expectOnce("-n 预演", onceDry, converted: { $0.outBytes == 0 })
+// 画质不达标、提高质量再编一遍：「编码 + 照搬」做两遍，照搬和它的自检也跑两遍，源照样只解析一次。
+var onceRetry = onceVerify
+onceRetry.onQualityDrop = .retry
+let onceRecorder = QualityRecorder(goodAt: [qualityRetryLevel])
+expectOnce("画质不达标、提高质量重编", onceRetry, encode: onceRecorder.encode, converted: {
+    if case .passedAfterRetry = $0.quality, case .carried = $0.rawExif { return true }
+    return false
+})
+check("前提：重编那一组确实编了两遍", onceRecorder.qualities, [onceRetry.quality, qualityRetryLevel])
+// ICC 坏了、按它解不出图像：去掉 ICC 再编（jpegWithoutICC）也用同一份。做法同 mangle 的
+// --break-icc 加 --apple-jfif：Display P3（v4 描述文件）的签名 `acsp` 抹成 0，JFIF 段换成 iPhone 那种。
+let brokenICCURL = onceSource("坏ICC", space: CGColorSpace.displayP3)
+if var bytes = (try? Data(contentsOf: brokenICCURL)).map({ [UInt8]($0) }),
+   let layout = JPEGLayout(bytes), let icc = iccSegments(bytes, layout).first {
+    let signature = icc.payload.lowerBound + 12 + 2 + 36
+    if bytes[signature..<(signature + 4)].elementsEqual(Array("acsp".utf8)) {
+        bytes.replaceSubrange(signature..<(signature + 4), with: [0, 0, 0, 0])
+    }
+    let jfif: [UInt8] = Array("JFIF".utf8) + [0, 1, 1, 1, 0x01, 0x2C, 0x01, 0x2C, 0, 0] + Array("AMPF".utf8)
+    let app0: [UInt8] = [0xFF, 0xE0, 0, UInt8(jfif.count + 2)] + jfif
+    if let old = layout.segments.first(where: { $0.marker == 0xE0 }) {
+        bytes.replaceSubrange((old.payload.lowerBound - 4)..<old.payload.upperBound, with: app0)
+    } else {
+        bytes.insert(contentsOf: app0, at: 2)
+    }
+    try? Data(bytes).write(to: brokenICCURL)
+}
+let brokenRun = countingParsesAndReads(brokenICCURL, onceVerify)
+if case .converted(let r) = brokenRun.result, case .differences(let d) = r.verification, d.contains(damagedICCNotice) {
+    pass("ICC 坏了：去掉 ICC 转换，走到了这一组要走的路")
+} else {
+    fail("ICC 坏了：没有走到去掉 ICC 那一路（\(brokenRun.result)）")
+}
+check("ICC 坏了：源 JPEG 只解析 1 次", brokenRun.parses, 1)
+check("ICC 坏了：源文件只读 1 次", brokenRun.reads, 1)
+// MPF 旧索引（staleMPFNotice）也用同一份：在 EXIF 段后面插一个 APP2 `MPF\0`，第二个条目是一张
+// 增益图，偏移指到文件之外。默认照删源，--keep-stale-mpf 保留，两种都数。
+func withStaleMPF(_ url: URL) {
+    guard var bytes = (try? Data(contentsOf: url)).map({ [UInt8]($0) }), let layout = JPEGLayout(bytes),
+          let exif = layout.segments.first(where: { $0.marker == 0xE1 }) else { return }
+    var tiff: [UInt8] = [0x49, 0x49, 0x2A, 0] + le32(8) + le16(1) + le16(0xB002) + le16(7) + le32(32) + le32(26) + le32(0)
+    tiff += le32(0x030000) + le32(100) + le32(0) + le16(0) + le16(0)
+    tiff += le32(0x050000) + le32(1000) + le32(0x10_0000) + le16(0) + le16(0)
+    let payload = Array("MPF".utf8) + [0] + tiff
+    bytes.insert(contentsOf: [0xFF, 0xE2, 0, UInt8(payload.count + 2)] + payload, at: exif.payload.upperBound)
+    try? Data(bytes).write(to: url)
+}
+let staleNotice = "原图的 MPF 索引登记的附加图像（增益图，类型码 0x050000，1000 字节）不在文件里"
+for keep in [false, true] {
+    let name = keep ? "MPF 旧索引、--keep-stale-mpf" : "MPF 旧索引、照删"
+    let source = onceSource(name)
+    withStaleMPF(source)
+    var opts = onceDelete
+    opts.keepStaleMPF = keep
+    let run = countingParsesAndReads(source, opts)
+    if case .converted(let r) = run.result, r.note?.contains(staleNotice) == true,
+       r.sourceDeleted == !keep, r.note?.contains("按设置，原图缺了 MPF 登记的附加图像时保留源文件") == keep {
+        pass("\(name)：转换成功，走到了这一组要走的路")
+    } else {
+        fail("\(name)：没有走到这一组要走的路（\(run.result)）")
+    }
+    check("\(name)：源 JPEG 只解析 1 次", run.parses, 1)
+    check("\(name)：源文件只读 1 次", run.reads, 1)
+}
+try? FileManager.default.removeItem(at: onceRoot)
 
 print("命令行参数解析")
 func parsed(_ args: [String]) -> ConversionOptions? {

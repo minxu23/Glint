@@ -22,9 +22,15 @@ struct TIFFStructure {
     static let exifIFDPointer = 0x8769
 
     /// 在 JPEG 里找带 `Exif\0\0` 的 APP1 并解析出 TIFF 头；没有或不合法就是 nil。
+    /// 要先解析段结构；手里已有 SourceJPEG 的用它的 `exif`。
     init?(jpeg bytes: [UInt8]) {
+        self.init(jpeg: bytes, layout: JPEGLayout(bytes))
+    }
+
+    /// 同上，`layout` 是 `bytes` 已经解析好的段结构（nil 时就是 nil）。取第一个这样的 APP1。
+    init?(jpeg bytes: [UInt8], layout: JPEGLayout?) {
         let exifID: [UInt8] = Array("Exif".utf8) + [0, 0]
-        guard let layout = JPEGLayout(bytes),
+        guard let layout,
               let app1 = layout.segments.first(where: { $0.marker == 0xE1 && $0.begins(with: exifID, in: bytes) })
         else { return nil }
         let base = app1.payload.lowerBound + exifID.count
@@ -140,16 +146,15 @@ struct TIFFStructure {
 // 转换时的修补、照搬时的备注改写（SourceUserComment.toRepair）和 --verify 的备注原文核对
 // （userCommentOriginalIssues）都以它为准。
 
-/// 从 JPEG 文件里直接读出 EXIF UserComment；读不出文件时是 `.absent`。
-func rawExifUserComment(of url: URL) -> UserCommentReading {
-    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return .absent }
-    return rawExifUserComment(in: [UInt8](data))
+/// 源 JPEG 里的 EXIF UserComment，自己解析原始字节。不是带 EXIF 的 JPEG 时是 `.absent`。
+func rawExifUserComment(in jpeg: SourceJPEG) -> UserCommentReading {
+    guard let tiff = jpeg.exif, let value = rawUserCommentValue(tiff) else { return .absent }
+    return readUserComment(value)
 }
 
-/// 同 rawExifUserComment(of:)，读的是已经在内存里的 JPEG 字节。不是带 EXIF 的 JPEG 时是 `.absent`。
+/// 同上，给手里只有字节的调用方（「照片」备注那一路读的是文件开头的一段）。
 func rawExifUserComment(in bytes: [UInt8]) -> UserCommentReading {
-    guard let tiff = TIFFStructure(jpeg: bytes), let value = rawUserCommentValue(tiff) else { return .absent }
-    return readUserComment(value)
+    rawExifUserComment(in: SourceJPEG(bytes))
 }
 
 /// Exif 子 IFD 里（第一个）0x9286 条目的全部值字节，含字符集头；没有这一条或值读不出是 nil。

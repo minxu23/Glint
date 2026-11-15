@@ -17,9 +17,9 @@ import Foundation
 import ImageIO
 
 /// 源文件里时间字段的原始值，键路径与 metadataKeySpace 一致。读不出的字段不出现。
-func rawTimeFields(of bytes: [UInt8]) -> [String: String] {
+func rawTimeFields(of jpeg: SourceJPEG) -> [String: String] {
     var fields: [String: String] = [:]
-    if let tiff = TIFFStructure(jpeg: bytes) {
+    if let tiff = jpeg.exif {
         let ifd0Tags: [(Int, String)] = [
             (0x0132, metadataKey(kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFDateTime)),
         ]
@@ -34,9 +34,9 @@ func rawTimeFields(of bytes: [UInt8]) -> [String: String] {
         let exifIFD = tiff.exifIFD
         for (tag, key) in exifTags { fields[key] = tiff.ascii(in: exifIFD, tag: tag) }
     }
-    guard let layout = JPEGLayout(bytes) else { return fields }
-    fields.merge(rawIIMTimes(bytes, layout)) { $1 }
-    fields.merge(rawXMPTimes(bytes, layout)) { $1 }
+    guard let layout = jpeg.layout else { return fields }
+    fields.merge(rawIIMTimes(jpeg.bytes, layout)) { $1 }
+    fields.merge(rawXMPTimes(jpeg.bytes, layout)) { $1 }
     return fields
 }
 

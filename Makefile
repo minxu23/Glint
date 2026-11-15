@@ -26,7 +26,8 @@ GUI       := Sources/GUI/main.swift $(GUI_LIB)
 #   build/release  命令行、应用、截图工具链这一份。它们只看得见 public 的东西，
 #                  公开面够不够用由它们能不能编过来证明。
 #   build/testing  多一个 -enable-testing，测试工具 `@testable import Eclose` 用它，
-#                  好直接断言 internal 的规则函数。
+#                  好直接断言 internal 的规则函数。还多一个 -D ECLOSE_TESTING：源码里
+#                  `#if ECLOSE_TESTING` 的那几个计数钩子（数解析、读文件的次数）只编进这一份。
 # 为什么不让测试工具继续直接编 Eclose 的源码：那样命令行里的 Arguments.swift（它要
 # `import Eclose`）就链不进单测了。为什么不只编一份带 -enable-testing 的：交付出去的
 # 命令和应用不该链一份为测试放开了 internal 符号的库。
@@ -52,7 +53,7 @@ $(ECLOSE_RELEASE): $(ECLOSE)
 	$(call build-eclose,)
 
 $(ECLOSE_TESTING): $(ECLOSE)
-	$(call build-eclose,-enable-testing)
+	$(call build-eclose,-enable-testing -D ECLOSE_TESTING)
 
 # 链 Eclose 的产物把库本身当输入交给 swiftc（它认 .a，直接拿去链接），-I 指向
 # .swiftmodule 所在的目录。库写在依赖里，所以 $^ 里就有它：改了 Eclose 源码 →

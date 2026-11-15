@@ -733,20 +733,21 @@ func xmpKeys(_ tags: [(path: String, value: String)],
 /// 两层缺一不可：属性字典（含 UserComment 的修补）和 XMP 包。只摊平前者会让
 /// 所有 `XMP/...` 键静默缺席——不是"查不到"，是"无条件查不到"。
 ///
-/// `repairing: false` 只关掉 UserComment 那一处修补，XMP 层照旧——给
-/// Tests/probe 的 `--no-repair` 用，那一轮的前提恰恰是"ImageIO 自己读不出来"。
-/// 做成参数而不是让调用方自己拼一份：自己拼就可能漏掉某一层，而漏掉是静默的
+/// `userComment` 是这张图里 UserComment 自己解析原始字节的结果（rawExifUserComment），
+/// 属性字典据它修补（repairedProperties）。`.absent` 什么都不修补，只关掉这一处，XMP 层照旧：
+/// 产物（HEIC 不以 JPEG 的 SOI 开头，自己解析读出的总是 `.absent`）、RAW、Tests/probe 的
+/// `--no-repair`（那一轮的前提恰恰是"ImageIO 自己读不出来"）都传它。没有默认值：源 JPEG 漏传
+/// 就会静默地不修补。做成参数而不是让调用方自己拼一份：自己拼就可能漏掉某一层，而漏掉是静默的
 /// ——漏了 XMP 层的探针对每个 XMP 键都答「无」。
 ///
 /// 修补了 UserComment 时，XMP 层里与 ImageIO 原来读出的 `{Exif}/UserComment` 同值的
 /// `exif:UserComment` 也换成修补后的文本：那是 ImageIO 从同一段 EXIF 字节合成的同一个误读
 /// （`ASCII` 头里的 UTF-8 按 Latin-1 读出的乱码），产物里它跟着 EXIF 变对，不换就会被报成变化。
 /// 值不同的（XMP 包里自己写的备注）不动。
-func metadataKeySpace(of image: CGImageSource, url: URL,
-                      repairing: Bool = true) -> [String: String] {
+func metadataKeySpace(of image: CGImageSource, userComment: UserCommentReading) -> [String: String] {
     var flat: [String: String] = [:]
     let original = imageProperties(image)
-    let props = repairing ? repairedProperties(original, url: url) : original
+    let props = repairedProperties(original, userComment: userComment)
     flatten(props, into: &flat)
     flat = keyingAuxiliaryDataByType(flat)
     if let m = CGImageSourceCopyMetadataAtIndex(image, 0, nil) {
@@ -800,12 +801,17 @@ func keyingAuxiliaryDataByType(_ flat: [String: String]) -> [String: String] {
 
 /// --verify 的源侧键空间：属性视图加 XMP（metadataKeySpace），时间字段以原始字节为准，
 /// 覆盖属性视图里被调和过的值（见 RawTimes.swift）。转换时照搬 EXIF 的自检用同一份。
-func sourceKeySpace(of image: CGImageSource, url: URL, bytes: [UInt8]) -> [String: String] {
-    metadataKeySpace(of: image, url: url).merging(rawTimeFields(of: bytes)) { _, raw in raw }
+/// `image` 与 `jpeg` 是同一个源文件。
+func sourceKeySpace(of image: CGImageSource, jpeg: SourceJPEG) -> [String: String] {
+    metadataKeySpace(of: image, userComment: rawExifUserComment(in: jpeg))
+        .merging(rawTimeFields(of: jpeg)) { _, raw in raw }
 }
 
 /// 比对源与目标的元数据，返回丢失/变化的条目描述。
-func metadataDiff(source: URL, dest: URL) -> [String] {
+///
+/// `jpeg` 是 convert 读好的那一份源 JPEG（SourceJPEG），这里不再读源文件；源是 JPEG 而它是 nil
+/// （convert 读不出源文件）时报无法读取。源是 RAW 时不用它，传 nil。
+func metadataDiff(source: URL, jpeg: SourceJPEG?, dest: URL) -> [String] {
     guard let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil),
           let destImage = CGImageSourceCreateWithURL(dest as CFURL, nil) else {
         return ["无法重新打开文件进行校验"]
@@ -814,27 +820,26 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
     if SourceKind(typeIdentifier: CGImageSourceGetType(sourceImage) as String?) == .raw {
         return rawMetadataDiff(source: source, dest: dest, sourceImage: sourceImage, destImage: destImage)
     }
-    guard let data = try? Data(contentsOf: source, options: .mappedIfSafe) else {
+    guard let jpeg else {
         return ["无法重新读取源文件进行校验"]
     }
     guard let destData = try? Data(contentsOf: dest, options: .mappedIfSafe) else {
         return ["无法重新读取产物进行校验"]
     }
-    let bytes = [UInt8](data)
-    let before = sourceKeySpace(of: sourceImage, url: source, bytes: bytes)
-    let after = metadataKeySpace(of: destImage, url: dest)
+    let before = sourceKeySpace(of: sourceImage, jpeg: jpeg)
+    let after = metadataKeySpace(of: destImage, userComment: .absent)
     let destBytes = [UInt8](destData)
     var destWindowsTags: [Int: String?] = [:]
     if case .tiff(let tiff) = heifExif(destBytes) { destWindowsTags = rawWindowsTags(tiff) }
     // 原始 EXIF 清点先做：它报出的 GPS 分数变化，键空间比对里同一处的视图键不再重复报；
     // 键空间比对已经报了丢失的标签，它也不再重复报。源视图里没有的 ImageUniqueID 由它按
     // 原始字节比值。
-    let raw = rawExifDiff(source: bytes, dest: destBytes,
+    let raw = rawExifDiff(source: jpeg, dest: destBytes,
                           viewLosses: keySpaceLosses(before: before, after: after),
                           makerNoteReported: makerNoteLost(before: before, after: after),
                           sourceViewHasImageUniqueID: before[exifKey(kCGImagePropertyExifImageUniqueID)] != nil)
     // 说明、作者、版权里 EXIF 与 IPTC 打架、产物显示 EXIF 原值的，每组合成一行，键空间比对让位。
-    let sourceTIFF = TIFFStructure(jpeg: bytes)
+    let sourceTIFF = jpeg.exif
     let conflicts = reconciledConflicts(before: before, after: after, originals: exifTextOriginals(sourceTIFF))
     // 备注与三个文字标签的原文：产物的 EXIF 读不出时原始清点已经报了「无法核对」，这里不再说。
     var originalIssues: [String] = []
@@ -853,16 +858,16 @@ func metadataDiff(source: URL, dest: URL) -> [String] {
                                                      reportedElsewhere: elsewhere)
         }
     }
-    // 后几项都是属性视图里没有的源数据，直接读源文件字节；尾部记账另要两边的辅助图视图。
+    // 后几项都是属性视图里没有的源数据，直接看源文件的字节（jpeg）；尾部记账另要两边的辅助图视图。
     return keySpaceDiff(before: before, after: after, covered: raw.coveredViewKeys.union(conflicts.covered))
         + conflicts.issues
         + raw.issues
-        + carriedExifIssues(source: bytes, dest: destBytes,
-                            comment: SourceUserComment(imageProperties(sourceImage), reading: rawExifUserComment(in: bytes)))
+        + carriedExifIssues(source: jpeg, dest: destBytes,
+                            comment: SourceUserComment(imageProperties(sourceImage), reading: rawExifUserComment(in: jpeg)))
         + originalIssues
-        + windowsTagLosses(rawWindowsTags(of: bytes), after: after, destRaw: destWindowsTags)
-        + unportableSegments(in: bytes, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage))
-        + unportablePhotoshopResources(in: bytes)
+        + windowsTagLosses(rawWindowsTags(of: jpeg), after: after, destRaw: destWindowsTags)
+        + unportableSegments(in: jpeg, carriedAuxiliary: carriedAuxiliarySizes(source: sourceImage, dest: destImage))
+        + unportablePhotoshopResources(in: jpeg)
         + extendedAttributeIssues(source: source.path, dest: dest.path)
 }
 
@@ -957,12 +962,12 @@ func extendedAttributeDiff(source: [String: [UInt8]], product: [String: [UInt8]]
 /// 原始清点对非 GPS 标签只看在不在、不比值；照搬过来的 MakerNote、私有标签的字节对不对，
 /// 视图和清点都看不见。这一条不看标签语义，只看结构：产物的 Exif 项结束在文件末尾
 /// （heifExifEndsAtFileEnd；ImageIO 自己写的产物里它在 mdat 靠前的位置，永远不在末尾）就是
-/// 照搬过的产物，它的 TIFF 字节（P）与源 EXIF 段（TIFFStructure(jpeg:) 认的那一段，S）之间
+/// 照搬过的产物，它的 TIFF 字节（P）与源 EXIF 段（SourceJPEG 的 `exif` 认的那一段，S）之间
 /// 只认两种关系（carriedTIFFMatches）：P 与 S 逐字节相同；或者 P 是 S 的备注改写。
 /// 源里没有 EXIF 段时按 0 字节比。K 从 1 数起。
-func carriedExifIssues(source: [UInt8], dest: [UInt8], comment: SourceUserComment) -> [String] {
+func carriedExifIssues(source: SourceJPEG, dest: [UInt8], comment: SourceUserComment) -> [String] {
     guard heifExifEndsAtFileEnd(dest) else { return [] }
-    let s = TIFFStructure(jpeg: source).map { Array($0.bytes[$0.base..<($0.base + $0.length)]) } ?? []
+    let s = source.exif.map { Array($0.bytes[$0.base..<($0.base + $0.length)]) } ?? []
     guard case .tiff(let t) = heifExif(dest) else {
         return ["变化 EXIF 数据块：照搬过来的 EXIF 读不出（源 \(s.count) 字节）"]
     }

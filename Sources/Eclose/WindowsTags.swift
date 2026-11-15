@@ -52,9 +52,14 @@ let windowsTags: [WindowsTag] = [
 
 /// 源文件 IFD0 里出现的 Windows 标签：标签号 → 解出的值。条目在、值读不出（越界、
 /// 类型不对）时值是 nil，照样列出来——读不出不等于不存在。空文本不列。
-func rawWindowsTags(of bytes: [UInt8]) -> [Int: String?] {
-    guard let tiff = TIFFStructure(jpeg: bytes) else { return [:] }
+func rawWindowsTags(of jpeg: SourceJPEG) -> [Int: String?] {
+    guard let tiff = jpeg.exif else { return [:] }
     return rawWindowsTags(tiff)
+}
+
+/// 同上，给手里只有字节的调用方（单测）。
+func rawWindowsTags(of bytes: [UInt8]) -> [Int: String?] {
+    rawWindowsTags(of: SourceJPEG(bytes))
 }
 
 /// 一段 TIFF 结构的 IFD0 里出现的 Windows 标签，规则同上。产物一侧用它读 HEIF 的 Exif 项。

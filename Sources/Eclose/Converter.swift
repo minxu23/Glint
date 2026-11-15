@@ -91,18 +91,14 @@ public func imageProperties(_ src: CGImageSource) -> [CFString: Any] {
     return props
 }
 
-/// 在 ImageIO 给出的属性之上，补回它读错或读不出的字段。目前只有一处：UserComment，
-/// 满足 SourceUserComment.toRepair 时换成自己解析出的文本。它同时是 --verify 源侧的视图；
-/// 不进视图的 ImageUniqueID 和猜出来的备注另在 propertiesToWrite 里补。
-func repairedProperties(_ src: CGImageSource, url: URL) -> [CFString: Any] {
-    repairedProperties(imageProperties(src), url: url)
-}
-
-/// 同上，`props` 是已经取好的 imageProperties。
-func repairedProperties(_ props: [CFString: Any], url: URL) -> [CFString: Any] {
+/// 在 ImageIO 给出的属性（`props`，imageProperties 的结果）之上，补回它读错或读不出的字段。
+/// 目前只有一处：UserComment，满足 SourceUserComment.toRepair 时换成自己解析出的文本
+/// （`userComment`，即 rawExifUserComment 的结果；`.absent` 时原样返回）。它同时是 --verify
+/// 源侧的视图；不进视图的 ImageUniqueID 和猜出来的备注另在 propertiesToWrite 里补。
+func repairedProperties(_ props: [CFString: Any], userComment: UserCommentReading) -> [CFString: Any] {
     var props = props
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-    guard let recovered = SourceUserComment(props, reading: rawExifUserComment(of: url)).toRepair else { return props }
+    guard let recovered = SourceUserComment(props, reading: userComment).toRepair else { return props }
     // 这里放的是备注本身。为 HEIC 写入器做的改写只在 encodeHEIF 里做一次，
     // 这个函数的结果同时是 --verify 源侧的视图，不能掺进写入用的填充。
     exif[kCGImagePropertyExifUserComment] = recovered
@@ -159,17 +155,18 @@ struct SourceUserComment: Equatable {
 /// 键空间比对报成丢失。值写对没有，由原始清点按两边的原始字节核对（compareRawExif）。
 /// 猜测串不进源侧视图：它不是可靠的原文。Latin-1 一个字节对一个码位，原字节还能从产物里一一
 /// 还原，所以照写；写了以后由备注原文核对（userCommentOriginalIssues）报出来。
-func propertiesToWrite(_ props: [CFString: Any], source url: URL) -> [CFString: Any] {
+///
+/// `source` 是源 JPEG（SourceJPEG）；读不出源文件时是 nil，原样返回。
+func propertiesToWrite(_ props: [CFString: Any], source: SourceJPEG?) -> [CFString: Any] {
     var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return props }
-    let bytes = [UInt8](data)
+    guard let source else { return props }
     var changed = false
-    if exif[kCGImagePropertyExifImageUniqueID] == nil, let tiff = TIFFStructure(jpeg: bytes),
+    if exif[kCGImagePropertyExifImageUniqueID] == nil, let tiff = source.exif,
        let id = restorableImageUniqueID(rawExifEntries(tiff)) {
         exif[kCGImagePropertyExifImageUniqueID] = id
         changed = true
     }
-    if let guess = SourceUserComment(props, reading: rawExifUserComment(in: bytes)).guessToWrite {
+    if let guess = SourceUserComment(props, reading: rawExifUserComment(in: source)).guessToWrite {
         exif[kCGImagePropertyExifUserComment] = guess
         changed = true
     }
@@ -429,9 +426,15 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     }
 
     let inBytes = fileSize(input)   // 要在可能删除源文件之前读
+    // JPEG 源的文件只在这里读一次、段结构只在这里解析一次（SourceJPEG）。下面写入的属性、EXIF 照搬
+    // 与它的自检、去掉坏 ICC、ICC 核对、--verify 的比对、MPF 旧索引的说明都用这一份，不再各自读源文件。它是一份自有的
+    // 字节拷贝，删源（在最后）不影响它。读不出是 nil，各处照旧走读不出源文件时的退路。
+    let jpeg = kind == .jpeg ? SourceJPEG(contentsOf: input) : nil
     let props: [CFString: Any]
     switch kind {
-    case .jpeg: props = propertiesToWrite(repairedProperties(src, url: input), source: input)
+    case .jpeg:
+        let comment = jpeg.map { rawExifUserComment(in: $0) } ?? .absent
+        props = propertiesToWrite(repairedProperties(imageProperties(src), userComment: comment), source: jpeg)
     case .raw: props = versionFieldsForHEIFWriter(imageProperties(src))
     }
     let sourceXMP = CGImageSourceCopyMetadataAtIndex(src, 0, nil)
@@ -483,12 +486,12 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
             _ = TemporaryFiles.remove(tmp)
             return nil
         }
-        return (tmp, opts.rawExif ? carryExif(kind, source: input, product: tmp) : nil)
+        return (tmp, opts.rawExif ? carryExif(kind, source: input, jpeg: jpeg, product: tmp) : nil)
     }
     /// 编码失败、源解不出图像，而去掉 ICC 后解得出：按去掉 ICC 的那份再编一次。
     func encodeWithoutDamagedICC() -> (url: URL, rawExif: RawExifOutcome?)? {
         guard kind == .jpeg, !TemporaryFiles.shared.isShuttingDown, !imageDecodes(src),
-              let stripped = jpegWithoutICC(input),
+              let jpeg, let stripped = jpegWithoutICC(jpeg),
               let repaired = CGImageSourceCreateWithData(stripped as CFData, nil),
               imageDecodes(repaired) else { return nil }
         pixels = repaired
@@ -569,9 +572,10 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         + (captionOutcome == .failed ? [CaptionOutcome.failureIssue] : [])
     // ICC 没原样搬过去（坏掉的描述文件 ImageIO 当作没有）。去掉坏 ICC 的那条已经说了，不重复。
     let iccIssues = opts.verifyEnabled && kind == .jpeg && !droppedICC
-        ? [iccCarryIssue(source: input, dest: dest)].compactMap { $0 } : []
+        ? [iccCarryIssue(source: input, jpeg: jpeg, dest: dest)].compactMap { $0 } : []
     let verification = opts.verifyEnabled
-        ? Verification(comparing: metadataDiff(source: input, dest: dest) + iccIssues + conversionIssues) : .notVerified
+        ? Verification(comparing: metadataDiff(source: input, jpeg: jpeg, dest: dest) + iccIssues + conversionIssues)
+        : .notVerified
     let outBytes = fileSize(dest)
 
     // 删源文件的前提是逐条比对确认无损，而且产物不比原图大——换成更大的文件不是
@@ -580,8 +584,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     var sourceDeleted = false
     let growth = growthPercent(inBytes: inBytes, outBytes: outBytes)
     // 原图的 MPF 索引登记了不在文件里的附加图像：不算校验差异（源里本来就没有），只写一句。
-    let staleMPF = kind == .jpeg
-        ? (try? Data(contentsOf: input, options: .mappedIfSafe)).flatMap { staleMPFNotice([UInt8]($0)) } : nil
+    let staleMPF = jpeg.flatMap { staleMPFNotice($0) }
     if let qualityNote = quality?.note { notes.append(qualityNote) }
     if let growth { notes.append("HEIF 比原图大 \(growth)") }
     if let staleMPF { notes.append(staleMPF) }
@@ -730,14 +733,15 @@ public enum RawExifOutcome: Equatable {
     }
 }
 
-/// 编码之后、校验之前对产物 EXIF 做的那一步，按源类型分派。
+/// 编码之后、校验之前对产物 EXIF 做的那一步，按源类型分派。`jpeg` 是 convert 读好的源 JPEG
+/// （源是 RAW 时是 nil）。
 /// - JPEG：整块照搬源 EXIF（carryRawExif）。
 /// - RAW：照搬 RAW 自己的 EXIF（CR3 的 CMT1/CMT2/CMT4，TIFF 系 RAW 的 IFD0/ExifIFD/GPS IFD，RAF 内嵌
 ///   JPEG 的 EXIF），先拼成一块干净的 TIFF（CameraRawExif.swift），再同样交给 carryingExif
 ///   （carryCameraRawExif）。
-func carryExif(_ kind: SourceKind, source: URL, product: URL) -> RawExifOutcome {
+func carryExif(_ kind: SourceKind, source: URL, jpeg: SourceJPEG?, product: URL) -> RawExifOutcome {
     switch kind {
-    case .jpeg: return carryRawExif(source: source, product: product)
+    case .jpeg: return carryRawExif(source: source, jpeg: jpeg, product: product)
     case .raw: return carryCameraRawExif(source: source, product: product)
     }
 }
@@ -826,11 +830,11 @@ func cameraRawExifRegression(source: RawExifParts, intended: [UInt8], before: UR
           let jpegImage = CGImageSourceCreateWithData(Data(jpeg) as CFData, nil) else {
         return "拼出来的块放不进 JPEG 的 APP1，核对不了 ImageIO 的读法"
     }
-    func derived(_ image: CGImageSource, _ url: URL) -> [String: String] {
-        metadataKeySpace(of: image, url: url, repairing: false).filter { isExifDerivedKey($0.key) }
+    func derived(_ image: CGImageSource) -> [String: String] {
+        metadataKeySpace(of: image, userComment: .absent).filter { isExifDerivedKey($0.key) }
     }
-    return exifReadingMismatch(reference: derived(jpegImage, after), heic: derived(afterImage, after),
-                               before: derived(beforeImage, before))
+    return exifReadingMismatch(reference: derived(jpegImage), heic: derived(afterImage),
+                               before: derived(beforeImage))
 }
 
 /// 把 `product`（ImageIO 刚写好的 HEIC）里 Exif 项的内容换成源 JPEG 的 EXIF 原始字节。
@@ -841,19 +845,20 @@ func cameraRawExifRegression(source: RawExifParts, intended: [UInt8], before: UR
 /// 闸门与改写见 carryingExif（RawExifCarry.swift）。改写得到的新字节先写进同目录的另一个
 /// 临时文件，过了 rawExifRegression 的自检才原子地替换 `product`；闸门或自检不过，`product`
 /// 一个字节都不动。中断时最多留下那个另起的临时文件，不会留下半个产物。
-func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
-    guard let sourceData = try? Data(contentsOf: source, options: .mappedIfSafe) else {
+///
+/// `jpeg` 是 `source` 读好的那一份（SourceJPEG），这里不再读源文件；nil（读不出）时不照搬。
+func carryRawExif(source: URL, jpeg: SourceJPEG?, product: URL) -> RawExifOutcome {
+    guard let jpeg else {
         return .kept("读不出源文件")
     }
-    let sourceBytes = [UInt8](sourceData)
     let tiff: [UInt8]
-    switch sourceExifTIFF(sourceBytes) {
+    switch sourceExifTIFF(jpeg) {
     case .success(let t): tiff = t
     case .failure(let skip): return .kept(skip.reason)
     }
     var rewritten: [UInt8]?
     if let image = CGImageSourceCreateWithURL(source as CFURL, nil),
-       let text = SourceUserComment(imageProperties(image), reading: rawExifUserComment(in: sourceBytes)).toRepair {
+       let text = SourceUserComment(imageProperties(image), reading: rawExifUserComment(in: jpeg)).toRepair {
         rewritten = rewritingUserComment(tiff, text: text)
     }
     let intended = rewritten ?? tiff
@@ -865,7 +870,7 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
     }
     var keptOriginals: [ReconciledGroup] = []
     if let problem = replacingProduct(product, with: carried, check: { candidate in
-        let check = rawExifRegression(source: source, sourceBytes: sourceBytes, intended: intended,
+        let check = rawExifRegression(source: source, jpeg: jpeg, intended: intended,
                                       before: product, after: candidate)
         keptOriginals = check.keptOriginals
         return check.regression
@@ -874,7 +879,7 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
 }
 
 /// 照搬后的产物 `after` 与照搬前的 `before` 比，有没有退步：`regression` 有就是原因，没有是 nil；
-/// 没有退步时 `keptOriginals` 是第 3 条放行了的组。
+/// 没有退步时 `keptOriginals` 是第 3 条放行了的组。`jpeg` 是 `source` 读好的那一份。
 ///
 /// 1. 从 `after` 里重新取出 Exif 项，TIFF 字节与打算照搬的那份（`intended`）逐字节相同。
 /// 2. ImageIO 打得开，状态完整，图像数、顶层 PixelWidth/PixelHeight/Orientation 与 `before` 相同。
@@ -884,7 +889,7 @@ func carryRawExif(source: URL, product: URL) -> RawExifOutcome {
 ///    标签的原文（可靠的文本）——EXIF 与 IIM 打架，产物只是如实显示了源 EXIF 自己写的东西。
 ///    时间字段的打架、缺字符集头而没能改写的 UserComment（照搬后 ImageIO 读不出）照旧靠这一条
 ///    退回旧路。
-func rawExifRegression(source: URL, sourceBytes: [UInt8], intended: [UInt8], before: URL,
+func rawExifRegression(source: URL, jpeg: SourceJPEG, intended: [UInt8], before: URL,
                        after: URL) -> (regression: String?, keptOriginals: [ReconciledGroup]) {
     func regression(_ why: String) -> (regression: String?, keptOriginals: [ReconciledGroup]) { (why, []) }
     guard let afterData = try? Data(contentsOf: after),
@@ -906,12 +911,12 @@ func rawExifRegression(source: URL, sourceBytes: [UInt8], intended: [UInt8], bef
     for key in [kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight, kCGImagePropertyOrientation] {
         guard (a[key] as? NSNumber) == (b[key] as? NSNumber) else { return regression("照搬后 \(key as String) 变了") }
     }
-    let reference = sourceKeySpace(of: sourceImage, url: source, bytes: sourceBytes)
-    let afterView = metadataKeySpace(of: afterImage, url: after)
+    let reference = sourceKeySpace(of: sourceImage, jpeg: jpeg)
+    let afterView = metadataKeySpace(of: afterImage, userComment: .absent)
     let newlyInconsistent = inconsistentKeys(before: reference, after: afterView)
-        .subtracting(inconsistentKeys(before: reference, after: metadataKeySpace(of: beforeImage, url: before)))
+        .subtracting(inconsistentKeys(before: reference, after: metadataKeySpace(of: beforeImage, userComment: .absent)))
     let split = splitRegressions(newlyInconsistent, afterView: afterView,
-                                 originals: exifTextOriginals(TIFFStructure(jpeg: sourceBytes)))
+                                 originals: exifTextOriginals(jpeg.exif))
     let worse = split.blocking
     guard let key = worse.sorted().first else { return (nil, split.kept) }
     let more = worse.count > 1 ? "（共 \(worse.count) 处）" : ""
@@ -1082,8 +1087,9 @@ func iccSegments(_ bytes: [UInt8], _ layout: JPEGLayout) -> [JPEGSegment] {
 }
 
 /// JPEG 里嵌的 ICC 色彩描述文件本身：各段 `ICC_PROFILE\0`、序号、总数之后的内容，按序号接起来。没有是 nil。
-func embeddedICC(_ bytes: [UInt8]) -> [UInt8]? {
-    guard let layout = JPEGLayout(bytes) else { return nil }
+func embeddedICC(_ jpeg: SourceJPEG) -> [UInt8]? {
+    guard let layout = jpeg.layout else { return nil }
+    let bytes = jpeg.bytes
     let header = iccSegmentID.count + 2
     let chunks = iccSegments(bytes, layout).filter { $0.payload.count > header }
     guard !chunks.isEmpty else { return nil }
@@ -1097,8 +1103,10 @@ func embeddedICC(_ bytes: [UInt8]) -> [UInt8]? {
 /// 坏掉的描述文件它当作没有，按 sRGB 解码，产物里写的是系统的 sRGB。这时源和产物的色彩描述名
 /// 都读成 sRGB，键比对看不出来，得比描述文件的字节。描述名本身变了（如 CMYK 的转成 RGB）时
 /// 键比对已经报了 ProfileName 的变化，这里不再重复。
-func iccCarryIssue(source: URL, dest: URL) -> String? {
-    guard let data = try? Data(contentsOf: source), let embedded = embeddedICC([UInt8](data)),
+///
+/// `jpeg` 是 `source` 读好的那一份（SourceJPEG），这里不再读源文件；nil（读不出）时没有可比的，是 nil。
+func iccCarryIssue(source: URL, jpeg: SourceJPEG?, dest: URL) -> String? {
+    guard let jpeg, let embedded = embeddedICC(jpeg),
           let product = CGImageSourceCreateWithURL(dest as CFURL, nil),
           let original = CGImageSourceCreateWithURL(source as CFURL, nil) else { return nil }
     let carried = CGImageSourceCreateImageAtIndex(product, 0, nil)?.colorSpace?.copyICCData().map { [UInt8]($0 as Data) }
@@ -1123,11 +1131,10 @@ func withoutProfileID(_ profile: [UInt8]) -> [UInt8] {
     return out
 }
 
-/// 去掉 APP2 `ICC_PROFILE` 段之后的 JPEG 字节。没有这种段、读不了文件都是 nil。
-func jpegWithoutICC(_ url: URL) -> Data? {
-    guard let data = try? Data(contentsOf: url) else { return nil }
-    let bytes = [UInt8](data)
-    guard let layout = JPEGLayout(bytes) else { return nil }
+/// 去掉 APP2 `ICC_PROFILE` 段之后的 JPEG 字节。没有这种段、段结构读不通都是 nil。
+func jpegWithoutICC(_ jpeg: SourceJPEG) -> Data? {
+    let bytes = jpeg.bytes
+    guard let layout = jpeg.layout else { return nil }
     let icc = iccSegments(bytes, layout)
     guard !icc.isEmpty else { return nil }
     var out = bytes

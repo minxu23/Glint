@@ -30,9 +30,18 @@ struct JPEGLayout {
         return bytes.count - (eoi + 2)
     }
 
+    #if ECLOSE_TESTING
+    /// 只在测试版的库里有（Makefile 给它加 `-D ECLOSE_TESTING`）：每次进 init 都把输入交给它，
+    /// 单测据此数一次转换里源 JPEG 被解析了几次。交付的库里没有这个钩子，也没有这份开销。
+    static var parseObserver: (([UInt8]) -> Void)?
+    #endif
+
     /// 解析 `bytes` 的段结构；不以 SOI 开头就是 nil。段长度越界时就停在那里，
     /// 已解析出的段照样返回、`eoi` 为 nil。
     init?(_ bytes: [UInt8]) {
+        #if ECLOSE_TESTING
+        JPEGLayout.parseObserver?(bytes)
+        #endif
         guard bytes.count >= 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else { return nil }
         var segments: [JPEGSegment] = []
         var eoi: Int?
@@ -68,6 +77,44 @@ struct JPEGLayout {
         }
         self.segments = segments
         self.eoi = eoi
+    }
+}
+
+// MARK: - 源 JPEG：读一次、解析一次
+
+/// 一张源 JPEG 的字节、段结构和 EXIF 的 TIFF 结构。convert 对 JPEG 源只读一次文件、只解析一次
+/// 段结构，得到这个值，往下交给所有要源字节或源结构的地方：写入的属性（propertiesToWrite）、EXIF
+/// 照搬与它的自检（carryRawExif）、去掉坏 ICC（jpegWithoutICC）、ICC 核对（iccCarryIssue）、
+/// MPF 旧索引的说明（staleMPFNotice）、--verify 的比对（metadataDiff）。
+///
+/// `bytes` 是自有的一份拷贝，不引用文件映射：init 里映射读进来、拷完映射就放掉了。源文件之后被删
+/// （--delete-original，在 convert 的最后、用完这个值之后）或被改，都不影响它。
+struct SourceJPEG {
+    let bytes: [UInt8]
+    /// 段结构；不以 SOI 开头是 nil，各处照旧走结构读不通时的退路。
+    let layout: JPEGLayout?
+    /// 第一个 APP1 `Exif\0\0` 段里的 TIFF 结构；没有或不合法是 nil（见 TIFFStructure(jpeg:layout:)）。
+    let exif: TIFFStructure?
+
+    #if ECLOSE_TESTING
+    /// 只在测试版的库里有：每次从文件读一份时把路径交给它，单测据此数读文件的次数。
+    static var readObserver: ((URL) -> Void)?
+    #endif
+
+    /// 已经在内存里的 JPEG 字节。段结构在这里解析，只此一次。
+    init(_ bytes: [UInt8]) {
+        self.bytes = bytes
+        layout = JPEGLayout(bytes)
+        exif = TIFFStructure(jpeg: bytes, layout: layout)
+    }
+
+    /// 读 `url` 的全部字节（`.mappedIfSafe`）；读不出是 nil。
+    init?(contentsOf url: URL) {
+        #if ECLOSE_TESTING
+        SourceJPEG.readObserver?(url)
+        #endif
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        self.init([UInt8](data))
     }
 }
 
@@ -179,9 +226,9 @@ func mpfMissingImages(in bytes: [UInt8], _ layout: JPEGLayout) -> [(typeCode: In
 /// 原图的 MPF 索引登记了不在文件里的附加图像时，写进状态说明的那句；都在是 nil。
 /// 只是说明，不算校验差异：源里本来就没有这些图，转换没丢东西。要不要因此保留源文件由
 /// ConversionOptions.keepStaleMPF 定（默认照删）。
-func staleMPFNotice(_ bytes: [UInt8]) -> String? {
-    guard let layout = JPEGLayout(bytes) else { return nil }
-    let missing = mpfMissingImages(in: bytes, layout)
+func staleMPFNotice(_ jpeg: SourceJPEG) -> String? {
+    guard let layout = jpeg.layout else { return nil }
+    let missing = mpfMissingImages(in: jpeg.bytes, layout)
     guard !missing.isEmpty else { return nil }
     let items = missing.map { m -> String in
         let kind = m.typeCode == 0x050000 ? "增益图，" : ""
@@ -189,6 +236,11 @@ func staleMPFNotice(_ bytes: [UInt8]) -> String? {
     }
     return "原图的 MPF 索引登记的附加图像（" + items.joined(separator: "；") + "）不在文件里："
         + "原图被编辑或截短过，这张图转换前就没了，HEIF 里也没有"
+}
+
+/// 同上，给手里只有字节的调用方（单测）。
+func staleMPFNotice(_ bytes: [UInt8]) -> String? {
+    staleMPFNotice(SourceJPEG(bytes))
 }
 
 /// MP 索引里第二个条目起的原始登记：类型码、在文件里的绝对起点、长度。偏移或长度为 0 的不收。
@@ -312,8 +364,9 @@ let truncatedSourceNotice = "源文件不完整：没有找到 JPEG 的结束标
 /// 预览图 P 字节（previewTrailerRanges）不计入。剩下的 R 字节里只要有一个不是填充、又不恰好是
 /// 微信的 `tyf-` 标记，就报 R：K、P 都是 0 时，R 里的非填充字节全在 MPF 登记的条目范围内就
 /// 注明是 MPF 的附加图像；K 或 P 不是 0 时注明 M 和其中的 K、P。
-func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, height: Int)]) -> [String] {
-    guard let layout = JPEGLayout(bytes) else { return [] }
+func unportableSegments(in jpeg: SourceJPEG, carriedAuxiliary: [(width: Int, height: Int)]) -> [String] {
+    guard let layout = jpeg.layout else { return [] }
+    let bytes = jpeg.bytes
     var issues: [String] = []
     for s in layout.segments {
         let content = Array(bytes[s.payload])
@@ -362,6 +415,11 @@ func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, heigh
         }
     }
     return issues
+}
+
+/// 同上，给手里只有字节的调用方（单测）。
+func unportableSegments(in bytes: [UInt8], carriedAuxiliary: [(width: Int, height: Int)]) -> [String] {
+    unportableSegments(in: SourceJPEG(bytes), carriedAuxiliary: carriedAuxiliary)
 }
 
 // MARK: - 多份 EXIF
@@ -473,9 +531,9 @@ func photoshopResources(in block: [UInt8]) -> (resources: [(id: Int, content: [U
 
 /// APP13 里 ImageIO 不搬、也不从别处派生的 Photoshop 资源，合成一条差异：
 /// Photoshop 存出来的 JPEG 常带十来个资源，每个一行会刷屏。解析不了的数据一并计入。
-func unportablePhotoshopResources(in bytes: [UInt8]) -> [String] {
-    guard let layout = JPEGLayout(bytes) else { return [] }
-    let parsed = photoshopResources(in: photoshopResourceBlock(bytes, layout))
+func unportablePhotoshopResources(in jpeg: SourceJPEG) -> [String] {
+    guard let layout = jpeg.layout else { return [] }
+    let parsed = photoshopResources(in: photoshopResourceBlock(jpeg.bytes, layout))
     let lost = parsed.resources.map(\.id).filter { !ignoredPhotoshopResources.contains($0) }
     guard !lost.isEmpty || parsed.unparsed > 0 else { return [] }
     let ids = Set(lost).sorted().map { "0x" + String(format: "%04X", $0) }.joined(separator: "、")

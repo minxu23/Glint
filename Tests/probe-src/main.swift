@@ -5,7 +5,7 @@
 // 默认问的是「--verify 看得见什么」。--no-repair 只关掉 UserComment 那一处修补，
 // 键空间的其余部分（含 XMP 层）完全一样：UserComment 那一轮的前提恰恰是
 // 「ImageIO 读不出这种写法」，用默认模式问就会读到修补后的值，前提自然不成立。
-// 两种模式走的是同一个 metadataKeySpace，差别只有那一个布尔量。
+// 两种模式走的是同一个 metadataKeySpace，差别只有传给它的 UserComment 读法（--no-repair 传 .absent）。
 //
 // 键空间用的是 Eclose 里 --verify 同一个 metadataKeySpace，不另写一份：校验探针
 // 和校验本身对"有哪些键、键路径长什么样"的理解必须一致，否则断言的是另一回事。
@@ -262,7 +262,9 @@ guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
 // 「无」时，selftest 里不合规范 UserComment 那一轮的前提断言（seen = <无> 即算
 // 「确认 ImageIO 读不出这种写法」）在文件整体读不出来时也会通过。
 // 空键空间一律当作读取失败。
-let space = metadataKeySpace(of: src, url: url, repairing: !noRepair)
+// 修补用的 UserComment 读法与 convert 同源：自己解析这个文件的原始字节（不是 JPEG、读不出都是 .absent）。
+let userComment = noRepair ? .absent : SourceJPEG(contentsOf: url).map { rawExifUserComment(in: $0) } ?? .absent
+let space = metadataKeySpace(of: src, userComment: userComment)
 guard !space.isEmpty else {
     print("<无法读取>")
     exit(1)

@@ -522,9 +522,9 @@ private func gpsChangeLine(_ tag: Int, _ a: [(n: Int, d: Int)], _ b: [(n: Int, d
 // MARK: - 接到文件上
 
 /// 读两边的原始 EXIF 并比对。源不是带 EXIF 的 JPEG 时没有可清点的东西。
-func rawExifDiff(source bytes: [UInt8], dest destBytes: [UInt8], viewLosses: Set<String>,
+func rawExifDiff(source: SourceJPEG, dest destBytes: [UInt8], viewLosses: Set<String>,
                  makerNoteReported: Bool, sourceViewHasImageUniqueID: Bool) -> RawExifComparison {
-    guard let sourceTIFF = TIFFStructure(jpeg: bytes) else { return RawExifComparison() }
+    guard let sourceTIFF = source.exif else { return RawExifComparison() }
     let dest: [RawExifEntry]?
     switch heifExif(destBytes) {
     case .absent: dest = []

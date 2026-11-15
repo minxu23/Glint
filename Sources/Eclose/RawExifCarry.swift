@@ -33,8 +33,9 @@ let maxExifPrefixSkip = 64
 /// 源 JPEG 的 EXIF 段里的 TIFF 字节（`Exif\0\0` 之后的全部内容）。
 ///
 /// 闸门（源一侧）：恰好一个以 `Exif\0\0` 开头的 APP1，内容是合法的 TIFF 头。
-func sourceExifTIFF(_ jpeg: [UInt8]) -> Result<[UInt8], RawExifSkip> {
-    guard let layout = JPEGLayout(jpeg) else { return .failure(.init("源文件的 JPEG 结构读不通")) }
+func sourceExifTIFF(_ source: SourceJPEG) -> Result<[UInt8], RawExifSkip> {
+    guard let layout = source.layout else { return .failure(.init("源文件的 JPEG 结构读不通")) }
+    let jpeg = source.bytes
     let segments = layout.segments.filter { $0.marker == 0xE1 && $0.begins(with: exifHeader, in: jpeg) }
     guard !segments.isEmpty else { return .failure(.init("源里没有 EXIF 段")) }
     guard segments.count == 1 else { return .failure(.init("源里的 EXIF 段不止一个")) }
@@ -44,6 +45,11 @@ func sourceExifTIFF(_ jpeg: [UInt8]) -> Result<[UInt8], RawExifSkip> {
         return .failure(.init("源里的 EXIF 段不是合法的 TIFF"))
     }
     return .success(Array(jpeg[base..<(base + length)]))
+}
+
+/// 同上，给手里只有字节的调用方（RAF 内嵌的 JPEG、单测）。
+func sourceExifTIFF(_ jpeg: [UInt8]) -> Result<[UInt8], RawExifSkip> {
+    sourceExifTIFF(SourceJPEG(jpeg))
 }
 
 // MARK: - 备注改写
