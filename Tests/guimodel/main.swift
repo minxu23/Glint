@@ -283,4 +283,8 @@ runBrowsingTests(work: work)
 let rawSource = work.appendingPathComponent("RAW/源.jpg")
 runRAWTests(work: work.appendingPathComponent("RAW"), source: fm.fileExists(atPath: rawSource.path) ? rawSource : nil)
 
+// MARK: - 11. 画质核对（用例在 quality.swift）
+
+runQualityTests(work: work.appendingPathComponent("画质"))
+
 finish("界面模型测试")

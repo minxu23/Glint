@@ -17,6 +17,9 @@ let usage = """
   --search <词>             搜索
   --sheet                   显示转换面板
   --sheet-delete            显示转换面板，并勾上「删除源文件」
+  --sheet-advanced          显示转换面板，展开「高级」
+  --sheet-bad-ssim <文字>   显示转换面板，展开「高级」，局部相似度那一格填这段文字
+  --quality <0.4–1>         转换面板的画质（存进设置；配 --convert 用这个质量转）
   --convert                 把当前视图里全部的 JPEG 和 RAW 转完再截图
   --measure                 打印从加文件夹到第一屏缩略图出齐的时间
   --scroll                  把网格从头滚到尾，打印每一步主线程上花的最长时间
@@ -44,6 +47,9 @@ var selectNames: [String] = []
 var searchText: String?
 var showSheet = false
 var sheetDelete = false
+var sheetAdvanced = false
+var sheetSSIM: String?
+var panelQuality: Double?
 var shouldConvert = false
 var measure = false
 var scrollTest = false
@@ -69,6 +75,11 @@ while !args.isEmpty {
     case "--search": searchText = value()
     case "--sheet": showSheet = true
     case "--sheet-delete": showSheet = true; sheetDelete = true
+    case "--sheet-advanced": showSheet = true; sheetAdvanced = true
+    case "--sheet-bad-ssim": showSheet = true; sheetAdvanced = true; sheetSSIM = value()
+    case "--quality":
+        guard let q = Double(value()), (0.4...1).contains(q) else { die("--quality 要在 0.4–1 之间") }
+        panelQuality = q
     case "--convert": shouldConvert = true
     case "--measure": measure = true
     case "--scroll": scrollTest = true
@@ -100,6 +111,7 @@ func wait(timeout: TimeInterval, _ done: () -> Bool) -> Bool {
 
 let store = MemoryStore()
 if let viewMode { store.setValue(viewMode.rawValue, forKey: "browser.mode") }
+if let panelQuality { store.setValue(panelQuality, forKey: "panel.quality") }
 let controller = MainWindowController(store: store, autosave: false)
 let window = controller.window!
 window.setContentSize(size)
@@ -297,6 +309,7 @@ if showSheet {
     guard let sheet = controller.makeConversionSheet() else { die("当前视图里没有可以转换的 JPEG 或 RAW，没有面板可显示") }
     let sheetWindow = sheet.makeWindow()
     if sheetDelete { sheet.checkDeleteForSnapshot() }
+    if sheetAdvanced { sheet.showAdvancedForSnapshot(ssim: sheetSSIM) }
     sheetWindow.setFrameOrigin(NSPoint(x: -20000, y: -20000))
     sheetWindow.orderBack(nil)
     sheet.view.layoutSubtreeIfNeeded()

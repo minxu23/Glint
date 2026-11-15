@@ -128,7 +128,7 @@ Tests/unit-test:     TOOL_SRC := Sources/GUI/Model.swift Sources/CLI/Arguments.s
 # 界面模型的测试：只需 Eclose + 模型层（都不依赖 AppKit）。
 Tests/guimodel-test: ECLOSE_LIB := $(ECLOSE_TESTING)
 Tests/guimodel-test: TOOL_SRC := $(GUI_MODEL) Tests/harness.swift Tests/DNG.swift Tests/guimodel/main.swift \
-                                  Tests/guimodel/browsing.swift Tests/guimodel/raw.swift
+                                  Tests/guimodel/browsing.swift Tests/guimodel/raw.swift Tests/guimodel/quality.swift
 Tests/mangle-tool:   ECLOSE_LIB := $(ECLOSE_TESTING)
 Tests/mangle-tool:   TOOL_SRC := Tests/mangle/main.swift
 

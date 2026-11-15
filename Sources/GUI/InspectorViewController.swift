@@ -209,6 +209,10 @@ final class InspectorViewController: NSViewController {
         switch row.status {
         case .failed(let why), .skipped(let why):
             views.append(wrapped(makeWrappingLabel(why, size: 12, color: .secondaryLabelColor, selectable: true), inner))
+        case .qualityDropped(let drop):
+            views.append(keyValueGrid(qualityDropLines(drop).map { ($0.0, makeWrappingLabel($0.1, size: 13, selectable: true)) }))
+            let source = row.job.input
+            views.append(LinkButton("在访达中显示源文件") { NSWorkspace.shared.activateFileViewerSelecting([source]) })
         default: break
         }
         if case .differences(let issues) = row.verification {
@@ -251,6 +255,7 @@ final class InspectorViewController: NSViewController {
                 pairs.append(("源文件", makeLabel("已删除", size: 13)))
             }
             if let re = row.reencode { pairs.append(("重编", makeWrappingLabel(re.description, size: 13))) }
+            if let quality = qualityLine(row.quality) { pairs.append(("画质", makeWrappingLabel(quality, size: 13))) }
             if let cap = row.caption { pairs.append(("备注", makeWrappingLabel(cap.description, size: 13))) }
             views.append(keyValueGrid(pairs))
             if !row.note.isEmpty {

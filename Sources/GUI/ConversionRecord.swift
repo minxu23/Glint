@@ -200,11 +200,13 @@ enum ConversionMark: Equatable {
     case differences(Int)
     case skipped
     case failed
+    /// 画质核对不达标，没有转换。
+    case qualityDropped
 
-    /// 网格上要不要放标记：只有转换中、有差异、失败三种。
+    /// 网格上要不要放标记：只有转换中、有差异、失败、画质不达标四种。
     var showsOnGrid: Bool {
         switch self {
-        case .running, .differences, .failed: return true
+        case .running, .differences, .failed, .qualityDropped: return true
         default: return false
         }
     }
@@ -218,6 +220,7 @@ enum ConversionMark: Equatable {
         case .differences(let n): return "\(n) 处差异"
         case .skipped: return "已跳过"
         case .failed: return "失败"
+        case .qualityDropped: return "画质不够"
         }
     }
 
@@ -230,6 +233,7 @@ enum ConversionMark: Equatable {
         case .differences(let n): return "转换时有 \(n) 处差异"
         case .skipped: return "转换时跳过"
         case .failed: return "转换失败"
+        case .qualityDropped: return "画质不达标，没有转换"
         }
     }
 }
@@ -290,6 +294,7 @@ struct ConversionRecord {
         case .running: return .running
         case .skipped: return .skipped
         case .failed: return .failed
+        case .qualityDropped: return .qualityDropped
         case .done:
             switch row.verification {
             case .passed: return .passed
@@ -333,6 +338,8 @@ struct ConversionRecord {
         var notVerified = 0
         var skipped = 0
         var failed = 0
+        /// 画质核对不达标、没有转换的。
+        var qualityDropped = 0
         var grew = 0
         var pending = 0
         var inBytes = 0
@@ -349,6 +356,7 @@ struct ConversionRecord {
             case .pending, .running: t.pending += 1
             case .skipped: t.skipped += 1
             case .failed: t.failed += 1
+            case .qualityDropped: t.qualityDropped += 1
             case .done:
                 t.converted += 1
                 t.inBytes += row.inBytes
@@ -386,7 +394,8 @@ struct ConversionRecord {
     var classLines: [String] {
         let t = tally
         let pairs: [(String, Int)] = [("无差异", t.passed), ("有差异", t.differences), ("没有校验", t.notVerified),
-                                      ("已跳过", t.skipped), ("失败", t.failed), ("HEIF 比源文件大", t.grew)]
+                                      ("已跳过", t.skipped), ("失败", t.failed), ("画质不达标、没有转换", t.qualityDropped),
+                                      ("HEIF 比源文件大", t.grew)]
         return pairs.filter { $0.1 > 0 }.map { "\($0.0) \($0.1) 张" }
     }
 
@@ -406,7 +415,7 @@ struct ConversionRecord {
 
     /// 活动条的那句话。
     /// - 进行中：`正在转换　已转 82 张，共 196 张`
-    /// - 转完：`转完 195 张，省下 398 MB。9 张有差异，1 张失败，它们的源文件都还在。`
+    /// - 转完：`转完 195 张，省下 398 MB。9 张有差异，2 张画质不达标没有转换，1 张失败，它们的源文件都还在。`
     ///   没有的类不写；没开删除就不提源文件。`N 张有差异` 可以点。开了删除而这批里有 RAW 时，
     ///   末尾再加 `RAW 原片都留着。`
     /// - 取消：`已取消。转完 82 张，还有 114 张没转。`，后面同样跟着各类。
@@ -429,6 +438,7 @@ struct ConversionRecord {
             classes.append(SentencePart(text: "\(t.differences) 张有差异", link: .conversion(.differences)))
         }
         if deleteRequested && t.grew > 0 { classes.append(SentencePart(text: "\(t.grew) 张 HEIF 比源文件大")) }
+        if t.qualityDropped > 0 { classes.append(SentencePart(text: "\(t.qualityDropped) 张画质不达标没有转换")) }
         if t.skipped > 0 { classes.append(SentencePart(text: "\(t.skipped) 张跳过")) }
         if t.failed > 0 { classes.append(SentencePart(text: "\(t.failed) 张失败", link: .conversion(.failures))) }
         for (i, part) in classes.enumerated() {
@@ -484,5 +494,37 @@ func verdictTitle(_ mark: ConversionMark) -> String {
     case .differences(let n): return "转换时有 \(n) 处差异"
     case .skipped: return "没有转换"
     case .failed: return "转换失败"
+    case .qualityDropped: return "画质不达标，没有转换"
+    }
+}
+
+/// 信息栏「转换结果」一组里画质不达标的那几行（标签，值）：每一遍的质量与量出的数、门槛、源文件。
+/// 量出的两个数、两个门槛各占一行（值一栏窄，一句话折行会把「局部 SSIM」拆开）。
+func qualityDropLines(_ drop: QualityDrop) -> [(String, String)] {
+    func reading(_ r: QualityReading) -> String {
+        r.measurement.map { $0.description.replacingOccurrences(of: "，", with: "\n") } ?? r.description
+    }
+    var lines = [("质量 \(qualityText(drop.firstQuality))", reading(drop.first))]
+    switch drop.retry {
+    case nil: break
+    case .notNeeded?: lines.append(("重编", "质量已不低于 \(qualityText(qualityRetryLevel))，没有重编"))
+    case .encodeFailed?: lines.append(("质量 \(qualityText(qualityRetryLevel))", "重编失败"))
+    case .stillBelow(let again)?: lines.append(("质量 \(qualityText(qualityRetryLevel))", reading(again)))
+    }
+    let t = drop.thresholds
+    lines.append(("门槛", "局部 SSIM 不低于 \(thresholdText(t.minSSIM, minimumFraction: 2))\nPSNR 不低于 \(thresholdText(t.minPSNR, minimumFraction: 0)) dB"))
+    lines.append(("源文件", "还在，没有产物"))
+    return lines
+}
+
+/// 信息栏「转换结果」一组里「画质」那一行的值：两个数各占一行；重编过的再加一行说第一遍的质量与数。
+/// 没核对是 nil。
+func qualityLine(_ outcome: QualityOutcome?) -> String? {
+    switch outcome {
+    case nil: return nil
+    case .passed(let m)?: return m.description.replacingOccurrences(of: "，", with: "\n")
+    case let .passedAfterRetry(first, q, m)?:
+        return m.description.replacingOccurrences(of: "，", with: "\n")
+            + "\n质量 \(qualityText(q)) 不达标（\(first.description)），改用 \(qualityText(qualityRetryLevel)) 重编"
     }
 }

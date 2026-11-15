@@ -17,12 +17,15 @@ enum RowStatus: Equatable {
     /// "转换成功但有话要说"放在 FileRow.note，不和原因共用一个字段。
     case skipped(String)
     case failed(String)
+    /// 画质核对不达标，没有转换（ConvertResult.qualityDropped）：没有产物，源原样留着。
+    /// 与跳过、失败分开，带着量出的数和门槛。
+    case qualityDropped(QualityDrop)
 
     /// 这一行已经有结局，不会再变。进度计数看的是这个："哪些算结束"只在这里定义。
     var isSettled: Bool {
         switch self {
         case .pending, .running: return false
-        case .done, .skipped, .failed: return true
+        case .done, .skipped, .failed, .qualityDropped: return true
         }
     }
 }
@@ -39,10 +42,11 @@ struct FileRow {
     var note = ""
     var tagCount = 0
     var xattrCount = 0
-    /// 以下三项照抄 ConversionReport，信息栏的「转换结果」一组显示；没有就是 nil。
+    /// 以下四项照抄 ConversionReport，信息栏的「转换结果」一组显示；没有就是 nil。
     var rawExif: RawExifOutcome?
     var reencode: Reencode?
     var caption: CaptionOutcome?
+    var quality: QualityOutcome?
     /// Eclose 报告源文件确实被删掉了（ConversionReport.sourceDeleted）。
     var sourceDeleted = false
     /// 列表里同时存在多个来源文件夹时置位，副标题才带上来源名——
@@ -77,6 +81,8 @@ struct FileRow {
             if !note.isEmpty { parts.append(note) }
         case .skipped(let why), .failed(let why):
             parts.append(why)
+        case .qualityDropped(let drop):
+            parts.append(drop.description)
         case .pending, .running:
             break
         }
@@ -242,10 +248,11 @@ final class ConversionModel {
                                       hasIssues: row.verification.hasDifferences)
             case .skipped: tally.skipped += 1
             case .failed: tally.failed += 1
+            case .qualityDropped: tally.qualityDropped += 1
             case .pending, .running: break
             }
         }
-        guard tally.converted > 0 else {
+        guard tally.converted > 0 || tally.qualityDropped > 0 else {
             return rows.isEmpty ? "" : "共 \(rows.count) 张待转换"
         }
         return tally.summary(unit: "张")
@@ -327,13 +334,14 @@ final class ConversionModel {
             rows[i].rawExif = r.rawExif
             rows[i].reencode = r.reencode
             rows[i].caption = r.caption
+            rows[i].quality = r.quality
             rows[i].sourceDeleted = r.sourceDeleted
         case .skipped(let why):
             rows[i].status = .skipped(why)
         case .failed(let why):
             rows[i].status = .failed(why)
         case .qualityDropped(let drop):
-            rows[i].status = .skipped(drop.description)
+            rows[i].status = .qualityDropped(drop)
         }
         recount()
         onRowChange?(rows[i])

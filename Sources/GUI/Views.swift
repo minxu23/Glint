@@ -60,6 +60,7 @@ func markSymbol(_ mark: ConversionMark) -> (name: String, color: NSColor)? {
     case .passed: return ("checkmark.circle.fill", .systemGreen)
     case .notVerified: return ("circle.dashed", .secondaryLabelColor)
     case .skipped: return ("minus.circle", .secondaryLabelColor)
+    case .qualityDropped: return ("eye.trianglebadge.exclamationmark", .systemPurple)
     case .running: return nil
     }
 }

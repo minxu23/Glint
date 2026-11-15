@@ -199,7 +199,7 @@ extension QualityReading {
 }
 
 /// 质量的写法：0.8 → `0.8`，0.95 → `0.95`。
-func qualityText(_ q: Double) -> String { thresholdText(q, minimumFraction: 1) }
+public func qualityText(_ q: Double) -> String { thresholdText(q, minimumFraction: 1) }
 
 // MARK: - 判据（纯计算）
 

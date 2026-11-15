@@ -21,7 +21,7 @@ ROUNDS=0
 # 同时静默少了几条」。
 EXPECTED_ASSERTIONS=729
 EXPECTED_UNIT=1335
-EXPECTED_GUI=319
+EXPECTED_GUI=363
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -1950,7 +1950,9 @@ round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，
 # 模态面板没法自动化，而 ConversionModel 覆盖的是同一套逻辑。
 mkdir -p "$WORK/界面模型/源" "$WORK/界面模型/取消" "$WORK/界面模型/中途取消" \
-         "$WORK/界面模型/递归/子目录" "$WORK/界面模型/未校验" "$WORK/界面模型/变大"
+         "$WORK/界面模型/递归/子目录" "$WORK/界面模型/未校验" "$WORK/界面模型/变大" "$WORK/界面模型/画质"
+# 按质量 0.4 转画质不达标的那张（相机样本的图案）
+./Tests/fixture --camera panasonic "$WORK/界面模型/画质/相机.jpg" >/dev/null
 ./Tests/fixture "$WORK/界面模型/源/一.jpg" >/dev/null
 # 转出来必然变大的那张：校验通过、勾着删源也不能删
 ./Tests/fixture --noise "$WORK/界面模型/变大/噪声.jpg" >/dev/null

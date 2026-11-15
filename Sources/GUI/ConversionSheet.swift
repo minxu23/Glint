@@ -1,12 +1,13 @@
 // 转换面板：点「转换…」从工具栏下滑出的 sheet（宽 460，规格第 8.1 节）。
 // 打开时从存储读设置，「删除源文件」「覆盖同名的 HEIF」「也转 CMYK 的 JPEG」每次都是关的；
-// 点「转换」时写回存储。
+// 点「转换」时写回存储。「高级」里还有画质核对：开关、两个门槛、不达标时的处理；门槛填得不对时
+// 下面一行红字说明，「转换」按钮灰掉（PanelSettings.blocksStart）。
 // 「源文件」一栏照 ConversionTargets.deleteChoice 摆：有 JPEG 时是删除的复选框（混着 RAW 时
 // 写明只删 JPEG、RAW 原片始终保留），只有 RAW 时没有复选框，只写一句不删。
 
 import AppKit
 
-final class ConversionSheetController: NSViewController {
+final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
     private let targets: ConversionTargets
     private(set) var settings: PanelSettings
     private let store: SettingsStore
@@ -29,6 +30,15 @@ final class ConversionSheetController: NSViewController {
     private let exifCheck = NSButton(checkboxWithTitle: "EXIF 交给系统重写", target: nil, action: nil)
     private let overwriteCheck = NSButton(checkboxWithTitle: "覆盖同名的 HEIF", target: nil, action: nil)
     private let cmykCheck = NSButton(checkboxWithTitle: "也转 CMYK 的 JPEG", target: nil, action: nil)
+    private let qualityCheck = NSButton(checkboxWithTitle: "转完核对画质", target: nil, action: nil)
+    private let ssimField = NSTextField()
+    private let psnrField = NSTextField()
+    private let skipRadio = NSButton(radioButtonWithTitle: "不转，保留 JPEG", target: nil, action: nil)
+    private let retryRadio = NSButton(radioButtonWithTitle: "提高质量重编一次再判", target: nil, action: nil)
+    private let qualityProblemLabel = makeLabel("", size: 11, color: .systemRed)
+    private var qualityControls: [NSControl] = []
+    /// 门槛输入框里的文字不合法时给用户看的说明（PanelSettings.takeThresholdInput）；合法是 nil。
+    private var thresholdProblem: String?
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
     private let startButton = NSButton(title: "转换", target: nil, action: nil)
     private var grid = NSGridView()
@@ -107,6 +117,7 @@ final class ConversionSheetController: NSViewController {
         advancedBox.addArrangedSubview(check(exifCheck, "默认把源文件的 EXIF 原样搬过去。个别软件读不了这样的文件时再勾"))
         advancedBox.addArrangedSubview(check(overwriteCheck, nil))
         advancedBox.addArrangedSubview(check(cmykCheck, targets.cmykHint))
+        advancedBox.addArrangedSubview(qualityBlock())
         // 这批里有 CMYK 的就展开「高级」，免得用户不知道有几张会被跳过。
         advancedToggle.state = targets.cmykCount > 0 ? .on : .off
         advancedBox.isHidden = targets.cmykCount == 0
@@ -173,6 +184,45 @@ final class ConversionSheetController: NSViewController {
         refresh()
     }
 
+    /// 画质核对那一块：复选框、两个门槛、不达标时怎么办、填错时的红字。复选框以下缩进一格。
+    private func qualityBlock() -> NSView {
+        qualityCheck.target = self
+        qualityCheck.action = #selector(toggled(_:))
+        for (field, text, label) in [(ssimField, settings.ssimText, "局部相似度门槛"), (psnrField, settings.psnrText, "PSNR 门槛")] {
+            field.stringValue = text
+            field.delegate = self
+            field.alignment = .right
+            field.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+            field.controlSize = .small
+            field.setAccessibilityLabel(label)
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        }
+        for radio in [skipRadio, retryRadio] {
+            radio.target = self
+            radio.action = #selector(dropActionChanged(_:))
+            radio.font = .systemFont(ofSize: 12)
+        }
+        qualityControls = [ssimField, psnrField, skipRadio, retryRadio]
+        func row(_ views: [NSView]) -> NSStackView {
+            let h = NSStackView(views: views)
+            h.spacing = 6
+            h.alignment = .firstBaseline
+            return h
+        }
+        let ssimRow = row([makeLabel("局部相似度不低于", size: 12), ssimField,
+                           makeLabel("（0–1，16×16 小块里最差的 1%）", size: 11, color: .secondaryLabelColor)])
+        let psnrRow = row([makeLabel("PSNR 不低于", size: 12), psnrField, makeLabel("dB", size: 12),
+                           makeLabel("（0–100）", size: 11, color: .secondaryLabelColor)])
+        let dropRow = row([makeLabel("不达标时", size: 12), skipRadio, retryRadio])
+        let help = makeWrappingLabel("转好的 HEIF 先和原图比一遍，画质下降明显的按下面的门槛处理。只对 JPEG",
+                                     size: 11, color: .secondaryLabelColor)
+        help.preferredMaxLayoutWidth = 300
+        let inner = vstack([help, ssimRow, psnrRow, dropRow, qualityProblemLabel], spacing: 5)
+        inner.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
+        return vstack([qualityCheck, inner], spacing: 2)
+    }
+
     private func vstack(_ views: [NSView], spacing: CGFloat) -> NSStackView {
         let s = NSStackView(views: views)
         s.orientation = .vertical
@@ -225,6 +275,13 @@ final class ConversionSheetController: NSViewController {
         exifCheck.state = settings.systemExif ? .on : .off
         overwriteCheck.state = settings.overwrite ? .on : .off
         cmykCheck.state = settings.convertCMYK ? .on : .off
+        qualityCheck.state = settings.qualityCheck ? .on : .off
+        for control in qualityControls { control.isEnabled = settings.qualityCheck }
+        skipRadio.state = settings.onQualityDrop == .skip ? .on : .off
+        retryRadio.state = settings.onQualityDrop == .retry ? .on : .off
+        qualityProblemLabel.stringValue = thresholdProblem ?? ""
+        qualityProblemLabel.isHidden = !settings.blocksStart(thresholdProblem: thresholdProblem)
+        startButton.isEnabled = !settings.blocksStart(thresholdProblem: thresholdProblem)
         startButton.title = targets.primaryTitle(settings)
         let deleting = targets.deletes(settings)
         startButton.bezelColor = deleting ? .systemRed : nil
@@ -245,8 +302,19 @@ final class ConversionSheetController: NSViewController {
         case exifCheck: settings.systemExif = on
         case overwriteCheck: settings.overwrite = on
         case cmykCheck: settings.convertCMYK = on
+        case qualityCheck: settings.qualityCheck = on
         default: break
         }
+        refresh()
+    }
+
+    @objc private func dropActionChanged(_ sender: NSButton) {
+        settings.onQualityDrop = sender === retryRadio ? .retry : .skip
+        refresh()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        thresholdProblem = settings.takeThresholdInput(ssim: ssimField.stringValue, psnr: psnrField.stringValue)
         refresh()
     }
 
@@ -277,6 +345,7 @@ final class ConversionSheetController: NSViewController {
     @objc private func cancel() { onCancel?() }
 
     @objc private func start() {
+        guard !settings.blocksStart(thresholdProblem: thresholdProblem) else { return }
         // 存的是用户自己的选择；删除、覆盖、也转 CMYK 不存（PanelSettings.save 不写这三项）。
         var toSave = settings
         if !captionCheck.isEnabled { toSave.embedCaption = settings.embedCaption }
@@ -291,6 +360,16 @@ final class ConversionSheetController: NSViewController {
         guard case .offered = targets.deleteChoice else { return }
         deleteCheck.state = .on
         toggled(deleteCheck)
+    }
+
+    /// 截图工具用：展开「高级」；`ssim` 不是 nil 时把它填进局部相似度那一格（看填错时的样子）。
+    func showAdvancedForSnapshot(ssim: String? = nil) {
+        advancedToggle.state = .on
+        toggleAdvanced()
+        if let ssim {
+            ssimField.stringValue = ssim
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+        }
     }
 
     /// 截图工具用：把面板放进一个窗口里渲染。

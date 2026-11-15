@@ -32,6 +32,7 @@ final class MemoryStore: SettingsStore {
 
 /// 转换面板上的设置。打开面板时从存储读，开始转换时写回。
 /// 「删除源文件」「覆盖同名的 HEIF」「也转 CMYK 的 JPEG」不读也不写：每次打开面板都是关的。
+/// 画质核对的四项（开关、两个门槛、不达标时的处理）和「转完逐项校验」一样记住。
 struct PanelSettings: Equatable {
     var quality: Double
     /// 保存到指定文件夹；nil 是源文件旁边。
@@ -44,6 +45,10 @@ struct PanelSettings: Equatable {
     var overwrite = false
     /// 「也转 CMYK 的 JPEG」，即 ConversionOptions.convertCMYK。强制转换颜色会变，不记住。
     var convertCMYK = false
+    /// 「转完核对画质」与它的两个门槛、不达标时的处理（ConversionOptions 的同名字段）。记住。
+    var qualityCheck = ConversionOptions.default.qualityCheck
+    var qualityThresholds = ConversionOptions.default.qualityThresholds
+    var onQualityDrop = ConversionOptions.default.onQualityDrop
 
     private enum Key {
         static let quality = "panel.quality"
@@ -51,6 +56,10 @@ struct PanelSettings: Equatable {
         static let verify = "panel.verify"
         static let embedCaption = "panel.embedCaption"
         static let systemExif = "panel.systemExif"
+        static let qualityCheck = "panel.qualityCheck"
+        static let minSSIM = "panel.minSSIM"
+        static let minPSNR = "panel.minPSNR"
+        static let onQualityDrop = "panel.onQualityDrop"
     }
 
     /// 没存过时的默认值：取自 ConversionOptions.default，只有校验有意不同（界面默认校验，
@@ -70,6 +79,17 @@ struct PanelSettings: Equatable {
         if let v = store.value(forKey: Key.verify) as? Bool { s.verify = v }
         if let v = store.value(forKey: Key.embedCaption) as? Bool { s.embedCaption = v }
         if let v = store.value(forKey: Key.systemExif) as? Bool { s.systemExif = v }
+        if let v = store.value(forKey: Key.qualityCheck) as? Bool { s.qualityCheck = v }
+        // 存的门槛不在合法范围里（手改过存储、以后改了范围）就用默认的。
+        if let v = store.value(forKey: Key.minSSIM) as? Double, QualityThresholds.ssimRange.contains(v) {
+            s.qualityThresholds.minSSIM = v
+        }
+        if let v = store.value(forKey: Key.minPSNR) as? Double, QualityThresholds.psnrRange.contains(v) {
+            s.qualityThresholds.minPSNR = v
+        }
+        if let raw = store.value(forKey: Key.onQualityDrop) as? String, let v = QualityDropAction(rawValue: raw) {
+            s.onQualityDrop = v
+        }
         return s
     }
 
@@ -80,7 +100,32 @@ struct PanelSettings: Equatable {
         store.setValue(verify, forKey: Key.verify)
         store.setValue(embedCaption, forKey: Key.embedCaption)
         store.setValue(systemExif, forKey: Key.systemExif)
+        store.setValue(qualityCheck, forKey: Key.qualityCheck)
+        store.setValue(qualityThresholds.minSSIM, forKey: Key.minSSIM)
+        store.setValue(qualityThresholds.minPSNR, forKey: Key.minPSNR)
+        store.setValue(onQualityDrop.rawValue, forKey: Key.onQualityDrop)
     }
+
+    /// 两个门槛输入框里的文字落到设置上：合法的那个写进 qualityThresholds；有不合法的，返回给用户看的
+    /// 说明（这时不让开始转换，见 blocksStart），都合法是 nil。不合法的那个保持原值。
+    mutating func takeThresholdInput(ssim: String, psnr: String) -> String? {
+        var problems: [String] = []
+        if let v = QualityThresholds.parseSSIM(ssim) { qualityThresholds.minSSIM = v } else {
+            problems.append("局部相似度要填 0 到 1 之间的数")
+        }
+        if let v = QualityThresholds.parsePSNR(psnr) { qualityThresholds.minPSNR = v } else {
+            problems.append("PSNR 要填 0 到 100 之间的数")
+        }
+        return problems.isEmpty ? nil : problems.joined(separator: "，")
+    }
+
+    /// 门槛输入有不合法的（takeThresholdInput 给了说明）时，不让开始转换。没勾「转完核对画质」时
+    /// 门槛用不上，不拦。
+    func blocksStart(thresholdProblem: String?) -> Bool { qualityCheck && thresholdProblem != nil }
+
+    /// 门槛输入框里一开始显示的文字：`0.90`、`33`。
+    var ssimText: String { thresholdText(qualityThresholds.minSSIM, minimumFraction: 2) }
+    var psnrText: String { thresholdText(qualityThresholds.minPSNR, minimumFraction: 0) }
 
     /// 实际生效的「逐项校验」：勾了删除源文件就必须校验（与 ConversionOptions.verifyEnabled 一致）。
     var effectiveVerify: Bool { verify || deleteOriginal }
@@ -98,6 +143,9 @@ struct PanelSettings: Equatable {
         options.deleteOriginal = deleteOriginal
         options.overwrite = overwrite
         options.convertCMYK = convertCMYK
+        options.qualityCheck = qualityCheck
+        options.qualityThresholds = qualityThresholds
+        options.onQualityDrop = onQualityDrop
     }
 }
 
