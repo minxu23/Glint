@@ -77,7 +77,11 @@ struct PanelSettings: Equatable {
 
     static func load(from store: SettingsStore) -> PanelSettings {
         var s = defaults
-        if let q = store.value(forKey: Key.quality) as? Double, (0.4...1.0).contains(q) { s.quality = q }
+        // 0.95 以上到 1.0 的值读成上限：用户选过高质量，给他上限，不退回默认值。面板打开时滑杆在上限、
+        // 提示行写明原因（qualityHint）。再往外的值不是滑杆能存出来的，用默认值。
+        if let q = store.value(forKey: Key.quality) as? Double, (QualitySlider.range.lowerBound...1.0).contains(q) {
+            s.quality = min(q, qualityCeiling)
+        }
         if let path = store.value(forKey: Key.outputFolder) as? String, !path.isEmpty {
             s.outputFolder = URL(fileURLWithPath: path)
         }
@@ -157,9 +161,16 @@ struct PanelSettings: Equatable {
     }
 }
 
-/// 画质滑杆的取值：0.4–1.0，步长 0.05。
+/// 画质滑杆：0.4 到上限 qualityCeiling，步长 0.05，每一步一个刻度。
+enum QualitySlider {
+    static let range: ClosedRange<Double> = 0.4...qualityCeiling
+    /// 每 0.05 一格（steppedQuality 按 1/20 取整）。
+    static var tickCount: Int { Int(((range.upperBound - range.lowerBound) * 20).rounded()) + 1 }
+}
+
+/// 画质滑杆的取值：落到最近的一步，夹在 QualitySlider.range 里。
 func steppedQuality(_ raw: Double) -> Double {
-    min(1.0, max(0.4, (raw * 20).rounded() / 20))
+    min(QualitySlider.range.upperBound, max(QualitySlider.range.lowerBound, (raw * 20).rounded() / 20))
 }
 
 // MARK: - 浏览偏好

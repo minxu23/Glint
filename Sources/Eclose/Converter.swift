@@ -73,6 +73,16 @@ public struct ConversionOptions: Equatable {
     public var verifyEnabled: Bool { verify || deleteOriginal }
 }
 
+/// 编码质量的上限。`convert` 收到更高的 `quality` 时按它编码；命令行 `-q` 高于它时按它转并打印
+/// qualityCeilingNotice，界面的画质滑杆到它为止。理由见 README「画质上限」：质量 1.0 时 HEVC 编码器
+/// 改用 4:4:4（硬件不支持，走软件编码），产物是原 JPEG 的两倍多，画质比 0.95 还低，机器忙时有的照片
+/// 编码失败。
+public let qualityCeiling = 0.95
+
+/// 质量设得高于上限时给用户看的说明，命令行和界面共用。
+public let qualityCeilingNotice = "画质上限是 \(qualityText(qualityCeiling))，更高的设置按 \(qualityText(qualityCeiling)) 转换："
+    + "再高编码器会改用 4:4:4，文件是原图的两倍多，画质反而略降，部分照片还会编码失败"
+
 // MARK: - 元数据搬运
 
 /// 把 CGImageSource 的所有属性字典读出来，作为写入 HEIC 时的属性。
@@ -363,7 +373,8 @@ public enum ConvertResult {
 /// 自行推导目标路径，并发下那样会让两个任务抢同一个文件。
 ///
 /// 源按内容分成 JPEG 与 RAW（SourceKind），不在 `opts.sources` 里的跳过。两种共用同一套编码
-/// （encodeHEIF）、文件层属性、说明、校验与删除的流程，不同之处按源类型显式分派：
+/// （encodeHEIF）、文件层属性、说明、校验与删除的流程。`opts.quality` 高于 qualityCeiling 时按 qualityCeiling
+/// 编码（命令行、界面旧设置、库的调用方都在这里兜住）。不同之处按源类型显式分派：
 /// - 写进产物的属性：JPEG 修补 UserComment、补回 ImageUniqueID（都要解析 JPEG 的段结构）；
 ///   RAW 只整理版本号（versionFieldsForHEIFWriter）。
 /// - 编码之后、校验之前对产物 EXIF 的那一步（carryExif）：JPEG 整块照搬源 EXIF；RAW 照搬从 RAW 里
@@ -466,8 +477,10 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
     let folder = dest.deletingLastPathComponent()
     try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
+    // 高于上限的质量按上限编（qualityCeiling）。核对不达标时的说明、要不要重编，都按实际编码用的这个质量。
+    let encodeQuality = min(opts.quality, qualityCeiling)
     var destProps = props
-    destProps[kCGImageDestinationLossyCompressionQuality] = opts.quality
+    destProps[kCGImageDestinationLossyCompressionQuality] = encodeQuality
     /// 「编码 + 照搬」一遍，写进一个新的临时文件。编码失败是 nil，临时文件已删。
     /// 临时文件登记在 TemporaryFiles 里，进程被打断时由命令行或应用删掉；convert 返回时注销。
     var temporaries: [URL] = []
@@ -528,10 +541,10 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
         } else {
             try? fm.removeItem(at: product.url)
             func dropped(_ retry: QualityDrop.Retry?) -> ConvertResult {
-                .qualityDropped(QualityDrop(first: first, firstQuality: opts.quality, thresholds: thresholds, retry: retry))
+                .qualityDropped(QualityDrop(first: first, firstQuality: encodeQuality, thresholds: thresholds, retry: retry))
             }
             guard opts.onQualityDrop == .retry else { return dropped(nil) }
-            guard opts.quality < qualityRetryLevel else { return dropped(.notNeeded) }
+            guard encodeQuality < qualityRetryLevel else { return dropped(.notNeeded) }
             destProps[kCGImageDestinationLossyCompressionQuality] = qualityRetryLevel
             guard let again = encodeAndCarry() else { return dropped(.encodeFailed) }
             let second = qualityReading(source: pixels, product: again.url)
@@ -540,7 +553,7 @@ func convert(_ given: URL, opts: ConversionOptions, dest: URL,
                 return dropped(.stillBelow(second))
             }
             product = again
-            quality = .passedAfterRetry(first: first, firstQuality: opts.quality, retried: m)
+            quality = .passedAfterRetry(first: first, firstQuality: encodeQuality, retried: m)
         }
     }
     let tmp = product.url

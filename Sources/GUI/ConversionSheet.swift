@@ -63,9 +63,9 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
         formatPopup.addItems(withTitles: ["HEIF（.heic）"])
         formatPopup.setAccessibilityLabel("转成")
 
-        qualitySlider.minValue = 0.4
-        qualitySlider.maxValue = 1.0
-        qualitySlider.numberOfTickMarks = 13
+        qualitySlider.minValue = QualitySlider.range.lowerBound
+        qualitySlider.maxValue = QualitySlider.range.upperBound
+        qualitySlider.numberOfTickMarks = QualitySlider.tickCount
         qualitySlider.allowsTickMarkValuesOnly = true
         qualitySlider.doubleValue = settings.quality
         qualitySlider.target = self
@@ -267,6 +267,7 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
         qualitySlider.doubleValue = settings.quality
         qualityValue.stringValue = "\(Int((settings.quality * 100).rounded()))"
         qualityHintLabel.stringValue = qualityHint(settings.quality)
+        qualityHintLabel.toolTip = qualityHintHelp(settings.quality)
         outputPopup.selectItem(at: settings.outputFolder == nil ? 0 : 1)
         outputPath.isHidden = settings.outputFolder == nil
         if grid.numberOfRows > 4 { grid.row(at: 4).isHidden = settings.outputFolder == nil }
@@ -378,6 +379,12 @@ final class ConversionSheetController: NSViewController, NSTextFieldDelegate {
             ssimField.stringValue = ssim
             controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
         }
+    }
+
+    /// 截图工具用：画质那一行此刻的样子——滑杆的范围、刻度数、位置，右边的数，提示行和它的悬停提示。
+    func qualityRowForSnapshot() -> String {
+        "滑杆 \(qualitySlider.minValue)–\(qualitySlider.maxValue)，\(qualitySlider.numberOfTickMarks) 格，在 \(qualitySlider.doubleValue)，"
+            + "显示 \(qualityValue.stringValue)｜\(qualityHintLabel.stringValue)｜\(qualityHintLabel.toolTip ?? "没有悬停提示")"
     }
 
     /// 截图工具用：把面板放进一个窗口里渲染。

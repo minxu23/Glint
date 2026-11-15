@@ -467,14 +467,23 @@ func accessibilityDescription(_ item: PhotoItem, mark: ConversionMark?) -> Strin
     return parts.joined(separator: "，")
 }
 
-/// 画质滑杆旁的提示语（取值范围 0.4–1.0，与命令行同一套语义）。
+/// 画质滑杆下的提示语（取值范围 QualitySlider.range，与命令行同一套语义）。到了上限 qualityCeiling
+/// 时写明已是上限和原因的短写法，完整的说明（qualityCeilingNotice）放在这一行的悬停提示里。
 func qualityHint(_ quality: Double) -> String {
     switch quality {
     case ..<0.6: return "体积最小，画质损失明显"
     case ..<0.86: return "日常存档的推荐区间"
-    case ..<0.96: return "接近原画质，文件更大"
-    default: return "几乎不压缩，体积可能超过源文件"
+    case ..<qualityCeiling: return "接近原画质，文件更大"
+    default: return qualityCeilingHint
     }
+}
+
+/// 滑杆在上限时的提示语，一行放得下。
+let qualityCeilingHint = "已是上限：再高文件翻倍、画质反降，还会编码失败"
+
+/// 提示行的悬停提示：到了上限是完整的说明（与命令行打印的同一句），别的时候没有。
+func qualityHintHelp(_ quality: Double) -> String? {
+    quality >= qualityCeiling ? qualityCeilingNotice : nil
 }
 
 /// 信息栏「转换结果」一组里体积的两行：`3.3 MB → 989 KB`，下一行 `省 71%` 或 `比源文件大 33%`。

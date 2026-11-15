@@ -578,8 +578,34 @@ func testSettings() {
     s.outputFolder = nil
     s.save(to: store)
     check("改回源文件旁边也记住", PanelSettings.load(from: store).outputFolder, nil)
-    check("画质步长 0.05、范围 0.4–1.0", [steppedQuality(0.83), steppedQuality(0.1), steppedQuality(1.3)], [0.85, 0.4, 1.0])
-    check("画质提示语沿用原来的", qualityHint(0.8), "日常存档的推荐区间")
+    check("画质步长 0.05、范围 0.4–0.95", [steppedQuality(0.83), steppedQuality(0.1), steppedQuality(0.97), steppedQuality(1.3)],
+          [0.85, 0.4, 0.95, 0.95])
+    check("画质提示语沿用原来的", [qualityHint(0.5), qualityHint(0.8), qualityHint(0.9)],
+          ["体积最小，画质损失明显", "日常存档的推荐区间", "接近原画质，文件更大"])
+
+    print("设置：画质上限")
+    check("滑杆范围 0.4 到上限 0.95", [QualitySlider.range.lowerBound, QualitySlider.range.upperBound], [0.4, 0.95])
+    check("滑杆每 0.05 一格：12 格", QualitySlider.tickCount, 12)
+    check("滑杆在上限：提示行写明已是上限和原因", qualityHint(0.95), "已是上限：再高文件翻倍、画质反降，还会编码失败")
+    check("滑杆在上限：悬停提示是完整的说明（与命令行同一句）", qualityHintHelp(0.95), qualityCeilingNotice)
+    check("没到上限没有悬停提示", [qualityHintHelp(0.9), qualityHintHelp(0.4)], [nil, nil])
+    let capStore = MemoryStore()
+    var high = PanelSettings.defaults
+    high.quality = 0.95
+    high.save(to: capStore)
+    check("存 0.95 读回 0.95", PanelSettings.load(from: capStore).quality, 0.95)
+    for (stored, want) in [(1.0, 0.95), (0.97, 0.95), (0.4, 0.4)] {
+        capStore.setValue(stored, forKey: "panel.quality")
+        check("存储里的 \(stored) 读成 \(want)", PanelSettings.load(from: capStore).quality, want)
+    }
+    capStore.setValue(1.0, forKey: "panel.quality")
+    var capped = ConversionOptions.default
+    PanelSettings.load(from: capStore).apply(to: &capped)
+    check("存储里的 1.0 落到 ConversionOptions 上是 0.95", capped.quality, 0.95)
+    for stored in [1.2, 0.3] {
+        capStore.setValue(stored, forKey: "panel.quality")
+        check("存储里的 \(stored) 不是滑杆存得出的值：用默认的", PanelSettings.load(from: capStore).quality, ConversionOptions.default.quality)
+    }
 
     var b = BrowserSettings.load(from: store)
     check("浏览默认网格、168、拍摄时间升序", [b.mode == .grid, b.cellSize == 168, b.sort == SortOrder()], [true, true, true])

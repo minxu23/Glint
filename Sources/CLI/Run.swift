@@ -15,7 +15,9 @@ func usage(for command: Command) -> String {
         GPS（拍摄位置）、IPTC、XMP（备注/标题/版权）以及文件时间戳、访达备注与标签。
 
         选项:
-          -q, --quality <0.0-1.0>  有损压缩质量，默认 0.8（越高越清晰、文件越大）
+          -q, --quality <0.0-1.0>  有损压缩质量，默认 \(qualityText(ConversionOptions.default.quality))，上限 \(qualityText(qualityCeiling))（越高越清晰、文件越大）。
+                                   高于 \(qualityText(qualityCeiling)) 时按 \(qualityText(qualityCeiling)) 转并提示一次：再高编码器改用 4:4:4，
+                                   文件翻倍、画质反降
           -o, --output <路径>       输出目录；单个输入时也可以是产物的文件名（以 .heic 或 .heif 结尾）。
                                    默认输出到源文件同一目录
           -r, --recursive          递归处理目录中的所有 JPEG
@@ -64,7 +66,9 @@ func usage(for command: Command) -> String {
         以及文件时间戳、访达备注与标签。RAW 原片永远保留，不提供删除。JPEG 用 jpeg2heif。
 
         选项:
-          -q, --quality <0.0-1.0>  有损压缩质量，默认 0.8（越高越清晰、文件越大）
+          -q, --quality <0.0-1.0>  有损压缩质量，默认 \(qualityText(ConversionOptions.default.quality))，上限 \(qualityText(qualityCeiling))（越高越清晰、文件越大）。
+                                   高于 \(qualityText(qualityCeiling)) 时按 \(qualityText(qualityCeiling)) 转并提示一次：再高编码器改用 4:4:4，
+                                   文件翻倍、画质反降
           -o, --output <路径>       输出目录；单个输入时也可以是产物的文件名（以 .heic 或 .heif 结尾）。
                                    默认输出到源文件同一目录
           -r, --recursive          递归处理目录中的所有 RAW
@@ -138,7 +142,7 @@ func installInterruptCleanup() {
 // MARK: - 主流程
 
 func runCommandLine(_ command: Command) -> Never {
-    let opts: ConversionOptions
+    var opts: ConversionOptions
     do {
         switch try parseArguments(Array(CommandLine.arguments.dropFirst()), command: command) {
         case .run(let parsed):
@@ -149,6 +153,11 @@ func runCommandLine(_ command: Command) -> Never {
         }
     } catch {
         fail(error.localizedDescription)
+    }
+    // 高于上限的质量按上限转，整批说一次（convert 自己也按上限编，这里是让用户知道）。
+    if opts.quality > qualityCeiling {
+        warn(qualityCeilingNotice)
+        opts.quality = qualityCeiling
     }
     let (files, warnings) = collectInputs(opts)
     for w in warnings { warn(w) }

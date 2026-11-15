@@ -4255,6 +4255,33 @@ if case .qualityDropped(let drop) = qcHighResult.result {
     fail("质量已不低于 0.95 时没有判成不达标（\(qcHighResult.result)）")
 }
 
+// 高于上限的质量按上限编（qualityCeiling）：编码器收到的是上限，核对不达标时记下的质量、要不要重编也按上限。
+check("画质上限是 0.95", qualityCeiling, 0.95)
+check("上限的说明（命令行、界面共用）", qualityCeilingNotice,
+      "画质上限是 0.95，更高的设置按 0.95 转换：再高编码器会改用 4:4:4，文件是原图的两倍多，画质反而略降，部分照片还会编码失败")
+for q in [1.0, 0.97] {
+    var overOpts = qcFlowOpts
+    overOpts.quality = q
+    let overRecorder = QualityRecorder(goodAt: [qualityCeiling])
+    let over = runFlow("高于上限 \(q)", overOpts, overRecorder)
+    // 这张流程源按 0.95 编出来比原图大，会按同一质量重编一次，所以按集合比：每一遍都是上限。
+    check("质量 \(q)：编码器每一遍收到的都是上限", Set(overRecorder.qualities), [qualityCeiling])
+    if case .converted(let r) = over.result, case .passed? = r.quality { pass("质量 \(q)：按上限转成、核对达标") } else {
+        fail("质量 \(q) 没有按上限转成（\(over.result)）")
+    }
+}
+var overRetryOpts = qcRetryOpts
+overRetryOpts.quality = 1.0
+let overRetry = QualityRecorder(goodAt: [])
+let overRetryResult = runFlow("高于上限、不达标", overRetryOpts, overRetry)
+check("质量 1.0、不达标：只按上限编一遍", overRetry.qualities, [qualityCeiling])
+if case .qualityDropped(let drop) = overRetryResult.result {
+    check("质量 1.0、不达标：记下的是实际编码用的上限", drop.firstQuality, qualityCeiling)
+    check("质量 1.0、不达标：上限不低于重编的质量，不重试", drop.retry, .notNeeded)
+} else {
+    fail("质量 1.0、不达标时没有判成不达标（\(overRetryResult.result)）"); fail("质量 1.0、不达标：不重试")
+}
+
 let qcRetryFails = QualityRecorder(goodAt: [], failAt: [qualityRetryLevel])
 let qcFailedRetry = runFlow("重编失败", qcRetryOpts, qcRetryFails)
 if case .qualityDropped(let drop) = qcFailedRetry.result {
@@ -4492,6 +4519,7 @@ func expectRejected(_ args: [String], _ why: String) {
 check("收下一个输入文件", parsed(["a.jpg"])?.inputs, ["a.jpg"])
 check("-r 打开递归", parsed(["-r", "目录"])?.recursive, true)
 check("-q 读出质量", parsed(["-q", "0.95", "a.jpg"])?.quality, 0.95)
+check("-q 高于上限照样收下（按上限转、打印说明的是命令行主流程）", parsed(["-q", "1.0", "a.jpg"])?.quality, 1.0)
 check("-j 读出并发数", parsed(["-j", "4", "a.jpg"])?.jobs, 4)
 check("默认整块照搬 EXIF", parsed(["a.jpg"])?.rawExif, true)
 check("--no-raw-exif 关掉整块照搬", parsed(["--no-raw-exif", "a.jpg"])?.rawExif, false)

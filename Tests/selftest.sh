@@ -19,9 +19,9 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=734
-EXPECTED_UNIT=1453
-EXPECTED_GUI=366
+EXPECTED_ASSERTIONS=754
+EXPECTED_UNIT=1463
+EXPECTED_GUI=378
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。
 # 本脚本没开 `set -e`，所以它实际兜住的是：`set -u` 撞上未定义变量而中止、
@@ -1980,6 +1980,43 @@ for flag in "--no-quality-check" "--min-ssim 0.9" "--min-psnr 30" "--on-quality-
 done
 refute "raw2heif 报错时一张都不转" 0 test -e "$Q/甲.heic"
 
+round "7v. 画质上限：-q 高于 0.95 按 0.95 转，整批提示一次"
+# 质量 1.0 时编码器改用 4:4:4，产物翻倍、画质反降（README「画质上限」），所以 -q 高于 0.95 时按 0.95 转：
+# 产物与 -q 0.95 的逐字节相同、标准输出逐行相同；标准错误里只有那一句说明，一批两张也只说一次；退出码 0。
+# 不高于上限的不提示。逐字节比较要求这时机器上没有别的编码在跑（HANDOVER.md「注意事项」）。
+C="$WORK/上限"
+notice="警告: 画质上限是 0.95，更高的设置按 0.95 转换：再高编码器会改用 4:4:4，文件是原图的两倍多，画质反而略降，部分照片还会编码失败"
+# 用法：cap_run 命令 质量 源文件 扩展名；在 $C/<命令>-<质量>/ 里转甲、乙两张，标准输出、标准错误各存一份。
+cap_run() {
+    local d="$C/$1-$2"
+    mkdir -p "$d"
+    cp "$3" "$d/甲.$4"; cp "$3" "$d/乙.$4"
+    "./$1" -j 1 -q "$2" "$d/甲.$4" "$d/乙.$4" > "$d.out" 2> "$d.err"
+    echo "$?" > "$d.status"
+}
+same_products() { cmp -s "$C/$1-$2/甲.heic" "$C/$1-0.95/甲.heic" && cmp -s "$C/$1-$2/乙.heic" "$C/$1-0.95/乙.heic" \
+    && [ -s "$C/$1-0.95/甲.heic" ]; }
+./Tests/fixture --dng "$C-源.dng" >/dev/null || fail "造不出 DNG"
+for q in 0.95 1.0 0.97 0.8; do cap_run jpeg2heif "$q" "$WORK/照片.jpg" jpg; done
+for q in 0.95 1.0; do cap_run raw2heif "$q" "$C-源.dng" dng; done
+for cmd_q in jpeg2heif-1.0 jpeg2heif-0.97 raw2heif-1.0; do
+    cmd=${cmd_q%-*} q=${cmd_q##*-}
+    check "$cmd -q $q：退出码 0，标准错误里只有那句说明、一批两张只说一次" \
+        "$(cat "$C/$cmd_q.status")|$(cat "$C/$cmd_q.err")" "0|$notice"
+    same_products "$cmd" "$q" && pass "$cmd -q $q：两张产物与 -q 0.95 的逐字节相同" || fail "$cmd -q $q：产物与 -q 0.95 的不同"
+    check_same "$cmd -q $q：标准输出与 -q 0.95 的逐行相同" "$(sed "s/$cmd_q/$cmd-0.95/g" "$C/$cmd_q.out")" "$(cat "$C/$cmd-0.95.out")"
+done
+for cmd_q in jpeg2heif-0.95 jpeg2heif-0.8 raw2heif-0.95; do
+    check "${cmd_q%-*} -q ${cmd_q##*-}：不提示，退出码 0" "$(cat "$C/$cmd_q.status")|$(cat "$C/$cmd_q.err")" "0|"
+done
+for cmd in jpeg2heif raw2heif; do
+    for q in 1.1 abc; do
+        out=$("./$cmd" -q "$q" "$WORK/照片.jpg" 2>&1); st=$?
+        check "$cmd -q $q：照旧报参数错误" "$st:$out" "2:错误: 质量必须是 0.0 到 1.0 之间的数字，收到: $q"
+    done
+    grep -qF "默认 0.8，上限 0.95" <<< "$("./$cmd" -h)" && pass "$cmd -h：-q 的说明写明默认值与上限" || fail "$cmd -h 没写上限"
+done
+
 round "8. 界面模型：指定输出文件夹与取消"
 # 这一轮走模型层而不是驱动窗口：「输出到指定文件夹」要经过 NSOpenPanel，
 # 模态面板没法自动化，而 ConversionModel 覆盖的是同一套逻辑。
@@ -2041,6 +2078,13 @@ for opts in "--select 一.jpg" "--view list --search 一" "--sheet" "--sidebar �
 done
 [ "$browse_status" -eq 0 ] && pass "只浏览的四次截图都跑完了" || fail "只浏览的截图失败（退出码 $browse_status）"
 check_same "只浏览不转换时，文件夹里的文件一样都没变" "$(folder_state)" "$before"
+# 转换面板的画质一行：滑杆到上限 0.95 为止；存储里的旧值 1.0 读成上限，提示行写明已是上限和原因。
+check "转换面板：存储里是 1.0 时滑杆在上限 0.95，提示行写明原因" \
+    "$(Tests/uisnapshot "$WORK/上限.png" --print-quality --quality 1.0 "$WORK/只看" 2>&1 | grep '^滑杆 ')" \
+    "滑杆 0.4–0.95，12 格，在 0.95，显示 95｜已是上限：再高文件翻倍、画质反降，还会编码失败｜${notice#警告: }"
+check "转换面板：默认画质 0.8，没有上限的提示" \
+    "$(Tests/uisnapshot "$WORK/上限.png" --print-quality "$WORK/只看" 2>&1 | grep '^滑杆 ')" \
+    "滑杆 0.4–0.95，12 格，在 0.8，显示 80｜日常存档的推荐区间｜没有悬停提示"
 
 echo
 # 数的是「执行了多少条」= PASSED + FAILED，不是「通过了多少条」：比 PASSED 的话，

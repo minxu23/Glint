@@ -167,6 +167,7 @@ public struct QualityDrop: Equatable {
 
     /// 按用户设的质量编出来的那份的核对结果。
     public let first: QualityReading
+    /// 第一遍实际编码用的质量：用户设的质量，高于 qualityCeiling 时是 qualityCeiling。
     public let firstQuality: Double
     public let thresholds: QualityThresholds
     /// 处理方式是「不转」时是 nil。

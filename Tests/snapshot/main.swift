@@ -19,7 +19,9 @@ let usage = """
   --sheet-delete            显示转换面板，并勾上「删除源文件」
   --sheet-advanced          显示转换面板，展开「高级」
   --sheet-bad-ssim <文字>   显示转换面板，展开「高级」，局部相似度那一格填这段文字
-  --quality <0.4–1>         转换面板的画质（存进设置；配 --convert 用这个质量转）
+  --print-quality           显示转换面板，并打印画质那一行（滑杆范围、位置、提示行）
+  --quality <0.4–1>         转换面板的画质（存进设置；配 --convert 用这个质量转）。高于 0.95 的值面板
+                            读成上限 0.95（看存储里留着高质量时的样子）
   --convert                 把当前视图里全部的 JPEG 和 RAW 转完再截图
   --measure                 打印从加文件夹到第一屏缩略图出齐的时间
   --scroll                  把网格从头滚到尾，打印每一步主线程上花的最长时间
@@ -49,6 +51,7 @@ var showSheet = false
 var sheetDelete = false
 var sheetAdvanced = false
 var sheetSSIM: String?
+var printQuality = false
 var panelQuality: Double?
 var shouldConvert = false
 var measure = false
@@ -77,6 +80,7 @@ while !args.isEmpty {
     case "--sheet-delete": showSheet = true; sheetDelete = true
     case "--sheet-advanced": showSheet = true; sheetAdvanced = true
     case "--sheet-bad-ssim": showSheet = true; sheetAdvanced = true; sheetSSIM = value()
+    case "--print-quality": showSheet = true; printQuality = true
     case "--quality":
         guard let q = Double(value()), (0.4...1).contains(q) else { die("--quality 要在 0.4–1 之间") }
         panelQuality = q
@@ -314,6 +318,7 @@ if showSheet {
     sheetWindow.orderBack(nil)
     sheet.view.layoutSubtreeIfNeeded()
     settle(0.2)
+    if printQuality { print(sheet.qualityRowForSnapshot()) }
     guard let sheetRep = render(sheet.view) else { die("无法渲染转换面板") }
     // 合成：面板贴在工具栏下方、窗口水平居中，带一层阴影。
     let base = NSImage(size: frameView.bounds.size)
