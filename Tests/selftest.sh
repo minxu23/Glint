@@ -19,7 +19,7 @@ ROUNDS=0
 #   脚本中途死掉          -> trap 兜底（结尾的检查本身都执行不到）
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
-EXPECTED_ASSERTIONS=694
+EXPECTED_ASSERTIONS=697
 EXPECTED_UNIT=1212
 EXPECTED_GUI=319
 
@@ -28,8 +28,11 @@ EXPECTED_GUI=319
 # 收到信号、以及将来有人加一条不走 bail() 的 exit。前置检查是**有意**的早退
 # （环境没准备好，还没开始测），走 bail() 自己说清原因，不需要 trap 再补一句。
 REACHED_END=0
+# 磁盘满那条用例挂上的小磁盘映像。挂着时提前退出也得卸掉，而且要在删工作目录之前卸。
+DISK_MNT=""
 on_exit() {
     local status=$?
+    [ -n "$DISK_MNT" ] && hdiutil detach "$DISK_MNT" -quiet -force
     if [ "$REACHED_END" -ne 1 ]; then
         printf '  ✗ %s\n' "脚本没有跑到结尾（提前退出），上面的结论不可信"
         status=1
@@ -395,6 +398,30 @@ done_count=$(ls "$I/出" | grep -c '\.heic$')
 [ "$done_count" -gt 0 ] && [ "$done_count" -lt 300 ] && pass "前提：打断时转到一半（$done_count / 300）" || fail "前提：打断时不是转到一半（$done_count / 300）"
 check "打断后输出目录里没有剩下的临时产物" "$(ls -A "$I/出" | grep -c '^\.glint-')" "0"
 [ "$st" -eq 143 ] && grep -qF "已中断" "$I/err.txt" && pass "打断时说已中断，退出码 143" || { fail "打断时退出码 $st 或没说已中断"; sed 's/^/     /' "$I/err.txt"; }
+
+# 输出目录所在的卷满了：ImageIO 写到一半失败。要说「磁盘空间不够」而不是「HEIC 编码失败」，它写了一半的
+# `..glint-*.heic-XXXXXX` 也得删掉（去掉这一步的清理，这里会剩下一个）。建一个 1 MB 的磁盘映像，填到只剩
+# 100 KB：比源（噪声 JPEG，约 280 KB）小，也比产物小，一定写不完。-j 1 让结果确定：并发时别的临时文件
+# 可能刚好删掉，剩余空间一时又够了，那一张仍报「HEIC 编码失败」。
+F="$WORK/磁盘满"
+mkdir -p "$F"
+make_sample ./Tests/fixture --noise "$F/噪声.jpg"
+if hdiutil create -size 1m -fs HFS+ -volname GlintFull "$F/满.dmg" -quiet \
+    && hdiutil attach "$F/满.dmg" -mountpoint "$F/卷" -nobrowse -quiet; then
+    DISK_MNT="$F/卷"
+    avail=$(df -k "$F/卷" | awk 'NR==2 {print $4}')
+    dd if=/dev/zero of="$F/卷/占位" bs=1024 count=$((avail - 100)) 2>/dev/null
+    out=$("$BIN" -j 1 -o "$F/卷" "$F/噪声.jpg" 2>&1); st=$?
+    check "磁盘满：退出码" "$st" 1
+    grep -qF "失败 噪声.jpg: 磁盘空间不够：输出目录所在的卷只剩 " <<< "$out" \
+        && pass "磁盘满：说磁盘空间不够" \
+        || { fail "磁盘满：没说磁盘空间不够"; sed 's/^/     /' <<< "$out"; }
+    check "磁盘满：输出目录里没有剩下写了一半的文件" "$(ls -A "$F/卷" | grep -c 'glint-')" "0"
+    hdiutil detach "$F/卷" -quiet && DISK_MNT=""
+else
+    # 条数和上面一样，免得断言条数的守卫再报一条「跑少了」。
+    for what in 退出码 说磁盘空间不够 没有剩下写了一半的文件; do fail "磁盘满：建不出或挂不上磁盘映像（$what）"; done
+fi
 
 round "6. 不合规范的 UserComment（无字符集前缀的裸 UTF-8）"
 # 很多安卓机型这么写，ImageIO 认不出来会整条丢掉，工具需要自己解析补回。
