@@ -3838,7 +3838,7 @@ if let src = CGImageSourceCreateWithURL(qcPhotoJPEG as CFURL, nil),
     // 产物按条带解（上下多带几行）与整幅解码逐字节相同，所以量出的数也相同。
     let qcWhole = qualityReading(source: src, product: qcPhotoHEIC, stripRows: 1104)
     check(qcWhole.measurement != nil, "前提：整幅解码量出了数（\(qcWhole)）")
-    for rows in [16, 512] {
+    for rows in [16, 512, qualityStripRows] {
         check("按条带解产物（每条 \(rows) 行）与整幅解码量出的数相同", qualityReading(source: src, product: qcPhotoHEIC, stripRows: rows), qcWhole)
     }
     check("源与自己比：PSNR 无穷大、SSIM 1", qualityReading(source: src, product: qcPhotoJPEG),
@@ -3851,7 +3851,159 @@ if let src = CGImageSourceCreateWithURL(qcPhotoJPEG as CFURL, nil),
     try? Data([0, 1, 2, 3]).write(to: qcGarbage)
     check("产物不是图：量不了", qualityReading(source: src, product: qcGarbage), .undecodable("解不出产物的像素"))
 } else {
-    for _ in 0..<7 { fail("编不出 HEIC 产物，从文件量的那几条没法测") }
+    for _ in 0..<8 { fail("编不出 HEIC 产物，从文件量的那几条没法测") }
+}
+
+print("画质核对：源图画进复用的内存")
+/// 不经缓存地取第 0 张：每次都重新解码，两次取到的像素互不沾边。
+func freshImage(_ url: URL) -> CGImage? {
+    CGImageSourceCreateWithURL(url as CFURL, nil)
+        .flatMap { CGImageSourceCreateImageAtIndex($0, 0, [kCGImageSourceShouldCache: false] as CFDictionary) }
+}
+/// 一幅图画进新开的 RGBX 上下文（色彩空间沿用图自己的，.copy、不插值），逐行紧排的字节。不经 drawnPixels。
+func contextBytes(_ image: CGImage) -> [UInt8]? {
+    var out = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    let drew: Bool = out.withUnsafeMutableBytes { raw in
+        guard let space = image.colorSpace,
+              let ctx = CGContext(data: raw.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
+                                  bytesPerRow: image.width * 4, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+        ctx.setBlendMode(.copy)
+        ctx.interpolationQuality = .none
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return true
+    }
+    return drew ? out : nil
+}
+/// 图的 dataProvider 解出的字节（逐行紧排）。只收 8 位 RGBX，别的布局是 nil。
+func providerBytes(_ image: CGImage) -> [UInt8]? {
+    guard image.bitsPerPixel == 32, image.alphaInfo == .noneSkipLast, image.byteOrderInfo == .orderDefault,
+          let data = image.dataProvider?.data, let base = CFDataGetBytePtr(data) else { return nil }
+    var out = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    for y in 0..<image.height {
+        for i in 0..<(image.width * 4) { out[y * image.width * 4 + i] = base[y * image.bytesPerRow + i] }
+    }
+    return out
+}
+func measurePacked(_ a: [UInt8], _ b: [UInt8], _ width: Int, _ height: Int) -> QualityReading {
+    .measured(measure(a, b, width, height))
+}
+// 宽 330：每行 1320 字节，drawnPixels 补到 1344；行尾补齐处和缓冲以外都不该被写。
+let qcOddJPEG = qcQualityRoot.appendingPathComponent("宽330.jpg")
+check(writeImage(rgbx(330, 250, photoLike), 330, 250, to: qcOddJPEG, type: "public.jpeg"), "前提：写出了宽 330 的 JPEG")
+if let oddImage = freshImage(qcOddJPEG), let oddWant = contextBytes(oddImage), let oddDraw = freshImage(qcOddJPEG) {
+    let rowBytes = drawnRowBytes(330), body = rowBytes * 250, tail = 4096
+    check("每行补到 64 的倍数", rowBytes, 1344)
+    let memory = UnsafeMutableRawPointer.allocate(byteCount: body + tail, alignment: 64)
+    memset(memory, 0xA5, body + tail)
+    let bytes = memory.assumingMemoryBound(to: UInt8.self)
+    if let px = drawnPixels(oddDraw, colorSpace: oddDraw.colorSpace!, into: memory) {
+        var got: [UInt8] = []
+        for y in 0..<250 { got += UnsafeBufferPointer(start: px.base + y * px.rowBytes, count: 330 * 4) }
+        check(got == oddWant, "drawnPixels 画出的像素与另开一个上下文画的逐字节相同")
+        var touched = 0
+        for y in 0..<250 { for i in (330 * 4)..<rowBytes where bytes[y * rowBytes + i] != 0xA5 { touched += 1 } }
+        for i in body..<(body + tail) where bytes[i] != 0xA5 { touched += 1 }
+        check("行尾补齐处与缓冲以外一个字节都没写", touched, 0)
+    } else {
+        fail("drawnPixels 画不出来"); fail("drawnPixels：行尾与缓冲以外")
+    }
+    memory.deallocate()
+} else {
+    for _ in 0..<3 { fail("取不出宽 330 的图，drawnPixels 那几条没法测") }
+}
+// 源图走的是「画进去」那条路：量出的数等于「源画进上下文、产物整幅取 dataProvider」算出来的。
+// 源改回取 dataProvider 时数就不同了（前提那条确认这张图上两条路的像素确实有差）。两条路只在图够大
+// （约一百万像素以上，ImageIO 改用硬件解 JPEG）时才有差，所以这里用 1200×900。
+let qcLargeJPEG = qcQualityRoot.appendingPathComponent("1200x900.jpg"), qcLargeHEIC = qcQualityRoot.appendingPathComponent("1200x900.heic")
+check(writeImage(rgbx(1200, 900) { x, y in photoLike(x * 640 / 1200, y * 1100 / 900) }, 1200, 900, to: qcLargeJPEG, type: "public.jpeg"),
+      "前提：写出了 1200×900 的源 JPEG")
+if let src = CGImageSourceCreateWithURL(qcLargeJPEG as CFURL, nil),
+   encodeHEIF(src, properties: [kCGImageDestinationLossyCompressionQuality: 0.6], xmp: nil, to: qcLargeHEIC),
+   let drawnSource = freshImage(qcLargeJPEG).flatMap(contextBytes),
+   let providedSource = freshImage(qcLargeJPEG).flatMap(providerBytes),
+   let product = freshImage(qcLargeHEIC).flatMap(providerBytes) {
+    let viaDrawing = measurePacked(drawnSource, product, 1200, 900)
+    check(drawnSource != providedSource && viaDrawing != measurePacked(providedSource, product, 1200, 900),
+          "前提：这张 JPEG 画进去与取 dataProvider 解出的像素不同，量出的数也不同")
+    check("源图画进复用的内存：量出的数与「源画进上下文」算的相同", qualityReading(source: src, product: qcLargeHEIC), viaDrawing)
+} else {
+    for _ in 0..<2 { fail("编不出产物或取不出像素，源图解法那两条没法测") }
+}
+
+print("画质核对：核对用的缓冲")
+let qcMiB = 1 << 20
+let qcPool = QualityBuffers(slots: 2)
+let qcSlotA = qcPool.acquire(), qcSlotB = qcPool.acquire()
+if let a = qcSlotA.memory(qcMiB), let b = qcSlotB.memory(qcMiB) {
+    let pa = UInt(bitPattern: a), pb = UInt(bitPattern: b)
+    check(pa + UInt(qcMiB) <= pb || pb + UInt(qcMiB) <= pa, "同时拿到的两个槽，内存不重叠")
+} else {
+    fail("两个槽要不到内存")
+}
+check("占着的字节数是两块之和", qcPool.retainedBytes, 2 * qcMiB)
+let qcThird = DispatchSemaphore(value: 0)
+DispatchQueue.global().async {
+    let slot = qcPool.acquire()
+    qcThird.signal()
+    qcPool.release(slot)
+}
+check("槽都占着：acquire 等着", qcThird.wait(timeout: .now() + 0.3), .timedOut)
+qcPool.release(qcSlotA)
+check("放回一个槽：等着的那个拿到了", qcThird.wait(timeout: .now() + 10), .success)
+check("没有批量在跑：槽放回就把内存还掉", qcPool.retainedBytes, qcMiB)
+qcPool.release(qcSlotB)
+check("没有批量在跑：全部放回后一个字节都不占", qcPool.retainedBytes, 0)
+
+let qcOne = QualityBuffers(slots: 1)
+qcOne.beginBatch()
+var qcSlot = qcOne.acquire()
+let qcFirstBlock = qcSlot.memory(qcMiB)
+qcOne.release(qcSlot)
+check("批量里放回的槽留着内存", qcOne.retainedBytes, qcMiB)
+qcSlot = qcOne.acquire()
+check(qcFirstBlock != nil && qcSlot.memory(qcMiB / 2) == qcFirstBlock, "批量里再拿到的槽，要的不比原来多：用原来那块")
+_ = qcSlot.memory(2 * qcMiB)
+check("要得比原来多：换一块大的，旧的还掉", qcOne.retainedBytes, 2 * qcMiB)
+qcOne.release(qcSlot)
+qcOne.endBatch()
+check("一批结束：一个字节都不占", qcOne.retainedBytes, 0)
+qcOne.beginBatch(); qcOne.beginBatch()
+qcSlot = qcOne.acquire(); _ = qcSlot.memory(qcMiB); qcOne.release(qcSlot)
+qcOne.endBatch()
+check("两批同时在跑、先结束一批：内存留给另一批", qcOne.retainedBytes, qcMiB)
+qcOne.endBatch()
+check("最后一批结束：还掉", qcOne.retainedBytes, 0)
+qcOne.beginBatch()
+qcSlot = qcOne.acquire(); _ = qcSlot.memory(qcMiB)
+qcOne.endBatch()
+check("一批结束时还在用的槽：先不动", qcOne.retainedBytes, qcMiB)
+qcOne.release(qcSlot)
+check("……放回时还掉", qcOne.retainedBytes, 0)
+
+// 几个核对同时跑、图各不相同：每个量出的数都与单独量时相同（共用一块内存就会互相画花）。
+let qcOtherJPEG = qcQualityRoot.appendingPathComponent("另一张.jpg"), qcOtherHEIC = qcQualityRoot.appendingPathComponent("另一张.heic")
+check(writeImage(rgbx(640, 1100) { x, y in let (r, g, b) = photoLike(639 - x, 1099 - y); return (b, r, g) }, 640, 1100,
+                 to: qcOtherJPEG, type: "public.jpeg"), "前提：写出了另一张源 JPEG")
+if let one = CGImageSourceCreateWithURL(qcPhotoJPEG as CFURL, nil),
+   let other = CGImageSourceCreateWithURL(qcOtherJPEG as CFURL, nil),
+   encodeHEIF(other, properties: [kCGImageDestinationLossyCompressionQuality: 0.4], xmp: nil, to: qcOtherHEIC) {
+    let pairs = [(qcPhotoJPEG, qcPhotoHEIC), (qcOtherJPEG, qcOtherHEIC)]
+    let alone = [one, other].enumerated().map { qualityReading(source: $0.element, product: pairs[$0.offset].1) }
+    check(alone[0] != alone[1], "前提：两张单独量出的数不同（\(alone[0]) / \(alone[1])）")
+    let qcConcurrentPool = QualityBuffers(slots: 4)
+    var together = [QualityReading?](repeating: nil, count: 16)
+    let lock = NSLock()
+    DispatchQueue.concurrentPerform(iterations: together.count) { i in
+        let r = CGImageSourceCreateWithURL(pairs[i % 2].0 as CFURL, nil).map {
+            qualityReading(source: $0, product: pairs[i % 2].1, stripRows: 64, buffers: qcConcurrentPool)
+        }
+        lock.lock(); together[i] = r; lock.unlock()
+    }
+    check(together.enumerated().allSatisfy { $0.element == alone[$0.offset % 2] }, "几个核对同时跑：每个都与单独量时相同")
+    check("同时跑完、没有批量：一个字节都不占", qcConcurrentPool.retainedBytes, 0)
+} else {
+    for _ in 0..<3 { fail("编不出另一张的 HEIC，同时核对那几条没法测") }
 }
 
 print("画质核对：转换流程（注入编码步骤）")
@@ -4008,6 +4160,25 @@ qcTally.record(qcDropped.result)
 qcTally.record(qcGood.result)
 check("批量汇总单列画质不达标的个数，不算失败", [qcTally.qualityDropped, qcTally.failed, qcTally.converted], [1, 0, 1])
 check(qcTally.summary(unit: "个").contains("1 个画质不达标，保留原 JPEG"), "汇总里的那一句（\(qcTally.summary(unit: "个"))）")
+
+// 一批转完，核对用的缓冲还给系统；批量进行中留着（每转完一张时看）。
+let qcBatchFolder = qcQualityRoot.appendingPathComponent("一批")
+try? FileManager.default.createDirectory(at: qcBatchFolder, withIntermediateDirectories: true)
+let qcBatchJobs: [Job] = (1...4).map { i in
+    let url = qcBatchFolder.appendingPathComponent("第\(i)张.jpg")
+    try? FileManager.default.copyItem(at: qcFlowSource, to: url)
+    return Job(input: url, relative: url.lastPathComponent, root: nil)
+}
+check("前提：批量开始前核对用的缓冲一个字节都不占", QualityBuffers.shared.retainedBytes, 0)
+var qcBatchSeen: [(passed: Bool, retained: Int)] = []
+runConversions(qcBatchJobs, opts: ConversionOptions(), plan: .sameFolder) { _, result in
+    var passed = false
+    if case .converted(let r) = result, case .passed? = r.quality { passed = true }
+    qcBatchSeen.append((passed, QualityBuffers.shared.retainedBytes))
+}
+check(qcBatchSeen.count == 4 && qcBatchSeen.allSatisfy(\.passed), "前提：一批 4 张都转成、核对达标")
+check(qcBatchSeen.allSatisfy { $0.retained > 0 }, "批量进行中：核对用的缓冲留着（\(qcBatchSeen.map(\.retained))）")
+check("一批转完：核对用的缓冲全部还掉", QualityBuffers.shared.retainedBytes, 0)
 try? FileManager.default.removeItem(at: qcQualityRoot)
 
 print("命令行参数解析")

@@ -20,7 +20,7 @@ ROUNDS=0
 # 加断言时要同步改这几个数。用精确值而不是下限：下限挡不住「加了几条、
 # 同时静默少了几条」。
 EXPECTED_ASSERTIONS=730
-EXPECTED_UNIT=1355
+EXPECTED_UNIT=1385
 EXPECTED_GUI=363
 
 # 没跑到结尾就退出时，结论不可信，必须出声——哪怕 FAILED 是 0。

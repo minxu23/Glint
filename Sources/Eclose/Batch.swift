@@ -316,6 +316,9 @@ public func runConversions(_ jobs: [Job], opts: ConversionOptions, plan: OutputP
     let group = DispatchGroup()
     let semaphore = DispatchSemaphore(value: concurrency)
     let callbackLock = NSLock()
+    // 核对用的缓冲在这一批里复用，整批结束时还给系统（见 QualityBuffers）。
+    QualityBuffers.shared.beginBatch()
+    defer { QualityBuffers.shared.endBatch() }
 
     for (job, dest) in pairs {
         if cancellation?.isCancelled == true { break }

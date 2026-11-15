@@ -398,6 +398,106 @@ func blockSSIM(n: Int, sa: Double, sb: Double, centeredA: Double, centeredB: Dou
     return ((2 * ma * mb + c1) * (2 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
 }
 
+// MARK: - 核对用的缓冲
+
+/// 核对时画源图用的内存，按「槽」复用。
+///
+/// 解一张 2400 万像素的图要近百 MB，每张都向系统新要一块，CPU 就大把花在缺页清零和归还上（系统态）。
+/// 所以每个同时进行的核对占一个槽，槽里的内存在一批里反复用，只增不减到这一批用到的最大尺寸。
+/// 槽数就是同时做核对的张数上限（`shared` 是核数的三分之一，至少 2）：`acquire` 在没有空槽时等。
+///
+/// 内存什么时候还给系统：没有批量在跑时，槽一放回（`release`）就还；有批量在跑时（`beginBatch` 与
+/// `endBatch` 之间，runConversions 包着整批），放回的槽留着内存给下一张用，最后一批结束时（`endBatch`
+/// 把在跑的批数减到 0）全部还掉。界面是常驻进程，转完一批不会一直占着这几百 MB。内存直接向系统要
+/// （mmap），还的时候 munmap，一定回到系统，不留在 malloc 的缓存里。
+///
+/// 线程安全：空槽表、在跑的批数、占着的总字节数都只在 `lock` 里读写；一个槽从 `acquire` 到 `release`
+/// 只归一个核对，槽里的内存只由它读写，不用锁。单测「核对用的缓冲」守着：同时拿到的两个槽内存不重叠、
+/// 槽用完时 acquire 等着、一批结束后一个字节都不占。
+final class QualityBuffers {
+    /// 一个槽。
+    final class Slot {
+        fileprivate unowned let pool: QualityBuffers
+        fileprivate var base: UnsafeMutableRawPointer?
+        fileprivate var bytes = 0
+        fileprivate init(pool: QualityBuffers) { self.pool = pool }
+
+        /// 至少 `bytes` 字节的内存：够就原样用，不够就还掉旧的、要一块新的。要不到是 nil。
+        func memory(_ bytes: Int) -> UnsafeMutableRawPointer? {
+            if let base, self.bytes >= bytes { return base }
+            pool.lock.lock()
+            pool.unmapLocked(self)
+            pool.lock.unlock()
+            guard bytes > 0 else { return nil }
+            let p = mmap(nil, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0)
+            guard let p, p != MAP_FAILED else { return nil }
+            pool.lock.lock()
+            (base, self.bytes) = (p, bytes)
+            pool.retained += bytes
+            pool.lock.unlock()
+            return p
+        }
+    }
+
+    /// 核数的三分之一，至少 2。整幅解一张 JPEG 时解码器自己要多占约一倍于像素的内存，批量按核数并发时
+    /// 全都同时解就是几个 GB；限住它，峰值内存减半，墙钟不变甚至略快（解码、编码共用硬件，挤在一起反而
+    /// 互相等）。量法与数见 README「转完核对画质」。
+    static let shared = QualityBuffers(slots: max(2, ProcessInfo.processInfo.activeProcessorCount / 3))
+
+    fileprivate let lock = NSCondition()
+    private var idle: [Slot] = []
+    private var batches = 0
+    fileprivate var retained = 0
+
+    init(slots: Int) {
+        precondition(slots > 0, "槽数至少 1")
+        idle = (0..<slots).map { _ in Slot(pool: self) }
+    }
+
+    /// 拿一个空槽；没有就等到有槽放回。
+    func acquire() -> Slot {
+        lock.lock(); defer { lock.unlock() }
+        while idle.isEmpty { lock.wait() }
+        return idle.removeLast()
+    }
+
+    /// 放回槽。没有批量在跑时，槽里的内存当场还给系统。
+    func release(_ slot: Slot) {
+        lock.lock(); defer { lock.unlock() }
+        if batches == 0 { unmapLocked(slot) }
+        idle.append(slot)
+        lock.signal()
+    }
+
+    /// 一批开始：这一批里放回的槽留着内存。可以有几批同时在跑，按次数与 endBatch 配对。
+    func beginBatch() {
+        lock.lock(); defer { lock.unlock() }
+        batches += 1
+    }
+
+    /// 一批结束：最后一批结束时，空槽里的内存全部还给系统（还在用的槽放回时自己还）。
+    func endBatch() {
+        lock.lock(); defer { lock.unlock() }
+        precondition(batches > 0, "endBatch 多于 beginBatch")
+        batches -= 1
+        if batches == 0 { idle.forEach(unmapLocked) }
+    }
+
+    /// 所有槽（含正在用的）一共占着的字节数。
+    var retainedBytes: Int {
+        lock.lock(); defer { lock.unlock() }
+        return retained
+    }
+
+    /// 在 lock 里调：还掉一个槽的内存。
+    fileprivate func unmapLocked(_ slot: Slot) {
+        guard let base = slot.base else { return }
+        munmap(base, slot.bytes)
+        retained -= slot.bytes
+        (slot.base, slot.bytes) = (nil, 0)
+    }
+}
+
 // MARK: - 从文件量
 
 /// 解码好的一段像素，连同持有那块内存的对象。
@@ -442,35 +542,61 @@ private func decodedPixels(_ image: CGImage, colorSpace: CGColorSpace) -> Decode
     return DecodedPixels(pixels: pixels, owner: nil, release: { buffer.free() })
 }
 
+/// drawnPixels 的每行字节数：4 × 宽，补到 64 的倍数。
+func drawnRowBytes(_ width: Int) -> Int { (width * 4 + 63) / 64 * 64 }
+
+/// 把图像画进 `memory`（调用方给的内存，至少 drawnRowBytes(宽) × 高 字节）：8 位 RGBX、以 `colorSpace`
+/// 解释、`.copy` 混合、不插值，不应用方向。画不了（位图上下文建不起来）是 nil。
+///
+/// 和 `dataProvider` 解出的像素不是逐字节相同：约一百万像素以上的 JPEG（ImageIO 改用硬件解码）两条路
+/// 的颜色转换不同，实测每一行都有差，相机样的 4:2:2 最多 1 个色阶、ImageIO 编的 4:2:0 最多 4 个；量出的
+/// PSNR 因此低 0.6–1.3 dB，局部 SSIM 差不到 0.001，都偏向把画质说得略差。小图两条路逐字节相同。
+func drawnPixels(_ image: CGImage, colorSpace: CGColorSpace, into memory: UnsafeMutableRawPointer) -> RGBPixels? {
+    let w = image.width, h = image.height, rowBytes = drawnRowBytes(w)
+    guard let ctx = CGContext(data: memory, width: w, height: h, bitsPerComponent: 8, bytesPerRow: rowBytes,
+                              space: colorSpace, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    ctx.setBlendMode(.copy)
+    ctx.interpolationQuality = .none
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return RGBPixels(base: UnsafePointer(memory.assumingMemoryBound(to: UInt8.self)), width: w, height: h,
+                     rowBytes: rowBytes)
+}
+
 /// 不让 ImageIO 缓存解码结果：这边用完那块像素就丢掉。
 private let uncachedDecode = [kCGImageSourceShouldCache: false, kCGImageSourceShouldCacheImmediately: false] as CFDictionary
 
 /// 产物一次解的行数（16 的倍数）。ImageIO 解从 HEIC 里裁出的一段时只解那一段，产物于是同一时刻只有
-/// 一条带的像素在内存里（6000 宽的图约 12 MB；整幅解一张 2400 万像素的 HEIC，解码器要占三百 MB 上下）。
-let qualityStripRows = 512
+/// 一条带的像素在内存里。
+///
+/// 为什么是 768：每解一段，ImageIO 都要另开、另关一次硬件的像素转换，解码也是整块整块（HEIC 的图块
+/// 512 行）地解，上下余量又多碰一两排图块，所以条带越矮系统态越高；条带越高，解码器同时占的内存越多。
+/// 在 18 核的 M5 Pro 上按默认并发量过（两组夹具 18 张 6000×4000、36 张 4032×3024，相机样那种 4:2:2 和
+/// ImageIO 编的 4:2:0 各一套）：512 行系统态最高；1024 行在 4032×3024 那组上峰值内存比改之前高一成上下；
+/// 2048 行、整幅解（或整幅画进复用的缓冲）系统态再低一些，峰值内存高出一到四成。768 行是峰值内存与
+/// 改之前持平（差在几次量的起伏以内）的几种里系统态最低的。画进复用的缓冲对产物没用：
+/// ImageIO 解 HEIC 照样先解进自己的一块再拷过来，系统态反而略高。数见 README「转完核对画质」。
+let qualityStripRows = 768
 
 /// 裁产物时上下各多带的行数。裁出的一段在边上那一两行的色度插值缺了邻行，与整幅解码差 1 个色阶；
 /// 多带几行、只用中间那段，解出的像素就与整幅解码逐字节相同（单测「按条带解产物」守着）。
 let qualityStripMargin = 16
-
-/// 同时在做核对的张数上限：核数的三分之一，至少 2。整幅解一张 JPEG 时解码器自己要多占约一倍于
-/// 像素的内存（2400 万像素约 200 MB），批量按核数并发时全都同时解就是几个 GB；限住它，峰值内存减半，
-/// 墙钟不变甚至略快（解码、编码共用硬件，挤在一起反而互相等）。量法与数见 README「转完核对画质」。
-let qualityCheckSlots = DispatchSemaphore(value: max(2, ProcessInfo.processInfo.activeProcessorCount / 3))
 
 /// 核对 `product`（刚写好的 HEIC）相对 `source`（编码用的那个图像源）的画质。
 ///
 /// 两边各取第 0 张真解码：源图的色彩空间是 RGB 的就都以它解释，否则 sRGB；不应用方向（两边方向标签
 /// 相同）。宽高不同、有一边解不出，都量不了。
 ///
-/// 源整幅解一次：从 JPEG 里裁一段来解走的是另一套解码，像素和整幅解码（编码器读到的就是它）差出
-/// 几个色阶（实测到 7），会把两套解码器之间的差算到编码器头上。产物按 `stripRows` 一条一条地解、算完就丢。
-/// 同一时刻在内存里的是源的一幅和产物的一条；同时做核对的张数由 qualityCheckSlots 限住。
-/// `stripRows` 只供单测换条带高度。
-func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualityStripRows) -> QualityReading {
+/// 源整幅解一次，画进槽里复用的内存（drawnPixels）：从 JPEG 里裁一段来解走的是另一套解码，像素和
+/// 整幅解码差出几个色阶（实测到 7），会把两套解码器之间的差算到编码器头上。画进去而不取
+/// `dataProvider`：相机 JPEG（4:2:2）取 `dataProvider` 要另做一遍颜色转换、每张新分配整幅的内存，系统态
+/// 是画进去的四倍多；ImageIO 编的 4:2:0 反过来是画进去略贵（单线程每张多十毫秒上下的系统态，见 README）。
+/// 产物按 `stripRows` 一条一条地解、算完就丢。同时做核对的张数由 `buffers` 的槽数限住。
+/// `stripRows`、`buffers` 只供单测替换。
+func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualityStripRows,
+                    buffers: QualityBuffers = .shared) -> QualityReading {
     precondition(stripRows > 0 && stripRows % ssimBlockSide == 0, "条带行数要是 16 的倍数")
-    qualityCheckSlots.wait()
-    defer { qualityCheckSlots.signal() }
+    let slot = buffers.acquire()
+    defer { buffers.release(slot) }
     guard let sourceImage = CGImageSourceCreateImageAtIndex(source, 0, uncachedDecode) else {
         return .undecodable("解不出源图的像素")
     }
@@ -484,10 +610,10 @@ func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualit
     let space = sourceImage.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
         ?? CGColorSpace(name: CGColorSpace.sRGB)!
     let w = sourceSize.width, h = sourceSize.height
-    guard let a = decodedPixels(sourceImage, colorSpace: space), a.pixels.width == w, a.pixels.height == h else {
+    guard let memory = slot.memory(drawnRowBytes(w) * h),
+          let a = drawnPixels(sourceImage, colorSpace: space, into: memory) else {
         return .undecodable("解不出源图的像素")
     }
-    defer { a.release() }
     let tally = QualityTally(width: w, height: h)
     // 整张图当一块时只能一次喂完（这时图很窄或很矮，整幅也不大）。
     let step = w < ssimBlockSide || h < ssimBlockSide ? h : stripRows
@@ -501,7 +627,7 @@ func qualityReading(source: CGImageSource, product: URL, stripRows: Int = qualit
             return .undecodable("解不出产物的像素")
         }
         defer { b.release() }
-        withExtendedLifetime((a.owner, b.owner)) { tally.add(a.pixels.rows(y, rows), b.pixels.rows(y - top, rows)) }
+        withExtendedLifetime(b.owner) { tally.add(a.rows(y, rows), b.pixels.rows(y - top, rows)) }
         y += rows
     }
     return .measured(tally.result())
