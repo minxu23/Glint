@@ -909,6 +909,124 @@ expectTrailer(tinyJPEG(8, 8) + [0xFF] + weChat, carried: [], ["丢失 EOI 之后
 expectTrailer(tinyJPEG(8, 8) + Array(weChat.dropLast()), carried: [], ["丢失 EOI 之后的 7 字节"], "少 1 字节：照报")
 expectTrailer(tinyJPEG(8, 8) + Array("tyg-".utf8) + [0, 0, 0, 0], carried: [], ["丢失 EOI 之后的 8 字节"], "标识差一个字母：照报")
 
+print("JPEG 段结构：memchr 扫描与逐字节扫描逐字段相同")
+// JPEGLayout.init 在熵编码数据里用 memchr 找 0xFF（markerAfterEntropyData）。对照的是它原来的逐字节
+// 写法，原样抄在这里：每个样本两边的段（标记、内容范围）和 EOI 位置都要相同。
+func referenceLayout(_ bytes: [UInt8]) -> (segments: [JPEGSegment], eoi: Int?)? {
+    guard bytes.count >= 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else { return nil }
+    var segments: [JPEGSegment] = []
+    var eoi: Int?
+    var i = 2
+    scan: while i + 1 < bytes.count {
+        guard bytes[i] == 0xFF else { break }
+        var m = i + 1
+        while m < bytes.count, bytes[m] == 0xFF { m += 1 }
+        guard m < bytes.count else { break }
+        let marker = bytes[m]
+        if marker == 0xD9 { eoi = m - 1; break }
+        if marker == 0x01 || (0xD0...0xD7).contains(marker) { i = m + 1; continue }
+        guard m + 2 < bytes.count else { break }
+        let length = Int(bytes[m + 1]) << 8 | Int(bytes[m + 2])
+        let end = m + 1 + length
+        guard length >= 2, end <= bytes.count else { break }
+        segments.append(JPEGSegment(marker: marker, payload: (m + 3)..<end))
+        i = end
+        guard marker == 0xDA else { continue }
+        var j = end
+        while j + 1 < bytes.count {
+            if bytes[j] != 0xFF { j += 1; continue }
+            let next = bytes[j + 1]
+            if next == 0x00 || (0xD0...0xD7).contains(next) { j += 2; continue }
+            if next == 0xFF { j += 1; continue }
+            i = j
+            continue scan
+        }
+        break
+    }
+    return (segments, eoi)
+}
+/// 两种扫描的结果写成一行字，好比较、好在失败时看。
+func layoutText(_ layout: (segments: [JPEGSegment], eoi: Int?)?) -> String {
+    guard let layout else { return "不是 JPEG" }
+    let segments = layout.segments.map { String(format: "%02X", $0.marker) + "@\($0.payload.lowerBound)..<\($0.payload.upperBound)" }
+    return segments.joined(separator: " ") + " EOI@" + (layout.eoi.map(String.init) ?? "无")
+}
+func scanned(_ bytes: [UInt8]) -> String { layoutText(JPEGLayout(bytes).map { ($0.segments, $0.eoi) }) }
+func referenceScanned(_ bytes: [UInt8]) -> String { layoutText(referenceLayout(bytes)) }
+let sos = jpegSegment(0xDA, [1, 1, 0, 0, 0x3F, 0])   // 内容 6 字节，熵编码数据从文件第 12 字节起
+/// SOI + SOS + `data` + `tail`（默认 EOI）。
+func scanJPEG(_ data: [UInt8], tail: [UInt8] = [0xFF, 0xD9]) -> [UInt8] { [0xFF, 0xD8] + sos + data + tail }
+// 每条都写出期望的结果，同时与逐字节扫描比。
+func expectScan(_ bytes: [UInt8], _ want: String, _ why: String) {
+    checkRule(bytes.map { String(format: "%02X", $0) }.joined(separator: " "), scanned(bytes), want, why)
+    checkRule(bytes.map { String(format: "%02X", $0) }.joined(separator: " "), scanned(bytes), referenceScanned(bytes),
+              why + "（与逐字节扫描相同）")
+}
+expectScan(scanJPEG([0x12, 0xFF, 0x00, 0x34, 0xFF, 0x00]), "DA@6..<12 EOI@18", "FF 00 是转义，不是标记")
+expectScan(scanJPEG([0x12, 0xFF, 0xD0, 0x34, 0xFF, 0xD3, 0x56, 0xFF, 0xD7, 0x78]), "DA@6..<12 EOI@22",
+           "FF D0、D3、D7 是复位标记，跳过")
+expectScan(scanJPEG([0x12, 0xFF, 0xD8, 0x34]), "DA@6..<12 EOI@无", "FF D8 不是复位标记：当作下一个标记，读不通就停")
+expectScan(scanJPEG([0x12], tail: [0xFF, 0xFF, 0xFF, 0xD9]), "DA@6..<12 EOI@15", "EOI 前的 FF FF 是填充，EOI 落在最后一个 FF 上")
+expectScan(scanJPEG([0x12, 0xFF, 0xFF, 0x00, 0x34]), "DA@6..<12 EOI@17", "FF FF 00：第二个 FF 和 00 是一个转义")
+expectScan(scanJPEG([0x12, 0x34], tail: []) + jpegSegment(0xC4, [0, 1, 2]) + sos + [0x56, 0xFF, 0x00] + [0xFF, 0xD9],
+           "DA@6..<12 C4@18..<21 DA@25..<31 EOI@34", "渐进式：扫描之间的 DHT 和第二个 SOS 都认得出")
+expectScan(scanJPEG([0x12, 0x34], tail: [0xFF, 0xD9, 0xFF, 0xD8, 0xFF, 0x00, 0xAB]), "DA@6..<12 EOI@14",
+           "EOI 之后的数据（含 FF D8）不再扫")
+expectScan(scanJPEG([0x12, 0x34], tail: [0xFF]), "DA@6..<12 EOI@无", "文件以一个 FF 结束：它后面没有字节，不算标记")
+expectScan(scanJPEG([0x12, 0x34], tail: []), "DA@6..<12 EOI@无", "截断在熵编码数据中间：没有 EOI")
+expectScan(scanJPEG([], tail: [0xFF, 0xD9]), "DA@6..<12 EOI@12", "熵编码数据是空的")
+let composite = scanJPEG([0x12, 0xFF, 0x00, 0xFF, 0xD1, 0x34]) + jpegSegment(0xC4, [0, 1]) + sos
+    + [0xFF, 0xFF, 0x00, 0x56] + [0xFF, 0xFF, 0xD9, 0x01, 0xFF, 0xD8]
+let compositeCuts = (0...composite.count).filter { scanned(Array(composite.prefix($0))) != referenceScanned(Array(composite.prefix($0))) }
+check("截断在每一个位置：两种扫描都相同（\(composite.count + 1) 种）", compositeCuts, [])
+// 随机样本：熵编码数据由单个字节（多放 FF、00、D0–D7、D9、C4）和几种整块（转义、复位标记、
+// 完整的 DHT 段、又一个 SOS）拼成，各种组合都碰得到。
+var scanSeed: UInt64 = 7
+func scanRandom(_ n: Int) -> Int {
+    scanSeed = scanSeed &* 6364136223846793005 &+ 1442695040888963407
+    return Int(scanSeed >> 33) % n
+}
+let scanAlphabet: [UInt8] = [0xFF, 0xFF, 0xFF, 0x00, 0xD0, 0xD5, 0xD7, 0xD8, 0xD9, 0xC4, 0xDA, 0x01, 0x12, 0x00, 0x02]
+let scanChunks: [[UInt8]] = [[0xFF, 0x00], [0xFF, 0xD3], [0xFF, 0xFF], [0xFF, 0xD9], jpegSegment(0xC4, [1, 2]), sos]
+var scanMismatches = 0, scanWithEOI = 0, scanWithMore = 0
+for _ in 0..<20000 {
+    let data = (0..<scanRandom(30)).flatMap { _ -> [UInt8] in
+        switch scanRandom(6) {
+        case 0: return [UInt8(scanRandom(256))]
+        case 1: return scanChunks[scanRandom(scanChunks.count)]
+        default: return [scanAlphabet[scanRandom(scanAlphabet.count)]]
+        }
+    }
+    let bytes = scanJPEG(data, tail: [])
+    let got = scanned(bytes)
+    if got != referenceScanned(bytes) { scanMismatches += 1 }
+    if !got.hasSuffix("EOI@无") { scanWithEOI += 1 }
+    if got.contains(" DA@") || got.contains(" C4@") { scanWithMore += 1 }
+}
+check("随机的 2 万份熵编码数据：两种扫描都相同", scanMismatches, 0)
+check(scanWithEOI > 1000 && scanWithMore > 1000, "前提：随机样本里有找到 EOI 的（\(scanWithEOI)）、扫描后还有段的（\(scanWithMore)）")
+// ImageIO 编的真 JPEG（带复位间隔），原样和随机改坏几个字节都比。
+let scanPhoto = NSMutableData()
+if let image = CGImage(width: 320, height: 240, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 320 * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: CGDataProvider(data: Data(rgbx(320, 240, photoLike)) as CFData)!,
+                       decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+   let out = CGImageDestinationCreateWithData(scanPhoto, "public.jpeg" as CFString, 1, nil) {
+    CGImageDestinationAddImage(out, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+    _ = CGImageDestinationFinalize(out)
+}
+let photoBytes = [UInt8](scanPhoto as Data)
+check(JPEGLayout(photoBytes)?.eoi == photoBytes.count - 2, "ImageIO 编的 JPEG：EOI 在最后两个字节")
+check("ImageIO 编的 JPEG：两种扫描相同", scanned(photoBytes), referenceScanned(photoBytes))
+var photoMismatches = 0
+for _ in 0..<300 {
+    var bad = photoBytes
+    for _ in 0...scanRandom(6) { bad[scanRandom(bad.count)] = [0xFF, 0x00, 0xD9, 0xD3, UInt8(scanRandom(256))][scanRandom(5)] }
+    if scanned(bad) != referenceScanned(bad) { photoMismatches += 1 }
+}
+check("ImageIO 编的 JPEG 随机改坏 300 份：两种扫描都相同", photoMismatches, 0)
+
 print("不报的段：FlashPix 扩展、只有保存质量的 Ducky 段，差一点就照报")
 /// 只有一个标记段的 JPEG。
 func oneSegmentJPEG(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] { [0xFF, 0xD8] + jpegSegment(marker, payload) + [0xFF, 0xD9] }

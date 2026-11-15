@@ -62,21 +62,34 @@ struct JPEGLayout {
             segments.append(JPEGSegment(marker: marker, payload: (m + 3)..<end))
             i = end
             guard marker == 0xDA else { continue }
-            // 熵编码数据：FF 00 是转义，FF D0–D7 是复位标记，FF FF 是填充；
-            // 别的 FF xx 是下一个标记段（渐进式 JPEG 在扫描之间插 DHT 等）或 EOI。
-            var j = end
-            while j + 1 < bytes.count {
-                if bytes[j] != 0xFF { j += 1; continue }
-                let next = bytes[j + 1]
-                if next == 0x00 || (0xD0...0xD7).contains(next) { j += 2; continue }
-                if next == 0xFF { j += 1; continue }
-                i = j
-                continue scan
-            }
-            break
+            guard let next = JPEGLayout.markerAfterEntropyData(bytes, from: end) else { break }
+            i = next
         }
         self.segments = segments
         self.eoi = eoi
+    }
+
+    /// 从 `start` 起是熵编码数据，找它后面的第一个标记：FF 00 是转义，FF D0–D7 是复位标记，
+    /// FF FF 是填充，都跳过；别的 FF xx（渐进式 JPEG 在扫描之间插的 DHT 等下一个标记段，或 EOI）
+    /// 的那个 FF 的位置就是结果。只认后面还跟着一个字节的 FF；到文件末尾都没有是 nil。
+    ///
+    /// 找 0xFF 用 memchr 一段一段地跳：熵编码数据占文件的绝大部分，逐字节看是整个解析里最慢的
+    /// 一步。结果与逐字节扫描相同（单测「JPEG 段结构：memchr 扫描与逐字节扫描逐字段相同」对照）。
+    static func markerAfterEntropyData(_ bytes: [UInt8], from start: Int) -> Int? {
+        bytes.withUnsafeBufferPointer { buf -> Int? in
+            guard let base = buf.baseAddress else { return nil }
+            var j = start
+            while j + 1 < buf.count {
+                // 只在 [j, count - 1) 里找：最后一个字节后面没有字节，是 FF 也不算。
+                guard let hit = memchr(base + j, 0xFF, buf.count - 1 - j) else { return nil }
+                j = UnsafeRawPointer(base).distance(to: UnsafeRawPointer(hit))
+                let next = buf[j + 1]
+                if next == 0x00 || (0xD0...0xD7).contains(next) { j += 2; continue }
+                if next == 0xFF { j += 1; continue }
+                return j
+            }
+            return nil
+        }
     }
 }
 
