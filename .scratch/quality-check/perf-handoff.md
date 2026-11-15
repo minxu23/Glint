@@ -1,6 +1,6 @@
 # 交接稿：画质核对的系统态开销降下来
 
-Status: ready-for-agent
+Status: resolved
 
 工作规则沿用 [`../verify-hardening/round-12-handoff.md`](../verify-hardening/round-12-handoff.md) 第 0 节和根目录
 `HANDOVER.md` 的「质量原则」「隐私规则」「工作方式」；功能本身见同目录 [`handoff.md`](handoff.md) 和 README「转完核对画质」。
